@@ -100,6 +100,69 @@ export function applyConfigSnapshot(state: ConfigState, snapshot: ConfigSnapshot
     state.configForm = cloneConfigObject(snapshot.config ?? {});
     state.configFormOriginal = cloneConfigObject(snapshot.config ?? {});
     state.configRawOriginal = rawFromSnapshot;
+
+    const extended = state as unknown as {
+      modelsQuickProviderId?: string;
+      modelsQuickBaseUrl?: string;
+      modelsQuickApiKey?: string;
+      modelsQuickModelId?: string;
+    };
+    const cfgParsed = (snapshot as { parsed?: unknown }).parsed as unknown as {
+      models?: {
+        providers?: Record<
+          string,
+          {
+            baseUrl?: unknown;
+            apiKey?: unknown;
+            models?: Array<{ id?: unknown }>;
+          }
+        >;
+      };
+    };
+    const cfgResolved = snapshot.config as unknown as {
+      models?: {
+        providers?: Record<
+          string,
+          {
+            baseUrl?: unknown;
+            apiKey?: unknown;
+            models?: Array<{ id?: unknown }>;
+          }
+        >;
+      };
+    };
+
+    const providers =
+      cfgParsed?.models?.providers && typeof cfgParsed.models.providers === "object"
+        ? cfgParsed.models.providers
+        : cfgResolved?.models?.providers;
+    if (providers && typeof providers === "object" && !Array.isArray(providers)) {
+      const keys = Object.keys(providers);
+      const selectedIdRaw =
+        typeof extended.modelsQuickProviderId === "string" ? extended.modelsQuickProviderId : "";
+      const selectedId = selectedIdRaw.trim();
+      const providerId =
+        selectedId && Object.prototype.hasOwnProperty.call(providers, selectedId)
+          ? selectedId
+          : keys[0];
+
+      if (providerId) {
+        const provider = providers[providerId];
+
+        extended.modelsQuickProviderId = providerId;
+
+        if (typeof provider?.baseUrl === "string") {
+          extended.modelsQuickBaseUrl = provider.baseUrl;
+        }
+        if (typeof provider?.apiKey === "string") {
+          extended.modelsQuickApiKey = provider.apiKey;
+        }
+        const firstModelId = provider?.models?.[0]?.id;
+        if (typeof firstModelId === "string") {
+          extended.modelsQuickModelId = firstModelId;
+        }
+      }
+    }
   }
 }
 

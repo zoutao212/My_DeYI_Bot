@@ -30,6 +30,9 @@ function createState(): ConfigState {
     configFormOriginal: null,
     configFormDirty: false,
     configFormMode: "form",
+    configSearchQuery: "",
+    configActiveSection: null,
+    configActiveSubsection: null,
     lastError: null,
   };
 }
@@ -95,6 +98,53 @@ describe("applyConfigSnapshot", () => {
     // Original values should be preserved when dirty
     expect(state.configRawOriginal).toBe('{ "original": true }');
     expect(state.configFormOriginal).toEqual({ original: true });
+  });
+
+  it("hydrates models quick fields from config models.providers when clean", () => {
+    const state = createState() as unknown as ConfigState & {
+      modelsQuickProviderId: string;
+      modelsQuickBaseUrl: string;
+      modelsQuickApiKey: string;
+      modelsQuickModelId: string;
+    };
+
+    state.modelsQuickProviderId = "openai";
+    state.modelsQuickBaseUrl = "";
+    state.modelsQuickApiKey = "";
+    state.modelsQuickModelId = "";
+
+    applyConfigSnapshot(state, {
+      config: {
+        models: {
+          providers: {
+            vectorengine: {
+              baseUrl: "https://api.vectorengine.ai/v1",
+              apiKey: "sk-test",
+              models: [{ id: "gemini-3-flash-preview" }],
+            },
+          },
+        },
+      },
+      parsed: {
+        models: {
+          providers: {
+            vectorengine: {
+              baseUrl: "https://api.vectorengine.ai/v1",
+              apiKey: "sk-test",
+              models: [{ id: "gemini-3-flash-preview" }],
+            },
+          },
+        },
+      },
+      valid: true,
+      issues: [],
+      raw: "{}",
+    });
+
+    expect(state.modelsQuickProviderId).toBe("vectorengine");
+    expect(state.modelsQuickBaseUrl).toBe("https://api.vectorengine.ai/v1");
+    expect(state.modelsQuickApiKey).toBe("sk-test");
+    expect(state.modelsQuickModelId).toBe("gemini-3-flash-preview");
   });
 });
 
