@@ -6,6 +6,7 @@ import type { ThemeTransitionContext } from "./theme-transition";
 import type {
   AgentsListResult,
   ChannelsStatusSnapshot,
+  ConfigUiHints,
   ConfigSnapshot,
   CronJob,
   CronRunLogEntry,
@@ -22,6 +23,7 @@ import type {
 import type { ChatQueueItem, CronFormState } from "./ui-types";
 import type { EventLogEntry } from "./app-events";
 import type { SkillMessage } from "./controllers/skills";
+import type { CompactionStatus } from "./app-tool-stream";
 import type {
   ExecApprovalsFile,
   ExecApprovalsSnapshot,
@@ -52,10 +54,25 @@ export type AppViewState = {
   chatMessages: unknown[];
   chatToolMessages: unknown[];
   chatStream: string | null;
+  chatStreamStartedAt: number | null;
   chatRunId: string | null;
   chatAvatarUrl: string | null;
   chatThinkingLevel: string | null;
   chatQueue: ChatQueueItem[];
+  compactionStatus: CompactionStatus | null;
+  resetToolStream: () => void;
+  resetChatScroll: () => void;
+  handleChatScroll: (event: Event) => void;
+  handleSendChat: (message?: string, opts?: { restoreDraft?: boolean }) => Promise<void>;
+  handleAbortChat: () => Promise<void>;
+  removeQueuedMessage: (id: string) => void;
+  sidebarOpen: boolean;
+  sidebarContent: string | null;
+  sidebarError: string | null;
+  splitRatio: number;
+  handleOpenSidebar: (content: string) => void;
+  handleCloseSidebar: () => void;
+  handleSplitRatioChange: (ratio: number) => void;
   nodesLoading: boolean;
   nodes: Array<Record<string, unknown>>;
   devicesLoading: boolean;
@@ -80,13 +97,18 @@ export type AppViewState = {
   configSaving: boolean;
   configApplying: boolean;
   updateRunning: boolean;
+  applySessionKey: string;
   configSnapshot: ConfigSnapshot | null;
   configSchema: unknown | null;
+  configSchemaVersion: string | null;
   configSchemaLoading: boolean;
-  configUiHints: Record<string, unknown>;
+  configUiHints: ConfigUiHints;
   configForm: Record<string, unknown> | null;
   configFormOriginal: Record<string, unknown> | null;
   configFormMode: "form" | "raw";
+  configSearchQuery: string;
+  configActiveSection: string | null;
+  configActiveSubsection: string | null;
   channelsLoading: boolean;
   channelsSnapshot: ChannelsStatusSnapshot | null;
   channelsError: string | null;
@@ -98,6 +120,12 @@ export type AppViewState = {
   nostrProfileFormState: NostrProfileFormState | null;
   nostrProfileAccountId: string | null;
   configFormDirty: boolean;
+
+  modelsQuickProviderId: string;
+  modelsQuickBaseUrl: string;
+  modelsQuickApiKey: string;
+  modelsQuickModelId: string;
+  modelsQuickSetAsDefault: boolean;
   presenceLoading: boolean;
   presenceEntries: PresenceEntry[];
   presenceError: string | null;
@@ -144,6 +172,12 @@ export type AppViewState = {
   logsLevelFilters: Record<LogLevel, boolean>;
   logsAutoFollow: boolean;
   logsTruncated: boolean;
+  logsCursor: number | null;
+  logsLastFetchAt: number | null;
+  logsLimit: number;
+  logsMaxBytes: number;
+  exportLogs: (lines: string[], label: string) => void;
+  handleLogsScroll: (event: Event) => void;
   client: GatewayBrowserClient | null;
   connect: () => void;
   setTab: (tab: Tab) => void;

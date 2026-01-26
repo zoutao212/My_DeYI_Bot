@@ -516,6 +516,18 @@ export function renderApp(state: AppViewState) {
               searchQuery: state.configSearchQuery,
               activeSection: state.configActiveSection,
               activeSubsection: state.configActiveSubsection,
+              modelsQuickProviderId: state.modelsQuickProviderId,
+              modelsQuickBaseUrl: state.modelsQuickBaseUrl,
+              modelsQuickApiKey: state.modelsQuickApiKey,
+              modelsQuickModelId: state.modelsQuickModelId,
+              modelsQuickSetAsDefault: state.modelsQuickSetAsDefault,
+              onModelsQuickProviderIdChange: (next: string) =>
+                (state.modelsQuickProviderId = next),
+              onModelsQuickBaseUrlChange: (next: string) => (state.modelsQuickBaseUrl = next),
+              onModelsQuickApiKeyChange: (next: string) => (state.modelsQuickApiKey = next),
+              onModelsQuickModelIdChange: (next: string) => (state.modelsQuickModelId = next),
+              onModelsQuickSetAsDefaultChange: (next: boolean) =>
+                (state.modelsQuickSetAsDefault = next),
               onRawChange: (next) => {
                 state.configRaw = next;
               },

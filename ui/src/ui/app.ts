@@ -33,6 +33,7 @@ import type {
 } from "./controllers/exec-approvals";
 import type { DevicePairingList } from "./controllers/devices";
 import type { ExecApprovalRequest } from "./controllers/exec-approval";
+import type { SkillMessage } from "./controllers/skills";
 import {
   resetToolStream as resetToolStreamInternal,
   type ToolStreamEntry,
@@ -173,6 +174,12 @@ export class ClawdbotApp extends LitElement {
   @state() configSearchQuery = "";
   @state() configActiveSection: string | null = null;
   @state() configActiveSubsection: string | null = null;
+
+  @state() modelsQuickProviderId = "openai";
+  @state() modelsQuickBaseUrl = "";
+  @state() modelsQuickApiKey = "";
+  @state() modelsQuickModelId = "";
+  @state() modelsQuickSetAsDefault = true;
 
   @state() channelsLoading = false;
   @state() channelsSnapshot: ChannelsStatusSnapshot | null = null;
@@ -479,6 +486,6 @@ export class ClawdbotApp extends LitElement {
   }
 
   render() {
-    return renderApp(this);
+    return renderApp(this as unknown as import("./app-view-state").AppViewState);
   }
 }

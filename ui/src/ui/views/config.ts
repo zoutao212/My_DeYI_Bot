@@ -27,6 +27,16 @@ export type ConfigProps = {
   searchQuery: string;
   activeSection: string | null;
   activeSubsection: string | null;
+  modelsQuickProviderId: string;
+  modelsQuickBaseUrl: string;
+  modelsQuickApiKey: string;
+  modelsQuickModelId: string;
+  modelsQuickSetAsDefault: boolean;
+  onModelsQuickProviderIdChange: (next: string) => void;
+  onModelsQuickBaseUrlChange: (next: string) => void;
+  onModelsQuickApiKeyChange: (next: string) => void;
+  onModelsQuickModelIdChange: (next: string) => void;
+  onModelsQuickSetAsDefaultChange: (next: boolean) => void;
   onRawChange: (next: string) => void;
   onFormModeChange: (mode: "form" | "raw") => void;
   onFormPatch: (path: Array<string | number>, value: unknown) => void;
@@ -250,12 +260,64 @@ export function renderConfig(props: ConfigProps) {
     (props.formMode === "raw" ? true : canSaveForm);
   const canUpdate = props.connected && !props.applying && !props.updating;
 
+  const showModelsQuick = props.formMode === "form" && props.activeSection === "models";
+
+  const normalizeProviderId = (raw: string) =>
+    raw
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+
+  const normalizeModelId = (raw: string) => raw.trim();
+
+  const canApplyModelsQuick =
+    props.connected &&
+    !props.loading &&
+    Boolean(normalizeProviderId(props.modelsQuickProviderId)) &&
+    Boolean(props.modelsQuickBaseUrl.trim()) &&
+    Boolean(props.modelsQuickApiKey.trim()) &&
+    Boolean(normalizeModelId(props.modelsQuickModelId));
+
+  const applyModelsQuick = () => {
+    const providerId = normalizeProviderId(props.modelsQuickProviderId);
+    const baseUrl = props.modelsQuickBaseUrl.trim();
+    const apiKey = props.modelsQuickApiKey.trim();
+    const modelId = normalizeModelId(props.modelsQuickModelId);
+    if (!providerId || !baseUrl || !apiKey || !modelId) return;
+
+    // Minimum valid schema for models.providers.*
+    // Note: costs/context/maxTokens are optional in config schema.
+    const provider = {
+      baseUrl,
+      apiKey,
+      auth: "api-key",
+      api: "openai-responses",
+      models: [
+        {
+          id: modelId,
+          name: modelId,
+          api: "openai-responses",
+          input: ["text"],
+        },
+      ],
+    };
+
+    props.onFormPatch(["models", "providers", providerId], provider);
+
+    const modelKey = `${providerId}/${modelId}`;
+    if (props.modelsQuickSetAsDefault) {
+      props.onFormPatch(["agents", "defaults", "model", "primary"], modelKey);
+      props.onFormPatch(["agents", "defaults", "models", modelKey], {});
+    }
+  };
+
   return html`
     <div class="config-layout">
       <!-- Sidebar -->
       <aside class="config-sidebar">
         <div class="config-sidebar__header">
-          <div class="config-sidebar__title">Settings</div>
+          <div class="config-sidebar__title">Settings（设置）</div>
           <span class="pill pill--sm ${validity === "valid" ? "pill--ok" : validity === "invalid" ? "pill--danger" : ""}">${validity}</span>
         </div>
 
@@ -268,7 +330,7 @@ export function renderConfig(props: ConfigProps) {
           <input
             type="text"
             class="config-search__input"
-            placeholder="Search settings..."
+            placeholder="Search settings...（搜索设置）"
             .value=${props.searchQuery}
             @input=${(e: Event) => props.onSearchChange((e.target as HTMLInputElement).value)}
           />
@@ -287,7 +349,7 @@ export function renderConfig(props: ConfigProps) {
             @click=${() => props.onSectionChange(null)}
           >
             <span class="config-nav__icon">${sidebarIcons.all}</span>
-            <span class="config-nav__label">All Settings</span>
+            <span class="config-nav__label">All Settings（全部）</span>
           </button>
           ${allSections.map(section => html`
             <button
@@ -328,33 +390,33 @@ export function renderConfig(props: ConfigProps) {
             ${hasChanges ? html`
               <span class="config-changes-badge">${props.formMode === "raw" ? "Unsaved changes" : `${diff.length} unsaved change${diff.length !== 1 ? "s" : ""}`}</span>
             ` : html`
-              <span class="config-status muted">No changes</span>
+              <span class="config-status muted">No changes（无改动）</span>
             `}
           </div>
           <div class="config-actions__right">
             <button class="btn btn--sm" ?disabled=${props.loading} @click=${props.onReload}>
-              ${props.loading ? "Loading…" : "Reload"}
+              ${props.loading ? "Loading…" : "Reload（重载）"}
             </button>
             <button
               class="btn btn--sm primary"
               ?disabled=${!canSave}
               @click=${props.onSave}
             >
-              ${props.saving ? "Saving…" : "Save"}
+              ${props.saving ? "Saving…" : "Save（保存）"}
             </button>
             <button
               class="btn btn--sm"
               ?disabled=${!canApply}
               @click=${props.onApply}
             >
-              ${props.applying ? "Applying…" : "Apply"}
+              ${props.applying ? "Applying…" : "Apply（应用）"}
             </button>
             <button
               class="btn btn--sm"
               ?disabled=${!canUpdate}
               @click=${props.onUpdate}
             >
-              ${props.updating ? "Updating…" : "Update"}
+              ${props.updating ? "Updating…" : "Update（更新）"}
             </button>
           </div>
         </div>
@@ -427,6 +489,83 @@ export function renderConfig(props: ConfigProps) {
         <div class="config-content">
           ${props.formMode === "form"
             ? html`
+                ${showModelsQuick
+                  ? html`
+                      <section class="card" style="margin-bottom: 12px;">
+                        <div class="card-title">OpenAI-compatible provider（OpenAI 兼容第三方）</div>
+                        <div class="card-sub">
+                          Add or update a provider in <code>models.providers</code>. Then click Save + Apply.
+                          （写入 models.providers，然后点 Save + Apply 生效）
+                        </div>
+                        <div class="row" style="gap: 12px; flex-wrap: wrap; margin-top: 12px;">
+                          <label class="field" style="min-width: 220px;">
+                            <span>Provider ID（供应商ID）</span>
+                            <input
+                              .value=${props.modelsQuickProviderId}
+                              @input=${(e: Event) =>
+                                props.onModelsQuickProviderIdChange(
+                                  (e.target as HTMLInputElement).value,
+                                )}
+                              placeholder="my-openai"
+                            />
+                          </label>
+                          <label class="field" style="min-width: 360px; flex: 1;">
+                            <span>Base URL（接口地址）</span>
+                            <input
+                              .value=${props.modelsQuickBaseUrl}
+                              @input=${(e: Event) =>
+                                props.onModelsQuickBaseUrlChange((e.target as HTMLInputElement).value)}
+                              placeholder="https://api.example.com/v1"
+                            />
+                          </label>
+                        </div>
+
+                        <div class="row" style="gap: 12px; flex-wrap: wrap; margin-top: 12px;">
+                          <label class="field" style="min-width: 360px; flex: 1;">
+                            <span>API Key（密钥）</span>
+                            <input
+                              type="password"
+                              .value=${props.modelsQuickApiKey}
+                              @input=${(e: Event) =>
+                                props.onModelsQuickApiKeyChange((e.target as HTMLInputElement).value)}
+                              placeholder="sk-..."
+                            />
+                          </label>
+                          <label class="field" style="min-width: 220px;">
+                            <span>Model（模型）</span>
+                            <input
+                              .value=${props.modelsQuickModelId}
+                              @input=${(e: Event) =>
+                                props.onModelsQuickModelIdChange((e.target as HTMLInputElement).value)}
+                              placeholder="gpt-4o-mini"
+                            />
+                          </label>
+                          <label class="field checkbox" style="margin-top: 22px;">
+                            <input
+                              type="checkbox"
+                              .checked=${props.modelsQuickSetAsDefault}
+                              @change=${(e: Event) =>
+                                props.onModelsQuickSetAsDefaultChange(
+                                  (e.target as HTMLInputElement).checked,
+                                )}
+                            />
+                            <span>Set as default（设为默认）</span>
+                          </label>
+                        </div>
+
+                        <div class="row" style="justify-content: flex-end; gap: 8px; margin-top: 12px;">
+                          <button
+                            class="btn"
+                            ?disabled=${!canApplyModelsQuick}
+                            @click=${applyModelsQuick}
+                            title="Writes into config form; remember to Save + Apply"
+                          >
+                            Write to config（写入配置）
+                          </button>
+                        </div>
+                      </section>
+                    `
+                  : nothing}
                 ${props.schemaLoading
                   ? html`<div class="config-loading">
                       <div class="config-loading__spinner"></div>
