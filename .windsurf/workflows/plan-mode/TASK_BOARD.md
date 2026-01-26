@@ -1,0 +1,25 @@
+TaskBoard:
+  MainTask:
+    title: ""
+    objective: ""
+    status: active
+    progress: ""
+
+  SubTasks: []
+
+  CurrentFocus:
+    task_id: ""
+    reasoning_summary: |
+      - 
+    next_action: ""
+
+  Checkpoints: []
+
+  RisksAndBlocks: []
+
+  ContextAnchors:
+    code_locations: []
+    commands: []
+
+  LastUpdated: ""
+  Version: "v20260122_1"
