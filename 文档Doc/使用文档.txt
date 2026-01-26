@@ -1,0 +1,24 @@
+这些文件的模板来源（仓库里）
+它们来自仓库的模板目录：
+
+docs/reference/templates/SOUL.md
+docs/reference/templates/BOOTSTRAP.md
+docs/reference/templates/USER.md（但这份在仓库里被 .gitignore 屏蔽，我这边工具读不到）
+
+你要的“中英文双语 + 默认中文对话”我已经开始落地了
+我已经把下面两个模板改成 中英文对照，并加了“默认使用中文交流”的规则（之后新建/初始化工作区时，会更偏中文）：
+
+docs/reference/templates/SOUL.md
+增加中英对照
+增加 Language：默认中文 规则
+docs/reference/templates/BOOTSTRAP.md
+增加中英对照
+启动开场话术增加中文版本
+增加 默认中文 规则
+修复了 Markdown lint（列表前后空行）
+但你现在正在用的，是你本机工作区里的那份文件
+你 chat 里显示的 read SOUL.md 等，读的是这里：
+
+C:\Users\zouta\clawd\SOUL.md
+C:\Users\zouta\clawd\BOOTSTRAP.md
+C:\Users\zouta\clawd\USER.md

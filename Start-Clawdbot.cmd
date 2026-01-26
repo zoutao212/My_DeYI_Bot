@@ -32,7 +32,7 @@ if errorlevel 1 (
 )
 
 echo [Start-Clawdbot] Stopping any running Gateway...
-pnpm run clawdbot gateway stop
+call pnpm run clawdbot gateway stop
 echo [Start-Clawdbot] gateway stop exit code: %ERRORLEVEL%
 echo.
 
@@ -51,11 +51,28 @@ if defined GATEWAY_PID (
 )
 
 echo [Start-Clawdbot] Starting Clawdbot Gateway...
-echo [Start-Clawdbot] This window must stay open.
-pnpm run clawdbot gateway run --bind loopback --port 18789 --force
+echo [Start-Clawdbot] Opening a new window for gateway logs...
+start "Clawdbot Gateway" /D "%REPO_DIR%" cmd /k "pnpm run clawdbot gateway run --bind loopback --port 18789 --force"
 
-echo.
-echo Gateway exited.
-pause
+echo [Start-Clawdbot] Waiting for gateway health...
+set "OK="
+for /l %%i in (1,1,15) do (
+  call pnpm run clawdbot gateway health --bind loopback --port 18789 >nul 2>nul
+  if not errorlevel 1 (
+    set "OK=1"
+    goto :health_ok
+  )
+  timeout /t 1 >nul
+)
+
+:health_ok
+if defined OK (
+  echo [Start-Clawdbot] Gateway is healthy. This window will close in 10 seconds...
+  timeout /t 10 >nul
+) else (
+  echo [Start-Clawdbot] ERROR: Gateway did not become healthy.
+  echo [Start-Clawdbot] Check the "Clawdbot Gateway" window for errors.
+  pause
+)
 popd
 endlocal
