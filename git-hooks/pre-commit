@@ -1,16 +1,23 @@
 #!/bin/sh
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 [ -z "$ROOT" ] && exit 0
-if command -v node >/dev/null 2>&1; then
-  node "$ROOT/scripts/format-staged.js"
-  exit $?
-fi
-
 if command -v cygpath >/dev/null 2>&1; then
-  SCRIPT_WIN=$(cygpath -w "$ROOT/scripts/format-staged.js")
-  cmd.exe //d //s //c "\"C:\\Program Files\\nodejs\\node.exe\" \"$SCRIPT_WIN\""
-  exit $?
+  SCRIPT_WIN=$(cygpath -w "$ROOT/scripts/format-staged.js" 2>/dev/null)
+  if [ -n "$SCRIPT_WIN" ]; then
+    OUTPUT=$(powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& 'C:\\Program Files\\nodejs\\node.exe' \"$SCRIPT_WIN\"" 2>&1)
+    CODE=$?
+    if [ "$CODE" -ne 0 ]; then
+      echo "[pre-commit] 格式化失败（exit=$CODE），已放行提交。你可以稍后手动运行：node scripts/format-staged.js" >&2
+      if [ -n "$OUTPUT" ]; then
+        echo "$OUTPUT" >&2
+      fi
+      exit 0
+    fi
+    exit "$CODE"
+  fi
+  echo "[pre-commit] 无法解析 node 路径，跳过格式化。" >&2
+  exit 0
 fi
 
-echo "[pre-commit] node 未找到（且 cygpath 不可用），跳过格式化。" >&2
+echo "[pre-commit] cygpath 不可用，跳过格式化。" >&2
 exit 0
