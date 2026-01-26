@@ -70,7 +70,18 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ''
 Write-Host 'Pushing to your fork (origin)...' -ForegroundColor Cyan
-& git push
+$hasTracking = $true
+& git rev-parse --abbrev-ref '@{u}' *> $null
+if ($LASTEXITCODE -ne 0) {
+  $hasTracking = $false
+}
+
+if (-not $hasTracking) {
+  Write-Host "No upstream tracking branch set for $CustomBranch; setting it now..." -ForegroundColor Yellow
+  & git push -u origin $CustomBranch
+} else {
+  & git push
+}
 
 Write-Host ''
 Write-Host 'Restoring stashed local changes...' -ForegroundColor Cyan
