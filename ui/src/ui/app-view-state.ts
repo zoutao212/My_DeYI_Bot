@@ -126,6 +126,10 @@ export type AppViewState = {
   modelsQuickApiKey: string;
   modelsQuickModelId: string;
   modelsQuickSetAsDefault: boolean;
+
+  embeddingsQuickBaseUrl: string;
+  embeddingsQuickApiKey: string;
+  embeddingsQuickModelId: string;
   presenceLoading: boolean;
   presenceEntries: PresenceEntry[];
   presenceError: string | null;

@@ -181,6 +181,10 @@ export class ClawdbotApp extends LitElement {
   @state() modelsQuickModelId = "";
   @state() modelsQuickSetAsDefault = true;
 
+  @state() embeddingsQuickBaseUrl = "http://127.0.0.1:12345/v1";
+  @state() embeddingsQuickApiKey = "";
+  @state() embeddingsQuickModelId = "text-embedding-jina-embeddings-v3";
+
   @state() channelsLoading = false;
   @state() channelsSnapshot: ChannelsStatusSnapshot | null = null;
   @state() channelsError: string | null = null;

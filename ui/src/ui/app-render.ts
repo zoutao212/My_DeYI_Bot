@@ -521,6 +521,9 @@ export function renderApp(state: AppViewState) {
               modelsQuickApiKey: state.modelsQuickApiKey,
               modelsQuickModelId: state.modelsQuickModelId,
               modelsQuickSetAsDefault: state.modelsQuickSetAsDefault,
+              embeddingsQuickBaseUrl: state.embeddingsQuickBaseUrl,
+              embeddingsQuickApiKey: state.embeddingsQuickApiKey,
+              embeddingsQuickModelId: state.embeddingsQuickModelId,
               onModelsQuickProviderIdChange: (next: string) =>
                 (state.modelsQuickProviderId = next),
               onModelsQuickBaseUrlChange: (next: string) => (state.modelsQuickBaseUrl = next),
@@ -528,6 +531,12 @@ export function renderApp(state: AppViewState) {
               onModelsQuickModelIdChange: (next: string) => (state.modelsQuickModelId = next),
               onModelsQuickSetAsDefaultChange: (next: boolean) =>
                 (state.modelsQuickSetAsDefault = next),
+              onEmbeddingsQuickBaseUrlChange: (next: string) =>
+                (state.embeddingsQuickBaseUrl = next),
+              onEmbeddingsQuickApiKeyChange: (next: string) =>
+                (state.embeddingsQuickApiKey = next),
+              onEmbeddingsQuickModelIdChange: (next: string) =>
+                (state.embeddingsQuickModelId = next),
               onRawChange: (next) => {
                 state.configRaw = next;
               },

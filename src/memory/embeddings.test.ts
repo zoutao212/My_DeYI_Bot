@@ -116,6 +116,48 @@ describe("embedding provider remote overrides", () => {
     expect(headers.Authorization).toBe("Bearer provider-key");
   });
 
+  it("allows blank apiKey for local OpenAI-compatible embeddings baseUrl", async () => {
+    const fetchMock = createFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { createEmbeddingProvider } = await import("./embeddings.js");
+    const authModule = await import("../agents/model-auth.js");
+    vi.mocked(authModule.resolveApiKeyForProvider).mockResolvedValue({
+      apiKey: "provider-key",
+      mode: "api-key",
+      source: "test",
+    });
+
+    const cfg = {
+      models: {
+        providers: {
+          openai: {
+            baseUrl: "https://provider.example/v1",
+          },
+        },
+      },
+    };
+
+    const result = await createEmbeddingProvider({
+      config: cfg as never,
+      provider: "openai",
+      remote: {
+        baseUrl: "http://127.0.0.1:12345/v1",
+        apiKey: "   ",
+      },
+      model: "text-embedding-jina-embeddings-v3",
+      fallback: "none",
+    });
+
+    await result.provider.embedQuery("hello");
+
+    expect(authModule.resolveApiKeyForProvider).not.toHaveBeenCalled();
+    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    expect(url).toBe("http://127.0.0.1:12345/v1/embeddings");
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    expect(headers.Authorization).toBeUndefined();
+  });
+
   it("builds Gemini embeddings requests with api key header", async () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,

@@ -132,9 +132,14 @@ export function connectGateway(host: GatewayHost) {
       void loadNodes(host as unknown as ClawdbotApp, { quiet: true });
       void loadDevices(host as unknown as ClawdbotApp, { quiet: true });
       void refreshActiveTab(host as unknown as Parameters<typeof refreshActiveTab>[0]);
+      void loadChatHistory(host as unknown as ClawdbotApp);
     },
     onClose: ({ code, reason }) => {
       host.connected = false;
+      if (host.chatRunId) {
+        host.chatRunId = null;
+        resetToolStream(host as unknown as Parameters<typeof resetToolStream>[0]);
+      }
       // Code 1012 = Service Restart (expected during config saves, don't show as error)
       if (code !== 1012) {
         host.lastError = `disconnected (${code}): ${reason || "no reason"}`;

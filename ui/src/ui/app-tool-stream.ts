@@ -194,9 +194,11 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
   const sessionKey =
     typeof payload.sessionKey === "string" ? payload.sessionKey : undefined;
   if (sessionKey && sessionKey !== host.sessionKey) return;
-  // Fallback: only accept session-less events for the active run.
-  if (!sessionKey && host.chatRunId && payload.runId !== host.chatRunId) return;
-  if (host.chatRunId && payload.runId !== host.chatRunId) return;
+
+  // Only process tool stream while a chat run is active.
+  // Do not require runId equality: the gateway may emit a different runId than
+  // the client-side idempotencyKey, and strict filtering can leave the UI stuck
+  // in a pending state until a manual refresh rehydrates history.
   if (!host.chatRunId) return;
 
   const data = payload.data ?? {};
@@ -205,15 +207,16 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
   const name = typeof data.name === "string" ? data.name : "tool";
   const phase = typeof data.phase === "string" ? data.phase : "";
   const args = phase === "start" ? data.args : undefined;
-  const output =
+  const outputRaw =
     phase === "update"
       ? formatToolOutput(data.partialResult)
       : phase === "result"
         ? formatToolOutput(data.result)
         : undefined;
+  const output = outputRaw ?? undefined;
 
   const now = Date.now();
-  let entry = host.toolStreamById.get(toolCallId);
+  let entry: ToolStreamEntry | undefined = host.toolStreamById.get(toolCallId);
   if (!entry) {
     entry = {
       toolCallId,
@@ -235,7 +238,9 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
     entry.updatedAt = now;
   }
 
-  entry.message = buildToolStreamMessage(entry);
+  const resolvedEntry = entry;
+  if (!resolvedEntry) return;
+  resolvedEntry.message = buildToolStreamMessage(resolvedEntry);
   trimToolStream(host);
   scheduleToolStreamSync(host, phase === "result");
 }

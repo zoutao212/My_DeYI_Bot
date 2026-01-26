@@ -43,7 +43,7 @@ export async function acquireSessionWriteLock(params: {
 }): Promise<{
   release: () => Promise<void>;
 }> {
-  const timeoutMs = params.timeoutMs ?? 10_000;
+  const timeoutMs = params.timeoutMs ?? 60_000;
   const staleMs = params.staleMs ?? 30 * 60 * 1000;
   const sessionFile = path.resolve(params.sessionFile);
   const sessionDir = path.dirname(sessionFile);
@@ -114,5 +114,11 @@ export async function acquireSessionWriteLock(params: {
 
   const payload = await readLockPayload(lockPath);
   const owner = payload?.pid ? `pid=${payload.pid}` : "unknown";
-  throw new Error(`session file locked (timeout ${timeoutMs}ms): ${owner} ${lockPath}`);
+  const createdAtMs = payload?.createdAt ? Date.parse(payload.createdAt) : NaN;
+  const ageMs = Number.isFinite(createdAtMs) ? Date.now() - createdAtMs : NaN;
+  const createdAtLabel = payload?.createdAt ? payload.createdAt : "unknown";
+  const ageLabel = Number.isFinite(ageMs) ? `${ageMs}ms` : "unknown";
+  throw new Error(
+    `session file locked (timeout ${timeoutMs}ms): ${owner} createdAt=${createdAtLabel} age=${ageLabel} ${lockPath}`,
+  );
 }

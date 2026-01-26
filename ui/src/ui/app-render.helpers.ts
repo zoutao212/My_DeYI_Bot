@@ -68,7 +68,11 @@ export function renderChatControls(state: AppViewState) {
               lastActiveSessionKey: next,
             });
             void state.loadAssistantIdentity();
-            syncUrlWithSessionKey(state, next, true);
+            syncUrlWithSessionKey(
+              state as unknown as Parameters<typeof syncUrlWithSessionKey>[0],
+              next,
+              true,
+            );
             void loadChatHistory(state);
           }}
         >
@@ -105,12 +109,22 @@ export function renderChatControls(state: AppViewState) {
           });
         }}
         aria-pressed=${showThinking}
+        aria-label=${disableThinkingToggle
+          ? "Onboarding: thinking output toggle disabled"
+          : showThinking
+            ? "Hide assistant thinking/working output"
+            : "Show assistant thinking/working output"}
         title=${disableThinkingToggle
           ? "Disabled during onboarding"
-          : "Toggle assistant thinking/working output"}
+          : showThinking
+            ? "Hide assistant thinking/working output (currently shown)"
+            : "Show assistant thinking/working output (currently hidden)"}
       >
         ${icons.brain}
       </button>
+      <span class="muted" style="font-size: 12px; user-select: none;">
+        ${showThinking ? "思考输出：开" : "思考输出：关"}
+      </span>
       <button
         class="btn btn--sm btn--icon ${focusActive ? "active" : ""}"
         ?disabled=${disableFocusToggle}

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 
 import type { AgentMessage, AgentTool } from "@mariozechner/pi-agent-core";
@@ -50,6 +51,178 @@ function isValidAntigravitySignature(value: unknown): value is string {
   if (!trimmed) return false;
   if (trimmed.length % 4 !== 0) return false;
   return ANTIGRAVITY_SIGNATURE_RE.test(trimmed);
+}
+
+function shouldEnsureGeminiToolThoughtSignatures(params: {
+  provider?: string;
+  modelApi?: string | null;
+  modelId?: string;
+}): boolean {
+  const provider = (params.provider ?? "").trim().toLowerCase();
+  const modelId = (params.modelId ?? "").trim().toLowerCase();
+  const modelApi = (params.modelApi ?? "").trim().toLowerCase();
+  if (provider.includes("vectorengine")) return true;
+  if (modelId.includes("gemini")) return true;
+  if (modelApi.includes("gemini")) return true;
+  return false;
+}
+
+function makeStableThoughtSignatureBase64(seed: string): string {
+  const digest = createHash("sha256").update(seed).digest();
+  return digest.subarray(0, 12).toString("base64");
+}
+
+type ToolThoughtSignatureReport = {
+  added: number;
+  byTool: Record<string, number>;
+};
+
+function ensureGeminiToolThoughtSignatures(messages: AgentMessage[]): {
+  messages: AgentMessage[];
+  report: ToolThoughtSignatureReport;
+} {
+  let touched = false;
+  let added = 0;
+  const byTool = new Map<string, number>();
+  const out: AgentMessage[] = [];
+  for (const msg of messages) {
+    if (!msg || typeof msg !== "object" || msg.role !== "assistant") {
+      out.push(msg);
+      continue;
+    }
+    const assistant = msg as Extract<AgentMessage, { role: "assistant" }>;
+
+    const assistantRecord = assistant as unknown as Record<string, unknown>;
+    const toolCallsRaw =
+      assistantRecord.toolCalls ?? assistantRecord.tool_calls;
+    const toolCalls = Array.isArray(toolCallsRaw) ? toolCallsRaw : null;
+    let toolCallsChanged = false;
+    let patchedToolCalls: unknown[] | null = null;
+    if (toolCalls && toolCalls.length > 0) {
+      patchedToolCalls = toolCalls.map((call) => {
+        if (!call || typeof call !== "object") return call;
+        const rec = call as {
+          id?: unknown;
+          name?: unknown;
+          thoughtSignature?: unknown;
+          thought_signature?: unknown;
+        };
+        const hasSnake = typeof rec.thought_signature === "string" && rec.thought_signature.trim();
+        const hasCamel = typeof rec.thoughtSignature === "string" && rec.thoughtSignature.trim();
+        if (hasSnake || hasCamel) return call;
+
+        const id = typeof rec.id === "string" ? rec.id : "";
+        const signature = makeStableThoughtSignatureBase64(id || JSON.stringify(call));
+        const toolName =
+          typeof rec.name === "string" && rec.name.trim() ? rec.name.trim() : "(unknown)";
+        byTool.set(toolName, (byTool.get(toolName) ?? 0) + 1);
+        added += 1;
+        toolCallsChanged = true;
+        return {
+          ...(call as unknown as Record<string, unknown>),
+          thoughtSignature: signature,
+          thought_signature: signature,
+        };
+      });
+    }
+
+    if (!Array.isArray(assistant.content)) {
+      if (toolCallsChanged && patchedToolCalls) {
+        touched = true;
+        if (Array.isArray(assistantRecord.toolCalls)) {
+          out.push(
+            ({
+              ...(assistant as unknown as Record<string, unknown>),
+              toolCalls: patchedToolCalls,
+            } as unknown) as AgentMessage,
+          );
+        } else {
+          out.push(
+            ({
+              ...(assistant as unknown as Record<string, unknown>),
+              tool_calls: patchedToolCalls,
+            } as unknown) as AgentMessage,
+          );
+        }
+      } else {
+        out.push(msg);
+      }
+      continue;
+    }
+    type AssistantContentBlock = Extract<AgentMessage, { role: "assistant" }>["content"][number];
+    const nextContent: AssistantContentBlock[] = [];
+    let changed = false;
+    for (const block of assistant.content) {
+      if (!block || typeof block !== "object") {
+        nextContent.push(block);
+        continue;
+      }
+      const rec = block as {
+        type?: unknown;
+        id?: unknown;
+        name?: unknown;
+        thoughtSignature?: unknown;
+        thought_signature?: unknown;
+      };
+      const type = rec.type;
+      const id = typeof rec.id === "string" ? rec.id : "";
+      const typeText = typeof type === "string" ? type : "";
+      const typeNormalized = typeText.trim().toLowerCase();
+      const isToolCall =
+        type === "toolCall" ||
+        type === "toolUse" ||
+        type === "functionCall" ||
+        type === "tool_call" ||
+        type === "function_call" ||
+        typeNormalized === "toolcall" ||
+        typeNormalized === "tooluse" ||
+        typeNormalized === "functioncall" ||
+        typeNormalized === "tool_call" ||
+        typeNormalized === "function_call";
+      if (!isToolCall) {
+        nextContent.push(block);
+        continue;
+      }
+      const hasSnake = typeof rec.thought_signature === "string" && rec.thought_signature.trim();
+      const hasCamel = typeof rec.thoughtSignature === "string" && rec.thoughtSignature.trim();
+      if (hasSnake || hasCamel) {
+        nextContent.push(block);
+        continue;
+      }
+      const signature = makeStableThoughtSignatureBase64(id || JSON.stringify(block));
+      const toolName = typeof rec.name === "string" && rec.name.trim() ? rec.name.trim() : "(unknown)";
+      byTool.set(toolName, (byTool.get(toolName) ?? 0) + 1);
+      added += 1;
+      const patched = {
+        ...(block as unknown as Record<string, unknown>),
+        thoughtSignature: signature,
+        thought_signature: signature,
+      } as unknown as AssistantContentBlock;
+      nextContent.push(patched);
+      changed = true;
+    }
+    if (changed || toolCallsChanged) {
+      touched = true;
+      const nextAssistant = { ...assistant, content: nextContent } as unknown as Record<string, unknown>;
+      if (toolCallsChanged && patchedToolCalls) {
+        if (Array.isArray(assistantRecord.toolCalls)) {
+          nextAssistant.toolCalls = patchedToolCalls;
+          delete nextAssistant.tool_calls;
+        } else {
+          nextAssistant.tool_calls = patchedToolCalls;
+          delete nextAssistant.toolCalls;
+        }
+      }
+      out.push(nextAssistant as unknown as AgentMessage);
+    } else {
+      out.push(msg);
+    }
+  }
+  const report: ToolThoughtSignatureReport = {
+    added,
+    byTool: Object.fromEntries(Array.from(byTool.entries()).sort((a, b) => b[1] - a[1])),
+  };
+  return { messages: touched ? out : messages, report };
 }
 
 function sanitizeAntigravityThinkingBlocks(messages: AgentMessage[]): AgentMessage[] {
@@ -336,6 +509,26 @@ export async function sanitizeSessionHistory(params: {
     ? sanitizeToolUseResultPairing(sanitizedThinking)
     : sanitizedThinking;
 
+  const shouldEnsureThoughtSignatures = shouldEnsureGeminiToolThoughtSignatures({
+    provider: params.provider,
+    modelApi: params.modelApi,
+    modelId: params.modelId,
+  });
+  const ensured = shouldEnsureThoughtSignatures
+    ? ensureGeminiToolThoughtSignatures(repairedTools)
+    : { messages: repairedTools, report: { added: 0, byTool: {} } };
+  if (shouldEnsureThoughtSignatures && ensured.report.added > 0) {
+    log.info("gemini tool thoughtSignature: filled missing signatures", {
+      provider: params.provider,
+      modelApi: params.modelApi,
+      modelId: params.modelId,
+      sessionId: params.sessionId,
+      added: ensured.report.added,
+      byTool: ensured.report.byTool,
+    });
+  }
+  const sanitizedToolThoughtSignatures = ensured.messages;
+
   const isOpenAIResponsesApi =
     params.modelApi === "openai-responses" || params.modelApi === "openai-codex-responses";
   const hasSnapshot = Boolean(params.provider || params.modelApi || params.modelId);
@@ -350,8 +543,8 @@ export async function sanitizeSessionHistory(params: {
     : false;
   const sanitizedOpenAI =
     isOpenAIResponsesApi && modelChanged
-      ? downgradeOpenAIReasoningBlocks(repairedTools)
-      : repairedTools;
+      ? downgradeOpenAIReasoningBlocks(sanitizedToolThoughtSignatures)
+      : sanitizedToolThoughtSignatures;
 
   if (hasSnapshot && (!priorSnapshot || modelChanged)) {
     appendModelSnapshot(params.sessionManager, {

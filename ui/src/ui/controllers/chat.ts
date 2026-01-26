@@ -115,8 +115,10 @@ export function handleChatEvent(
 ) {
   if (!payload) return null;
   if (payload.sessionKey !== state.sessionKey) return null;
-  if (payload.runId && state.chatRunId && payload.runId !== state.chatRunId)
-    return null;
+
+  // NOTE: The gateway may emit a different runId than the client-side idempotencyKey.
+  // Do not drop events solely due to runId mismatch, otherwise the UI can get stuck
+  // in a loading state until a manual refresh rehydrates history.
 
   if (payload.state === "delta") {
     const next = extractText(payload.message);

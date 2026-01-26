@@ -57,6 +57,26 @@ export function stripThoughtSignatures<T>(
   return content.map((block) => {
     if (!block || typeof block !== "object") return block;
     const rec = block as ContentBlockWithSignature;
+    const type = (rec as { type?: unknown }).type;
+    const typeText = typeof type === "string" ? type.trim() : "";
+    const typeNormalized = typeText.toLowerCase();
+    if (
+      type === "toolCall" ||
+      type === "toolResult" ||
+      type === "function_call" ||
+      type === "functionCall" ||
+      typeNormalized === "toolcall" ||
+      typeNormalized === "toolresult" ||
+      typeNormalized === "functioncall" ||
+      typeNormalized === "tool_call" ||
+      typeNormalized === "function_call" ||
+      typeNormalized === "tooluse" ||
+      typeNormalized === "tool_use" ||
+      typeNormalized === "functionresponse" ||
+      typeNormalized === "function_response"
+    ) {
+      return block;
+    }
     const stripSnake = shouldStripSignature(rec.thought_signature);
     const stripCamel = includeCamelCase ? shouldStripSignature(rec.thoughtSignature) : false;
     if (!stripSnake && !stripCamel) {

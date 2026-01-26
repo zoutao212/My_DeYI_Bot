@@ -32,11 +32,19 @@ export type ConfigProps = {
   modelsQuickApiKey: string;
   modelsQuickModelId: string;
   modelsQuickSetAsDefault: boolean;
+
+  embeddingsQuickBaseUrl: string;
+  embeddingsQuickApiKey: string;
+  embeddingsQuickModelId: string;
   onModelsQuickProviderIdChange: (next: string) => void;
   onModelsQuickBaseUrlChange: (next: string) => void;
   onModelsQuickApiKeyChange: (next: string) => void;
   onModelsQuickModelIdChange: (next: string) => void;
   onModelsQuickSetAsDefaultChange: (next: boolean) => void;
+
+  onEmbeddingsQuickBaseUrlChange: (next: string) => void;
+  onEmbeddingsQuickApiKeyChange: (next: string) => void;
+  onEmbeddingsQuickModelIdChange: (next: string) => void;
   onRawChange: (next: string) => void;
   onFormModeChange: (mode: "form" | "raw") => void;
   onFormPatch: (path: Array<string | number>, value: unknown) => void;
@@ -243,6 +251,16 @@ export function renderConfig(props: ConfigProps) {
   const hasRawChanges = props.formMode === "raw" && props.raw !== props.originalRaw;
   const hasChanges = props.formMode === "form" ? diff.length > 0 : hasRawChanges;
 
+  const statusText = props.saving
+    ? "正在保存…"
+    : props.applying
+      ? "正在应用…"
+      : props.updating
+        ? "正在更新…"
+        : props.loading
+          ? "正在加载…"
+          : null;
+
   // Save/apply buttons require actual changes to be enabled.
   // Note: formUnsafe warns about unsupported schema paths but shouldn't block saving.
   const canSaveForm =
@@ -261,6 +279,7 @@ export function renderConfig(props: ConfigProps) {
   const canUpdate = props.connected && !props.applying && !props.updating;
 
   const showModelsQuick = props.formMode === "form" && props.activeSection === "models";
+  const showEmbeddingsQuick = props.formMode === "form" && props.activeSection === "models";
 
   const normalizeProviderId = (raw: string) =>
     raw
@@ -278,6 +297,12 @@ export function renderConfig(props: ConfigProps) {
     Boolean(props.modelsQuickBaseUrl.trim()) &&
     Boolean(props.modelsQuickApiKey.trim()) &&
     Boolean(normalizeModelId(props.modelsQuickModelId));
+
+  const canApplyEmbeddingsQuick =
+    props.connected &&
+    !props.loading &&
+    Boolean(props.embeddingsQuickBaseUrl.trim()) &&
+    Boolean(normalizeModelId(props.embeddingsQuickModelId));
 
   const applyModelsQuick = () => {
     const providerId = normalizeProviderId(props.modelsQuickProviderId);
@@ -310,6 +335,23 @@ export function renderConfig(props: ConfigProps) {
       props.onFormPatch(["agents", "defaults", "model", "primary"], modelKey);
       props.onFormPatch(["agents", "defaults", "models", modelKey], {});
     }
+  };
+
+  const applyEmbeddingsQuick = () => {
+    const baseUrl = props.embeddingsQuickBaseUrl.trim();
+    const apiKey = props.embeddingsQuickApiKey;
+    const modelId = normalizeModelId(props.embeddingsQuickModelId);
+    if (!baseUrl || !modelId) return;
+
+    props.onFormPatch(["agents", "defaults", "memorySearch", "enabled"], true);
+    props.onFormPatch(["agents", "defaults", "memorySearch", "provider"], "openai");
+    props.onFormPatch(["agents", "defaults", "memorySearch", "model"], modelId);
+    props.onFormPatch(["agents", "defaults", "memorySearch", "remote", "baseUrl"], baseUrl);
+    props.onFormPatch(["agents", "defaults", "memorySearch", "remote", "apiKey"], apiKey);
+    props.onFormPatch(
+      ["agents", "defaults", "memorySearch", "remote", "batch", "enabled"],
+      false,
+    );
   };
 
   return html`
@@ -380,6 +422,18 @@ export function renderConfig(props: ConfigProps) {
             </button>
           </div>
         </div>
+
+        ${props.issues.length > 0
+          ? html`<div class="callout danger" style="margin-top: 12px;">
+              <div style="font-weight: 600; margin-bottom: 6px;">配置校验失败</div>
+              <div class="muted" style="margin-bottom: 10px;">请先修复下面的问题，再保存/应用。</div>
+              <pre class="code-block">${JSON.stringify(props.issues, null, 2)}</pre>
+            </div>`
+          : validity === "invalid"
+            ? html`<div class="callout danger" style="margin-top: 12px;">
+                配置无效（Invalid）。请切换到 Raw 模式检查 JSON5 语法或字段类型。
+              </div>`
+            : nothing}
       </aside>
 
       <!-- Main content -->
@@ -387,6 +441,9 @@ export function renderConfig(props: ConfigProps) {
         <!-- Action bar -->
         <div class="config-actions">
           <div class="config-actions__left">
+            ${statusText
+              ? html`<span class="pill">${statusText}</span>`
+              : nothing}
             ${hasChanges ? html`
               <span class="config-changes-badge">${props.formMode === "raw" ? "Unsaved changes" : `${diff.length} unsaved change${diff.length !== 1 ? "s" : ""}`}</span>
             ` : html`
@@ -566,6 +623,70 @@ export function renderConfig(props: ConfigProps) {
                       </section>
                     `
                   : nothing}
+
+                ${showEmbeddingsQuick
+                  ? html`
+                      <section class="card" style="margin-bottom: 12px;">
+                        <div class="card-title">Embeddings（记忆检索）</div>
+                        <div class="card-sub">
+                          Configure <code>agents.defaults.memorySearch</code> for a local OpenAI-compatible embeddings
+                          server (e.g. LM Studio). Then click Save + Apply.
+                          （写入 agents.defaults.memorySearch，然后点 Save + Apply 生效）
+                        </div>
+
+                        <div class="row" style="gap: 12px; flex-wrap: wrap; margin-top: 12px;">
+                          <label class="field" style="min-width: 360px; flex: 1;">
+                            <span>Base URL（接口地址）</span>
+                            <input
+                              .value=${props.embeddingsQuickBaseUrl}
+                              @input=${(e: Event) =>
+                                props.onEmbeddingsQuickBaseUrlChange(
+                                  (e.target as HTMLInputElement).value,
+                                )}
+                              placeholder="http://127.0.0.1:12345/v1"
+                            />
+                          </label>
+                        </div>
+
+                        <div class="row" style="gap: 12px; flex-wrap: wrap; margin-top: 12px;">
+                          <label class="field" style="min-width: 360px; flex: 1;">
+                            <span>API Key（密钥，可空）</span>
+                            <input
+                              type="password"
+                              .value=${props.embeddingsQuickApiKey}
+                              @input=${(e: Event) =>
+                                props.onEmbeddingsQuickApiKeyChange(
+                                  (e.target as HTMLInputElement).value,
+                                )}
+                              placeholder="(empty for LM Studio)"
+                            />
+                          </label>
+                          <label class="field" style="min-width: 280px;">
+                            <span>Model（模型）</span>
+                            <input
+                              .value=${props.embeddingsQuickModelId}
+                              @input=${(e: Event) =>
+                                props.onEmbeddingsQuickModelIdChange(
+                                  (e.target as HTMLInputElement).value,
+                                )}
+                              placeholder="text-embedding-jina-embeddings-v3"
+                            />
+                          </label>
+                        </div>
+
+                        <div class="row" style="justify-content: flex-end; gap: 8px; margin-top: 12px;">
+                          <button
+                            class="btn"
+                            ?disabled=${!canApplyEmbeddingsQuick}
+                            @click=${applyEmbeddingsQuick}
+                            title="Writes into config form; remember to Save + Apply"
+                          >
+                            Write to config（写入配置）
+                          </button>
+                        </div>
+                      </section>
+                    `
+                  : nothing}
                 ${props.schemaLoading
                   ? html`<div class="config-loading">
                       <div class="config-loading__spinner"></div>
@@ -601,11 +722,6 @@ export function renderConfig(props: ConfigProps) {
               `}
         </div>
 
-        ${props.issues.length > 0
-          ? html`<div class="callout danger" style="margin-top: 12px;">
-              <pre class="code-block">${JSON.stringify(props.issues, null, 2)}</pre>
-            </div>`
-          : nothing}
       </main>
     </div>
   `;

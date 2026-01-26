@@ -1,4 +1,16 @@
 #!/bin/sh
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 [ -z "$ROOT" ] && exit 0
-node "$ROOT/scripts/format-staged.js"
+if command -v node >/dev/null 2>&1; then
+  node "$ROOT/scripts/format-staged.js"
+  exit $?
+fi
+
+if command -v cygpath >/dev/null 2>&1; then
+  SCRIPT_WIN=$(cygpath -w "$ROOT/scripts/format-staged.js")
+  cmd.exe //d //s //c "\"C:\\Program Files\\nodejs\\node.exe\" \"$SCRIPT_WIN\""
+  exit $?
+fi
+
+echo "[pre-commit] node 未找到（且 cygpath 不可用），跳过格式化。" >&2
+exit 0

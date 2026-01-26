@@ -58,10 +58,19 @@ function filterOutPartialTargets(targets, partialTargets) {
 }
 
 function resolveOxfmtCommand(repoRoot) {
-  const binName = process.platform === "win32" ? "oxfmt.cmd" : "oxfmt";
-  const local = path.join(repoRoot, "node_modules", ".bin", binName);
-  if (fs.existsSync(local)) {
-    return { command: local, args: [] };
+  if (process.platform === "win32") {
+    const candidates = ["oxfmt.cmd", "oxfmt.CMD", "oxfmt.bat", "oxfmt.BAT"];
+    for (const binName of candidates) {
+      const local = path.join(repoRoot, "node_modules", ".bin", binName);
+      if (fs.existsSync(local)) {
+        return { command: local, args: [] };
+      }
+    }
+  } else {
+    const local = path.join(repoRoot, "node_modules", ".bin", "oxfmt");
+    if (fs.existsSync(local)) {
+      return { command: local, args: [] };
+    }
   }
 
   const result = spawnSync("oxfmt", ["--version"], { stdio: "ignore" });

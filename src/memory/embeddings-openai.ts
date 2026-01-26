@@ -10,6 +10,18 @@ export type OpenAiEmbeddingClient = {
 export const DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 
+function isLocalOpenAiCompatibleBaseUrl(raw?: string): boolean {
+  const value = raw?.trim();
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    return host === "localhost" || host === "127.0.0.1";
+  } catch {
+    return false;
+  }
+}
+
 export function normalizeOpenAiModel(model: string): string {
   const trimmed = model.trim();
   if (!trimmed) return DEFAULT_OPENAI_EMBEDDING_MODEL;
@@ -64,21 +76,23 @@ export async function resolveOpenAiEmbeddingClient(
 
   const apiKey = remoteApiKey
     ? remoteApiKey
-    : requireApiKey(
-        await resolveApiKeyForProvider({
-          provider: "openai",
-          cfg: options.config,
-          agentDir: options.agentDir,
-        }),
-        "openai",
-      );
+    : isLocalOpenAiCompatibleBaseUrl(remoteBaseUrl)
+      ? ""
+      : requireApiKey(
+          await resolveApiKeyForProvider({
+            provider: "openai",
+            cfg: options.config,
+            agentDir: options.agentDir,
+          }),
+          "openai",
+        );
 
   const providerConfig = options.config.models?.providers?.openai;
   const baseUrl = remoteBaseUrl || providerConfig?.baseUrl?.trim() || DEFAULT_OPENAI_BASE_URL;
   const headerOverrides = Object.assign({}, providerConfig?.headers, remote?.headers);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    Authorization: `Bearer ${apiKey}`,
+    ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
     ...headerOverrides,
   };
   const model = normalizeOpenAiModel(options.model);

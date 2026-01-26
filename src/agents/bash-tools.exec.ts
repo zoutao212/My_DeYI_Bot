@@ -303,6 +303,16 @@ function applyShellPath(env: Record<string, string>, shellPath?: string | null) 
   if (merged) env.PATH = merged;
 }
 
+function inferPtyForCommand(params: { command: string; pty?: boolean }) {
+  if (typeof params.pty === "boolean") return false;
+  const cmd = params.command.trimStart();
+  if (!/^(claude|codex|opencode|pi)\b/i.test(cmd)) return false;
+  // Avoid PTY for non-interactive "info" invocations to keep output clean.
+  // PTY can inject terminal control sequences for commands like `claude --version`.
+  if (/(^|\s)(--version|-v|-V|--help|-h)(\s|$)/.test(cmd)) return false;
+  return true;
+}
+
 function maybeNotifyOnExit(session: ProcessSession, status: "completed" | "failed") {
   if (!session.backgrounded || !session.notifyOnExit || session.exitNotified) return;
   const sessionKey = session.sessionKey?.trim();
@@ -1381,7 +1391,13 @@ export function createExecTool(
       const effectiveTimeout =
         typeof params.timeout === "number" ? params.timeout : defaultTimeoutSec;
       const getWarningText = () => (warnings.length ? `${warnings.join("\n")}\n\n` : "");
-      const usePty = params.pty === true && !sandbox;
+      const inferredPty = inferPtyForCommand({ command: params.command, pty: params.pty });
+      if (inferredPty) {
+        warnings.push(
+          "Warning: pty was not set; enabling pty automatically for an interactive CLI command.",
+        );
+      }
+      const usePty = (params.pty === true || inferredPty) && !sandbox;
       const run = await runExecProcess({
         command: params.command,
         workdir,
