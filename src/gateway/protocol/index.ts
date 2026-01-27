@@ -1,4 +1,11 @@
 import AjvPkg, { type ErrorObject } from "ajv";
+
+import type {
+  LlmApprovalsGetParams,
+  LlmApprovalsSetParams,
+  LlmApprovalRequestParams,
+  LlmApprovalResolveParams,
+} from "./schema/types.js";
 import {
   type AgentEvent,
   AgentEventSchema,
@@ -84,6 +91,10 @@ import {
   ExecApprovalRequestParamsSchema,
   type ExecApprovalResolveParams,
   ExecApprovalResolveParamsSchema,
+  LlmApprovalsGetParamsSchema,
+  LlmApprovalsSetParamsSchema,
+  LlmApprovalRequestParamsSchema,
+  LlmApprovalResolveParamsSchema,
   ErrorCodes,
   type ErrorShape,
   ErrorShapeSchema,
@@ -303,6 +314,18 @@ export const validateExecApprovalRequestParams = ajv.compile<ExecApprovalRequest
 );
 export const validateExecApprovalResolveParams = ajv.compile<ExecApprovalResolveParams>(
   ExecApprovalResolveParamsSchema,
+);
+export const validateLlmApprovalsGetParams = ajv.compile<LlmApprovalsGetParams>(
+  LlmApprovalsGetParamsSchema,
+);
+export const validateLlmApprovalsSetParams = ajv.compile<LlmApprovalsSetParams>(
+  LlmApprovalsSetParamsSchema,
+);
+export const validateLlmApprovalRequestParams = ajv.compile<LlmApprovalRequestParams>(
+  LlmApprovalRequestParamsSchema,
+);
+export const validateLlmApprovalResolveParams = ajv.compile<LlmApprovalResolveParams>(
+  LlmApprovalResolveParamsSchema,
 );
 export const validateExecApprovalsNodeGetParams = ajv.compile<ExecApprovalsNodeGetParams>(
   ExecApprovalsNodeGetParamsSchema,

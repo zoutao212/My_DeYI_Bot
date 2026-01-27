@@ -43,6 +43,7 @@ import { renderOverview } from "./views/overview";
 import { renderSessions } from "./views/sessions";
 import { renderExecApprovalPrompt } from "./views/exec-approval";
 import { renderChatSendApprovalPrompt } from "./views/chat-send-approval";
+import { renderLlmApprovalPrompt } from "./views/llm-approval";
 import { getUiL10n } from "./ui-l10n";
 import {
   approveDevicePairing,
@@ -614,6 +615,7 @@ export function renderApp(state: AppViewState) {
           : nothing}
       </main>
       ${renderChatSendApprovalPrompt(state)}
+      ${renderLlmApprovalPrompt(state)}
       ${renderExecApprovalPrompt(state)}
     </div>
   `;

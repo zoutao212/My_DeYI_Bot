@@ -45,6 +45,9 @@ import { startGatewayDiscovery } from "./server-discovery-runtime.js";
 import { ExecApprovalManager } from "./exec-approval-manager.js";
 import { createExecApprovalHandlers } from "./server-methods/exec-approval.js";
 import { createExecApprovalForwarder } from "../infra/exec-approval-forwarder.js";
+import { LlmApprovalManager } from "./llm-approval-manager.js";
+import { createLlmApprovalHandlers } from "./server-methods/llm-approval.js";
+import { installLlmFetchGate } from "../infra/llm-gated-fetch.js";
 import type { startBrowserControlServerIfEnabled } from "./server-browser.js";
 import { createChannelManager } from "./server-channels.js";
 import { createAgentEventHandler } from "./server-chat.js";
@@ -415,6 +418,29 @@ export async function startGatewayServer(
     forwarder: execApprovalForwarder,
   });
 
+  const llmApprovalManager = new LlmApprovalManager();
+  const llmApprovalHandlers = createLlmApprovalHandlers(llmApprovalManager);
+
+  installLlmFetchGate({
+    requestApproval: async ({ request, timeoutMs }) => {
+      const timeout = typeof timeoutMs === "number" ? timeoutMs : 120_000;
+      const record = llmApprovalManager.create(request, timeout, null);
+      const decisionPromise = llmApprovalManager.waitForDecision(record, timeout);
+      broadcast(
+        "llm.approval.requested",
+        {
+          id: record.id,
+          request: record.request,
+          createdAtMs: record.createdAtMs,
+          expiresAtMs: record.expiresAtMs,
+        },
+        { dropIfSlow: true },
+      );
+      const decision = await decisionPromise;
+      return { decision };
+    },
+  });
+
   const canvasHostServerPort = (canvasHostServer as CanvasHostServer | null)?.port;
 
   attachGatewayWsHandlers({
@@ -433,6 +459,7 @@ export async function startGatewayServer(
     extraHandlers: {
       ...pluginRegistry.gatewayHandlers,
       ...execApprovalHandlers,
+      ...llmApprovalHandlers,
     },
     broadcast,
     context: {

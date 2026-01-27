@@ -100,6 +100,8 @@ export const FunctionCallItemSchema = z
     call_id: z.string().optional(),
     name: z.string(),
     arguments: z.string(),
+    thought_signature: z.string().optional(),
+    thoughtSignature: z.string().optional(),
   })
   .strict();
 
@@ -231,6 +233,8 @@ export const OutputItemSchema = z.discriminatedUnion("type", [
       call_id: z.string(),
       name: z.string(),
       arguments: z.string(),
+      thought_signature: z.string().optional(),
+      thoughtSignature: z.string().optional(),
       status: z.enum(["in_progress", "completed"]).optional(),
     })
     .strict(),

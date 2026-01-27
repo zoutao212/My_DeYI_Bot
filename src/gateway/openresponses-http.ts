@@ -6,7 +6,7 @@
  * @see https://www.open-responses.com/
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { buildHistoryContextFromEntries, type HistoryEntry } from "../auto-reply/reply/history.js";
@@ -64,6 +64,11 @@ type OpenResponsesHttpOptions = {
 };
 
 const DEFAULT_BODY_BYTES = 20 * 1024 * 1024;
+
+function makeThoughtSignature(seed: string): string {
+  const digest = createHash("sha256").update(seed).digest();
+  return digest.subarray(0, 12).toString("base64");
+}
 
 function writeSseEvent(res: ServerResponse, event: StreamingEvent) {
   res.write(`event: ${event.type}\n`);
@@ -527,6 +532,9 @@ export async function handleOpenResponsesHttpRequest(
       if (stopReason === "tool_calls" && pendingToolCalls && pendingToolCalls.length > 0) {
         const functionCall = pendingToolCalls[0];
         const functionCallItemId = `call_${randomUUID()}`;
+        const thoughtSignature = makeThoughtSignature(
+          `${functionCall.id}:${functionCall.name}:${functionCall.arguments}`,
+        );
         const response = createResponseResource({
           id: responseId,
           model,
@@ -538,6 +546,8 @@ export async function handleOpenResponsesHttpRequest(
               call_id: functionCall.id,
               name: functionCall.name,
               arguments: functionCall.arguments,
+              thought_signature: thoughtSignature,
+              thoughtSignature,
             },
           ],
           usage,
@@ -792,12 +802,17 @@ export async function handleOpenResponsesHttpRequest(
           });
 
           const functionCallItemId = `call_${randomUUID()}`;
+          const thoughtSignature = makeThoughtSignature(
+            `${functionCall.id}:${functionCall.name}:${functionCall.arguments}`,
+          );
           const functionCallItem = {
             type: "function_call" as const,
             id: functionCallItemId,
             call_id: functionCall.id,
             name: functionCall.name,
             arguments: functionCall.arguments,
+            thought_signature: thoughtSignature,
+            thoughtSignature,
           };
           writeSseEvent(res, {
             type: "response.output_item.added",

@@ -177,6 +177,10 @@ export class ClawdbotApp extends LitElement {
   @state() execApprovalQueue: ExecApprovalRequest[] = [];
   @state() execApprovalBusy = false;
   @state() execApprovalError: string | null = null;
+  @state() llmApprovalQueue: import("./controllers/llm-approval").LlmApprovalRequest[] = [];
+  @state() llmApprovalBusy = false;
+  @state() llmApprovalError: string | null = null;
+  @state() llmApprovalShowFullPayload = false;
 
   @state() configLoading = false;
   @state() configRaw = "{\n}\n";
@@ -530,6 +534,27 @@ export class ClawdbotApp extends LitElement {
       this.execApprovalError = `Exec approval failed: ${String(err)}`;
     } finally {
       this.execApprovalBusy = false;
+    }
+  }
+
+  async handleLlmApprovalDecision(decision: "allow-once" | "allow-always" | "deny") {
+    const active = this.llmApprovalQueue[0];
+    if (!active || !this.client || this.llmApprovalBusy) return;
+    this.llmApprovalBusy = true;
+    this.llmApprovalError = null;
+    try {
+      await this.client.request("llm.approval.resolve", {
+        id: active.id,
+        decision,
+      });
+      this.llmApprovalQueue = this.llmApprovalQueue.filter((entry) => entry.id !== active.id);
+      if (this.llmApprovalQueue.length === 0) {
+        this.llmApprovalShowFullPayload = false;
+      }
+    } catch (err) {
+      this.llmApprovalError = `LLM approval failed: ${String(err)}`;
+    } finally {
+      this.llmApprovalBusy = false;
     }
   }
 

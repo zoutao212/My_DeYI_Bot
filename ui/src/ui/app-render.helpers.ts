@@ -41,11 +41,13 @@ export function renderTab(state: AppViewState, tab: Tab) {
 }
 
 export function renderChatControls(state: AppViewState) {
-  const sessionOptions = resolveSessionOptions(state.sessionKey, state.sessionsResult);
-  const disableThinkingToggle = state.onboarding;
-  const disableFocusToggle = state.onboarding;
-  const showThinking = state.onboarding ? false : state.settings.chatShowThinking;
-  const focusActive = state.onboarding ? true : state.settings.chatFocusMode;
+  const sessions = state.sessionsResult;
+  const sessionOptions = resolveSessionOptions(state.sessionKey, sessions);
+  const disableThinkingToggle = !state.connected || state.chatSending;
+  const showThinking = state.settings.chatShowThinking;
+  const focusActive = state.settings.chatFocusMode;
+  const disableFocusToggle = !state.connected;
+  const requireApproval = state.settings.chatRequireSendApproval;
   // Refresh icon
   const refreshIcon = html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"></path><path d="M21 3v5h-5"></path></svg>`;
   const focusIcon = html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h3"></path><path d="M20 7V4h-3"></path><path d="M4 17v3h3"></path><path d="M20 17v3h-3"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
@@ -126,6 +128,24 @@ export function renderChatControls(state: AppViewState) {
       </button>
       <span class="muted" style="font-size: 12px; user-select: none;">
         ${showThinking ? "思考输出：开" : "思考输出：关"}
+      </span>
+      <button
+        class="btn btn--sm btn--icon ${requireApproval ? "active" : ""}"
+        ?disabled=${!state.connected || state.chatSending}
+        @click=${() => {
+          if (!state.connected || state.chatSending) return;
+          state.applySettings({
+            ...state.settings,
+            chatRequireSendApproval: !state.settings.chatRequireSendApproval,
+          });
+        }}
+        aria-pressed=${requireApproval}
+        title=${requireApproval ? "发送前必须审批（当前开启）" : "发送前必须审批（当前关闭）"}
+      >
+        ${icons.shield}
+      </button>
+      <span class="muted" style="font-size: 12px; user-select: none;">
+        ${requireApproval ? "发送审批：开" : "发送审批：关"}
       </span>
       <button
         class="btn btn--sm btn--icon ${focusActive ? "active" : ""}"

@@ -18,6 +18,7 @@ type ChatHost = {
   sessionKey: string;
   basePath: string;
   hello: GatewayHelloOk | null;
+  settings: { chatRequireSendApproval: boolean };
   chatAvatarUrl: string | null;
   requestChatSendApproval: (request: {
     message: string;
@@ -67,6 +68,7 @@ function enqueueChatMessage(host: ChatHost, text: string) {
 async function confirmChatSend(host: ChatHost, message: string): Promise<boolean> {
   const trimmed = message.trim();
   if (!trimmed) return false;
+  if (!host.settings.chatRequireSendApproval) return true;
   const agentId = resolveAgentIdForSession(host);
   const decision = await host.requestChatSendApproval({
     message: trimmed,

@@ -23,6 +23,12 @@ import {
   parseExecApprovalResolved,
   removeExecApproval,
 } from "./controllers/exec-approval";
+import {
+  addLlmApproval,
+  parseLlmApprovalRequested,
+  parseLlmApprovalResolved,
+  removeLlmApproval,
+} from "./controllers/llm-approval";
 import type { ClawdbotApp } from "./app";
 import type { ExecApprovalRequest } from "./controllers/exec-approval";
 import { loadAssistantIdentity } from "./controllers/assistant-identity";
@@ -52,6 +58,8 @@ type GatewayHost = {
   chatRunId: string | null;
   execApprovalQueue: ExecApprovalRequest[];
   execApprovalError: string | null;
+  llmApprovalQueue: import("./controllers/llm-approval").LlmApprovalRequest[];
+  llmApprovalError: string | null;
 };
 
 type SessionDefaultsSnapshot = {
@@ -114,6 +122,8 @@ export function connectGateway(host: GatewayHost) {
   host.connected = false;
   host.execApprovalQueue = [];
   host.execApprovalError = null;
+  host.llmApprovalQueue = [];
+  host.llmApprovalError = null;
 
   host.client?.stop();
   host.client = new GatewayBrowserClient({
@@ -233,6 +243,26 @@ function handleGatewayEventUnsafe(host: GatewayHost, evt: GatewayEventFrame) {
     const resolved = parseExecApprovalResolved(evt.payload);
     if (resolved) {
       host.execApprovalQueue = removeExecApproval(host.execApprovalQueue, resolved.id);
+    }
+  }
+
+  if (evt.event === "llm.approval.requested") {
+    const entry = parseLlmApprovalRequested(evt.payload);
+    if (entry) {
+      host.llmApprovalQueue = addLlmApproval(host.llmApprovalQueue, entry);
+      host.llmApprovalError = null;
+      const delay = Math.max(0, entry.expiresAtMs - Date.now() + 500);
+      window.setTimeout(() => {
+        host.llmApprovalQueue = removeLlmApproval(host.llmApprovalQueue, entry.id);
+      }, delay);
+    }
+    return;
+  }
+
+  if (evt.event === "llm.approval.resolved") {
+    const resolved = parseLlmApprovalResolved(evt.payload);
+    if (resolved) {
+      host.llmApprovalQueue = removeLlmApproval(host.llmApprovalQueue, resolved.id);
     }
   }
 }

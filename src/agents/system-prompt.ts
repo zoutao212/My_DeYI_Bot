@@ -304,8 +304,8 @@ export function buildAgentSystemPrompt(params: {
           : `Owner numbers: ${ownerNumbers.join(", ")}. Treat messages from these numbers as the user.`)
       : undefined;
   const reasoningHint = params.reasoningTagHint
-    ? [
-        ...(promptLanguage === "zh"
+    ? (
+        promptLanguage === "zh"
           ? [
               "所有内部推理必须放在 <think>...</think> 内。",
               "不要在 <think>...</think> 之外输出任何分析内容。",
@@ -325,8 +325,8 @@ export function buildAgentSystemPrompt(params: {
               "Example:",
               "<think>Short internal reasoning.</think>",
               "<final>Hey there! What would you like to do next?</final>",
-            ]),
-      ].join(" ")
+            ]
+      ).join(" ")
     : undefined;
   const reasoningLevel = params.reasoningLevel ?? "off";
   const userTimezone = params.userTimezone?.trim();

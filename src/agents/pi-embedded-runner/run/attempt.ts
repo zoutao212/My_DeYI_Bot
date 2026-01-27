@@ -84,6 +84,7 @@ import { buildTtsSystemPromptHint } from "../../../tts/tts.js";
 import { isTimeoutError } from "../../failover-error.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
+import { withLlmRequestContext } from "../../../infra/llm-request-context.js";
 import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
 import { detectAndLoadPromptImages } from "./images.js";
 
@@ -790,9 +791,27 @@ export async function runEmbeddedAttempt(
           // Only pass images option if there are actually images to pass
           // This avoids potential issues with models that don't expect the images parameter
           if (imageResult.images.length > 0) {
-            await abortable(activeSession.prompt(effectivePrompt, { images: imageResult.images }));
+            await withLlmRequestContext(
+              {
+                runId: params.runId,
+                sessionKey: params.sessionKey,
+                provider: params.provider,
+                modelId: params.modelId,
+                source: params.messageChannel ?? params.messageProvider ?? "unknown",
+              },
+              () => abortable(activeSession.prompt(effectivePrompt, { images: imageResult.images })),
+            );
           } else {
-            await abortable(activeSession.prompt(effectivePrompt));
+            await withLlmRequestContext(
+              {
+                runId: params.runId,
+                sessionKey: params.sessionKey,
+                provider: params.provider,
+                modelId: params.modelId,
+                source: params.messageChannel ?? params.messageProvider ?? "unknown",
+              },
+              () => abortable(activeSession.prompt(effectivePrompt)),
+            );
           }
         } catch (err) {
           promptError = err;

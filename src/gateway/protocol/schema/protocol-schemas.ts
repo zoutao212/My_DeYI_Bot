@@ -61,6 +61,13 @@ import {
   ExecApprovalResolveParamsSchema,
 } from "./exec-approvals.js";
 import {
+  LlmApprovalsGetParamsSchema,
+  LlmApprovalsSetParamsSchema,
+  LlmApprovalsSnapshotSchema,
+  LlmApprovalRequestParamsSchema,
+  LlmApprovalResolveParamsSchema,
+} from "./llm-approvals.js";
+import {
   DevicePairApproveParamsSchema,
   DevicePairListParamsSchema,
   DevicePairRejectParamsSchema,
@@ -213,6 +220,11 @@ export const ProtocolSchemas: Record<string, TSchema> = {
   ExecApprovalsSnapshot: ExecApprovalsSnapshotSchema,
   ExecApprovalRequestParams: ExecApprovalRequestParamsSchema,
   ExecApprovalResolveParams: ExecApprovalResolveParamsSchema,
+  LlmApprovalsGetParams: LlmApprovalsGetParamsSchema,
+  LlmApprovalsSetParams: LlmApprovalsSetParamsSchema,
+  LlmApprovalsSnapshot: LlmApprovalsSnapshotSchema,
+  LlmApprovalRequestParams: LlmApprovalRequestParamsSchema,
+  LlmApprovalResolveParams: LlmApprovalResolveParamsSchema,
   DevicePairListParams: DevicePairListParamsSchema,
   DevicePairApproveParams: DevicePairApproveParamsSchema,
   DevicePairRejectParams: DevicePairRejectParamsSchema,

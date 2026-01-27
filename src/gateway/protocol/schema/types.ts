@@ -59,6 +59,13 @@ import type {
   ExecApprovalResolveParamsSchema,
 } from "./exec-approvals.js";
 import type {
+  LlmApprovalsGetParamsSchema,
+  LlmApprovalsSetParamsSchema,
+  LlmApprovalsSnapshotSchema,
+  LlmApprovalRequestParamsSchema,
+  LlmApprovalResolveParamsSchema,
+} from "./llm-approvals.js";
+import type {
   DevicePairApproveParamsSchema,
   DevicePairListParamsSchema,
   DevicePairRejectParamsSchema,
@@ -79,11 +86,7 @@ import type {
 import type {
   ChatAbortParamsSchema,
   ChatEventSchema,
-  ChatHistoryParamsSchema,
   ChatInjectParamsSchema,
-  ChatSendParamsSchema,
-  ChatSendPreviewParamsSchema,
-  ChatSendPreviewResultSchema,
   LogsTailParamsSchema,
   LogsTailResultSchema,
 } from "./logs-chat.js";
@@ -204,6 +207,12 @@ export type ExecApprovalsNodeSetParams = Static<typeof ExecApprovalsNodeSetParam
 export type ExecApprovalsSnapshot = Static<typeof ExecApprovalsSnapshotSchema>;
 export type ExecApprovalRequestParams = Static<typeof ExecApprovalRequestParamsSchema>;
 export type ExecApprovalResolveParams = Static<typeof ExecApprovalResolveParamsSchema>;
+
+export type LlmApprovalsGetParams = Static<typeof LlmApprovalsGetParamsSchema>;
+export type LlmApprovalsSetParams = Static<typeof LlmApprovalsSetParamsSchema>;
+export type LlmApprovalsSnapshot = Static<typeof LlmApprovalsSnapshotSchema>;
+export type LlmApprovalRequestParams = Static<typeof LlmApprovalRequestParamsSchema>;
+export type LlmApprovalResolveParams = Static<typeof LlmApprovalResolveParamsSchema>;
 export type DevicePairListParams = Static<typeof DevicePairListParamsSchema>;
 export type DevicePairApproveParams = Static<typeof DevicePairApproveParamsSchema>;
 export type DevicePairRejectParams = Static<typeof DevicePairRejectParamsSchema>;

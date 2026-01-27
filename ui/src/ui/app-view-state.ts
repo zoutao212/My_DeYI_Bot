@@ -30,6 +30,7 @@ import type {
 } from "./controllers/exec-approvals";
 import type { DevicePairingList } from "./controllers/devices";
 import type { ExecApprovalRequest } from "./controllers/exec-approval";
+import type { LlmApprovalRequest } from "./controllers/llm-approval";
 import type { NostrProfileFormState } from "./views/channels.nostr-profile-form";
 
 export type AppViewState = {
@@ -122,6 +123,11 @@ export type AppViewState = {
   execApprovalQueue: ExecApprovalRequest[];
   execApprovalBusy: boolean;
   execApprovalError: string | null;
+  llmApprovalQueue: LlmApprovalRequest[];
+  llmApprovalBusy: boolean;
+  llmApprovalError: string | null;
+  llmApprovalShowFullPayload: boolean;
+  handleLlmApprovalDecision: (decision: "allow-once" | "allow-always" | "deny") => Promise<void>;
   configLoading: boolean;
   configRaw: string;
   configRawOriginal: string;
