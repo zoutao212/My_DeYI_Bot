@@ -6,6 +6,7 @@ export type ChatState = {
   client: GatewayBrowserClient | null;
   connected: boolean;
   sessionKey: string;
+  settings: { systemPromptLanguage: "en" | "zh" };
   chatLoading: boolean;
   chatMessages: unknown[];
   chatThinkingLevel: string | null;
@@ -70,6 +71,7 @@ export async function sendChatMessage(state: ChatState, message: string): Promis
       message: msg,
       deliver: false,
       idempotencyKey: runId,
+      promptLanguage: state.settings.systemPromptLanguage,
     });
     return true;
   } catch (err) {

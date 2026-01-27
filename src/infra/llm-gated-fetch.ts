@@ -4,6 +4,7 @@ import {
   type LlmApprovalRequestPayload,
 } from "./llm-approvals.js";
 import { getLlmRequestContext } from "./llm-request-context.js";
+import { createHash } from "node:crypto";
 
 function toPlainHeaders(headers: HeadersInit | undefined): Record<string, string> {
   const out: Record<string, string> = {};
@@ -94,7 +95,7 @@ async function buildApprovalPayload(params: {
     bodyText = await readBodyTextFromRequest(req);
   }
 
-  const bodyTextTruncated = bodyText != null ? truncateText(bodyText, 40_000) : null;
+  const bodyTextTruncated = bodyText != null ? truncateText(bodyText, 200_000) : null;
   const bodyJson = bodyTextTruncated ? tryParseJson(bodyTextTruncated) : null;
   const bodySummary = summarizeBody({ bodyText: bodyTextTruncated, bodyJson });
 
@@ -123,6 +124,32 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
   const original = globalThis.fetch;
   if (typeof original !== "function") return;
 
+  const ATTEMPT_WINDOW_MS = 5 * 60_000;
+  const MAX_ATTEMPTS_PER_KEY = 2;
+  const attempts = new Map<string, { firstAtMs: number; count: number }>();
+
+  function computeAttemptKey(payload: LlmApprovalRequestPayload): string {
+    const stable = JSON.stringify({
+      provider: payload.provider ?? null,
+      modelId: payload.modelId ?? null,
+      source: payload.source ?? null,
+      toolName: payload.toolName ?? null,
+      sessionKey: payload.sessionKey ?? null,
+      runId: payload.runId ?? null,
+      url: payload.url,
+      method: payload.method ?? null,
+      bodyText: payload.bodyText ?? null,
+    });
+    return createHash("sha256").update(stable).digest("hex");
+  }
+
+  function pruneAttempts(): void {
+    const now = Date.now();
+    for (const [key, entry] of attempts.entries()) {
+      if (now - entry.firstAtMs > ATTEMPT_WINDOW_MS) attempts.delete(key);
+    }
+  }
+
   const wrapped: typeof fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const ctx = getLlmRequestContext();
     if (!ctx) {
@@ -134,17 +161,40 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       return await original(input, init);
     }
 
+    pruneAttempts();
+    const attemptKey = computeAttemptKey(payload);
+    const attemptEntry = attempts.get(attemptKey);
+    if (attemptEntry && attemptEntry.count >= MAX_ATTEMPTS_PER_KEY) {
+      throw new Error(
+        `LLM_REQUEST_RETRY_LIMIT: exceeded max attempts (${MAX_ATTEMPTS_PER_KEY}) for same request in ${ATTEMPT_WINDOW_MS}ms window`,
+      );
+    }
+
     const approvals = loadLlmApprovals();
     const ask = shouldAskLlmApproval({ approvals, request: payload });
     if (ask.ask) {
       const res = await params.requestApproval({ request: payload, timeoutMs: 120_000 });
       const decision = res.decision;
       if (decision === "allow-once" || decision === "allow-always") {
+        const now = Date.now();
+        const current = attempts.get(attemptKey);
+        if (!current) {
+          attempts.set(attemptKey, { firstAtMs: now, count: 1 });
+        } else {
+          attempts.set(attemptKey, { firstAtMs: current.firstAtMs, count: current.count + 1 });
+        }
         return await original(input, init);
       }
       throw new Error("LLM_REQUEST_DENIED: approval required");
     }
 
+    const now = Date.now();
+    const current = attempts.get(attemptKey);
+    if (!current) {
+      attempts.set(attemptKey, { firstAtMs: now, count: 1 });
+    } else {
+      attempts.set(attemptKey, { firstAtMs: current.firstAtMs, count: current.count + 1 });
+    }
     return await original(input, init);
   };
 

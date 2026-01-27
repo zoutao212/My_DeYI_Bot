@@ -980,6 +980,7 @@
   white-space: pre-wrap;
   overflow: hidden;
   display: -webkit-box;
+  line-clamp: 3;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
 }
@@ -1407,7 +1408,7 @@
 }
 
 .exec-approval-card {
-  width: min(760px, calc(100vw - 48px));
+  width: min(980px, calc(100vw - 48px));
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -1462,6 +1463,24 @@
   white-space: pre-wrap;
   font-family: var(--mono);
   font-size: 13px;
+}
+
+.exec-approval-command--scroll {
+  max-height: min(52dvh, 520px);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.exec-approval-command--pretty {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.exec-approval-command--raw {
+  white-space: pre;
+  overflow-x: auto;
+  overflow-y: auto;
+  overflow-wrap: normal;
 }
 
 .exec-approval-meta {

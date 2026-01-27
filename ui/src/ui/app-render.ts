@@ -521,6 +521,15 @@ export function renderApp(state: AppViewState) {
               originalRaw: state.configRawOriginal,
               valid: state.configValid,
               issues: state.configIssues,
+              error: state.lastError,
+              configPath:
+                typeof state.configSnapshot?.path === "string" ? state.configSnapshot.path : null,
+              configHash:
+                typeof state.configSnapshot?.hash === "string" ? state.configSnapshot.hash : null,
+              configExists:
+                typeof state.configSnapshot?.exists === "boolean"
+                  ? state.configSnapshot.exists
+                  : null,
               loading: state.configLoading,
               saving: state.configSaving,
               applying: state.configApplying,
@@ -540,6 +549,10 @@ export function renderApp(state: AppViewState) {
               modelsQuickApiKey: state.modelsQuickApiKey,
               modelsQuickModelId: state.modelsQuickModelId,
               modelsQuickSetAsDefault: state.modelsQuickSetAsDefault,
+              modelsNewProviderId: state.modelsNewProviderId,
+              modelsNewBaseUrl: state.modelsNewBaseUrl,
+              modelsNewApiKey: state.modelsNewApiKey,
+              modelsNewModelId: state.modelsNewModelId,
               embeddingsQuickBaseUrl: state.embeddingsQuickBaseUrl,
               embeddingsQuickApiKey: state.embeddingsQuickApiKey,
               embeddingsQuickModelId: state.embeddingsQuickModelId,
@@ -550,6 +563,10 @@ export function renderApp(state: AppViewState) {
               onModelsQuickModelIdChange: (next: string) => (state.modelsQuickModelId = next),
               onModelsQuickSetAsDefaultChange: (next: boolean) =>
                 (state.modelsQuickSetAsDefault = next),
+              onModelsNewProviderIdChange: (next: string) => (state.modelsNewProviderId = next),
+              onModelsNewBaseUrlChange: (next: string) => (state.modelsNewBaseUrl = next),
+              onModelsNewApiKeyChange: (next: string) => (state.modelsNewApiKey = next),
+              onModelsNewModelIdChange: (next: string) => (state.modelsNewModelId = next),
               onEmbeddingsQuickBaseUrlChange: (next: string) =>
                 (state.embeddingsQuickBaseUrl = next),
               onEmbeddingsQuickApiKeyChange: (next: string) =>
@@ -561,6 +578,8 @@ export function renderApp(state: AppViewState) {
               },
               onFormModeChange: (mode) => (state.configFormMode = mode),
               onFormPatch: (path, value) => updateConfigFormValue(state, path, value),
+              onFormRemove: (path: Array<string | number>) =>
+                removeConfigFormValue(state, path),
               onSearchChange: (query) => (state.configSearchQuery = query),
               onSectionChange: (section) => {
                 state.configActiveSection = section;

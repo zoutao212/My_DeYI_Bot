@@ -150,6 +150,22 @@ export function resolveConfiguredModelRef(params: {
     });
     if (resolved) return resolved.ref;
   }
+
+  const active = (() => {
+    const models = params.cfg.models as
+      | { activeProviderId?: unknown; activeModelId?: unknown }
+      | undefined;
+    const provider =
+      typeof models?.activeProviderId === "string" ? models.activeProviderId.trim() : "";
+    const model = typeof models?.activeModelId === "string" ? models.activeModelId.trim() : "";
+    if (!provider || !model) return null;
+    return { provider, model };
+  })();
+  if (active) {
+    const provider = normalizeProviderId(active.provider);
+    const model = normalizeProviderModelId(provider, active.model);
+    if (provider && model) return { provider, model };
+  }
   return { provider: params.defaultProvider, model: params.defaultModel };
 }
 

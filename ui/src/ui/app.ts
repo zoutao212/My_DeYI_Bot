@@ -181,6 +181,7 @@ export class ClawdbotApp extends LitElement {
   @state() llmApprovalBusy = false;
   @state() llmApprovalError: string | null = null;
   @state() llmApprovalShowFullPayload = false;
+  @state() llmApprovalDisplayMode: "pretty" | "raw" = "pretty";
 
   @state() configLoading = false;
   @state() configRaw = "{\n}\n";
@@ -209,6 +210,11 @@ export class ClawdbotApp extends LitElement {
   @state() modelsQuickApiKey = "";
   @state() modelsQuickModelId = "";
   @state() modelsQuickSetAsDefault = true;
+
+  @state() modelsNewProviderId = "";
+  @state() modelsNewBaseUrl = "";
+  @state() modelsNewApiKey = "";
+  @state() modelsNewModelId = "";
 
   @state() embeddingsQuickBaseUrl = "http://127.0.0.1:12345/v1";
   @state() embeddingsQuickApiKey = "";
@@ -550,6 +556,7 @@ export class ClawdbotApp extends LitElement {
       this.llmApprovalQueue = this.llmApprovalQueue.filter((entry) => entry.id !== active.id);
       if (this.llmApprovalQueue.length === 0) {
         this.llmApprovalShowFullPayload = false;
+        this.llmApprovalDisplayMode = "pretty";
       }
     } catch (err) {
       this.llmApprovalError = `LLM approval failed: ${String(err)}`;

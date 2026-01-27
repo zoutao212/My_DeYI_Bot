@@ -168,6 +168,8 @@ const FIELD_LABELS: Record<string, string> = {
   "agents.list[].tools.profile": "Agent Tool Profile",
   "tools.byProvider": "Tool Policy by Provider",
   "agents.list[].tools.byProvider": "Agent Tool Policy by Provider",
+  "models.activeProviderId": "当前选择的供应商（仅 UI）",
+  "models.activeModelId": "当前选择的模型（仅 UI）",
   "tools.exec.applyPatch.enabled": "Enable apply_patch",
   "tools.exec.applyPatch.allowModels": "apply_patch Model Allowlist",
   "tools.exec.notifyOnExit": "Exec Notify On Exit",
@@ -408,6 +410,10 @@ const FIELD_HELP: Record<string, string> = {
   "tools.exec.pathPrepend": "Directories to prepend to PATH for exec runs (gateway/sandbox).",
   "tools.exec.safeBins":
     "Allow stdin-only safe binaries to run without explicit allowlist entries.",
+  "models.activeProviderId":
+    "仅用于 UI 的当前选择：当 agents.defaults.model.primary 未设置时，会用它作为默认模型的回退来源。",
+  "models.activeModelId":
+    "仅用于 UI 的当前选择：当 agents.defaults.model.primary 未设置时，会用它作为默认模型的回退来源。",
   "tools.message.allowCrossContextSend":
     "Legacy override: allow cross-context sends across all providers.",
   "tools.message.crossContext.allowWithinProvider":

@@ -127,6 +127,7 @@ export type AppViewState = {
   llmApprovalBusy: boolean;
   llmApprovalError: string | null;
   llmApprovalShowFullPayload: boolean;
+  llmApprovalDisplayMode: "pretty" | "raw";
   handleLlmApprovalDecision: (decision: "allow-once" | "allow-always" | "deny") => Promise<void>;
   configLoading: boolean;
   configRaw: string;
@@ -165,6 +166,11 @@ export type AppViewState = {
   modelsQuickApiKey: string;
   modelsQuickModelId: string;
   modelsQuickSetAsDefault: boolean;
+
+  modelsNewProviderId: string;
+  modelsNewBaseUrl: string;
+  modelsNewApiKey: string;
+  modelsNewModelId: string;
 
   embeddingsQuickBaseUrl: string;
   embeddingsQuickApiKey: string;

@@ -182,6 +182,9 @@ export async function runEmbeddedAttempt(
       workspaceDir: effectiveWorkspace,
     });
 
+    const promptLanguage =
+      params.config?.agents?.defaults?.promptLanguage === "zh" ? "zh" : "en";
+
     const sessionLabel = params.sessionKey ?? params.sessionId;
     const { bootstrapFiles: hookAdjustedBootstrapFiles, contextFiles } =
       await resolveBootstrapContextForRun({
@@ -189,6 +192,7 @@ export async function runEmbeddedAttempt(
         config: params.config,
         sessionKey: params.sessionKey,
         sessionId: params.sessionId,
+        promptLanguage,
         warn: makeBootstrapWarn({ sessionLabel, warn: (message) => log.warn(message) }),
       });
     const workspaceNotes = hookAdjustedBootstrapFiles.some(
@@ -348,6 +352,7 @@ export async function runEmbeddedAttempt(
       workspaceNotes,
       reactionGuidance,
       promptMode,
+      promptLanguage,
       runtimeInfo,
       messageToolHints,
       sandboxInfo,

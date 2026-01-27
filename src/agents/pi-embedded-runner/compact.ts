@@ -202,12 +202,16 @@ export async function compactEmbeddedPiSessionDirect(
       workspaceDir: effectiveWorkspace,
     });
 
+    const promptLanguage =
+      params.config?.agents?.defaults?.promptLanguage === "zh" ? "zh" : "en";
+
     const sessionLabel = params.sessionKey ?? params.sessionId;
     const { contextFiles } = await resolveBootstrapContextForRun({
       workspaceDir: effectiveWorkspace,
       config: params.config,
       sessionKey: params.sessionKey,
       sessionId: params.sessionId,
+      promptLanguage,
       warn: makeBootstrapWarn({ sessionLabel, warn: (message) => log.warn(message) }),
     });
     const runAbortController = new AbortController();
@@ -336,6 +340,7 @@ export async function compactEmbeddedPiSessionDirect(
       docsPath: docsPath ?? undefined,
       ttsHint,
       promptMode,
+      promptLanguage,
       runtimeInfo,
       reactionGuidance,
       messageToolHints,

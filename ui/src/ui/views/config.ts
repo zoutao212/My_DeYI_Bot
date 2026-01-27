@@ -13,6 +13,10 @@ export type ConfigProps = {
   originalRaw: string;
   valid: boolean | null;
   issues: unknown[];
+  error: string | null;
+  configPath: string | null;
+  configHash: string | null;
+  configExists: boolean | null;
   loading: boolean;
   saving: boolean;
   applying: boolean;
@@ -33,6 +37,11 @@ export type ConfigProps = {
   modelsQuickModelId: string;
   modelsQuickSetAsDefault: boolean;
 
+  modelsNewProviderId: string;
+  modelsNewBaseUrl: string;
+  modelsNewApiKey: string;
+  modelsNewModelId: string;
+
   embeddingsQuickBaseUrl: string;
   embeddingsQuickApiKey: string;
   embeddingsQuickModelId: string;
@@ -42,12 +51,18 @@ export type ConfigProps = {
   onModelsQuickModelIdChange: (next: string) => void;
   onModelsQuickSetAsDefaultChange: (next: boolean) => void;
 
+  onModelsNewProviderIdChange: (next: string) => void;
+  onModelsNewBaseUrlChange: (next: string) => void;
+  onModelsNewApiKeyChange: (next: string) => void;
+  onModelsNewModelIdChange: (next: string) => void;
+
   onEmbeddingsQuickBaseUrlChange: (next: string) => void;
   onEmbeddingsQuickApiKeyChange: (next: string) => void;
   onEmbeddingsQuickModelIdChange: (next: string) => void;
   onRawChange: (next: string) => void;
   onFormModeChange: (mode: "form" | "raw") => void;
   onFormPatch: (path: Array<string | number>, value: unknown) => void;
+  onFormRemove: (path: Array<string | number>) => void;
   onSearchChange: (query: string) => void;
   onSectionChange: (section: string | null) => void;
   onSubsectionChange: (section: string | null) => void;
@@ -281,6 +296,44 @@ export function renderConfig(props: ConfigProps) {
   const showModelsQuick = props.formMode === "form" && props.activeSection === "models";
   const showEmbeddingsQuick = props.formMode === "form" && props.activeSection === "models";
 
+  const readStringAtPath = (value: unknown, path: string[]): string | null => {
+    let cur: unknown = value;
+    for (const key of path) {
+      if (!cur || typeof cur !== "object" || Array.isArray(cur)) return null;
+      cur = (cur as Record<string, unknown>)[key];
+    }
+    return typeof cur === "string" ? cur : null;
+  };
+
+  const readObjectAtPath = (value: unknown, path: string[]): Record<string, unknown> | null => {
+    let cur: unknown = value;
+    for (const key of path) {
+      if (!cur || typeof cur !== "object" || Array.isArray(cur)) return null;
+      cur = (cur as Record<string, unknown>)[key];
+    }
+    if (!cur || typeof cur !== "object" || Array.isArray(cur)) return null;
+    return cur as Record<string, unknown>;
+  };
+
+  const resolveProviderModelsFromForm = (value: Record<string, unknown> | null) => {
+    const providers = readObjectAtPath(value, ["models", "providers"]);
+    if (!providers) return { providers: {} as Record<string, { models: string[] }>, providerIds: [] as string[] };
+    const providerIds = Object.keys(providers).sort((a, b) => a.localeCompare(b));
+    const normalized: Record<string, { models: string[] }> = {};
+    for (const providerId of providerIds) {
+      const entry = providers[providerId];
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const modelsRaw = (entry as { models?: unknown }).models;
+      const models: string[] = Array.isArray(modelsRaw)
+        ? (modelsRaw as unknown[])
+            .map((m) => (m && typeof m === "object" ? (m as { id?: unknown }).id : null))
+            .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+        : [];
+      normalized[providerId] = { models };
+    }
+    return { providers: normalized, providerIds };
+  };
+
   const normalizeProviderId = (raw: string) =>
     raw
       .trim()
@@ -295,7 +348,6 @@ export function renderConfig(props: ConfigProps) {
     !props.loading &&
     Boolean(normalizeProviderId(props.modelsQuickProviderId)) &&
     Boolean(props.modelsQuickBaseUrl.trim()) &&
-    Boolean(props.modelsQuickApiKey.trim()) &&
     Boolean(normalizeModelId(props.modelsQuickModelId));
 
   const canApplyEmbeddingsQuick =
@@ -309,13 +361,13 @@ export function renderConfig(props: ConfigProps) {
     const baseUrl = props.modelsQuickBaseUrl.trim();
     const apiKey = props.modelsQuickApiKey.trim();
     const modelId = normalizeModelId(props.modelsQuickModelId);
-    if (!providerId || !baseUrl || !apiKey || !modelId) return;
+    if (!providerId || !baseUrl || !modelId) return;
 
     // Minimum valid schema for models.providers.*
     // Note: costs/context/maxTokens are optional in config schema.
     const provider = {
       baseUrl,
-      apiKey,
+      ...(apiKey ? { apiKey } : {}),
       auth: "api-key",
       api: "openai-responses",
       models: [
@@ -438,6 +490,29 @@ export function renderConfig(props: ConfigProps) {
 
       <!-- Main content -->
       <main class="config-main">
+        ${props.configPath || props.configHash || props.error
+          ? html`
+              <div class="callout" style="margin-bottom: 12px;">
+                ${props.configPath
+                  ? html`<div><strong>当前配置文件</strong>：<code>${props.configPath}</code></div>`
+                  : nothing}
+                ${props.configHash
+                  ? html`<div><strong>当前配置哈希</strong>：<code>${props.configHash}</code></div>`
+                  : nothing}
+                ${props.configExists != null
+                  ? html`<div><strong>文件是否存在</strong>：${props.configExists ? "是" : "否"}</div>`
+                  : nothing}
+                ${props.error
+                  ? html`<div style="margin-top: 8px;"><strong>最近一次错误</strong>：<code>${props.error}</code></div>`
+                  : nothing}
+                <div class="card-sub" style="margin-top: 8px;">
+                  如果你手动改了 <code>clawdbot.json</code>，保存/应用可能会因为 <code>baseHash</code> 冲突被拒绝；请先点
+                  <strong>Reload（重载）</strong> 再 Save/Apply。
+                </div>
+              </div>
+            `
+          : nothing}
+
         <!-- Action bar -->
         <div class="config-actions">
           <div class="config-actions__left">
@@ -621,6 +696,417 @@ export function renderConfig(props: ConfigProps) {
                           </button>
                         </div>
                       </section>
+
+                      ${(() => {
+                        const formValue = props.formValue;
+                        const { providers, providerIds } = resolveProviderModelsFromForm(formValue);
+                        const providersRaw = readObjectAtPath(formValue, ["models", "providers"]);
+                        const activeProviderIdRaw = readStringAtPath(formValue, [
+                          "models",
+                          "activeProviderId",
+                        ])?.trim();
+                        const activeModelIdRaw = readStringAtPath(formValue, [
+                          "models",
+                          "activeModelId",
+                        ])?.trim();
+                        const providerId =
+                          activeProviderIdRaw && providers[activeProviderIdRaw]
+                            ? activeProviderIdRaw
+                            : providerIds[0] ?? "";
+                        const models = providerId ? providers[providerId]?.models ?? [] : [];
+                        const modelId =
+                          activeModelIdRaw && models.includes(activeModelIdRaw)
+                            ? activeModelIdRaw
+                            : models[0] ?? "";
+
+                        const providerEntryRaw =
+                          providerId && providersRaw && providersRaw[providerId] && typeof providersRaw[providerId] === "object" && !Array.isArray(providersRaw[providerId])
+                            ? (providersRaw[providerId] as Record<string, unknown>)
+                            : null;
+                        const providerModelsRaw =
+                          providerEntryRaw && Array.isArray((providerEntryRaw as { models?: unknown }).models)
+                            ? (((providerEntryRaw as { models?: unknown }).models ?? []) as unknown[])
+                            : [];
+
+                        const canWriteActive =
+                          props.connected && !props.loading && Boolean(providerId) && Boolean(modelId);
+
+                        const setActive = () => {
+                          if (!providerId || !modelId) return;
+                          props.onFormPatch(["models", "activeProviderId"], providerId);
+                          props.onFormPatch(["models", "activeModelId"], modelId);
+                        };
+
+                        const setDefault = () => {
+                          if (!providerId || !modelId) return;
+                          const key = `${providerId}/${modelId}`;
+                          props.onFormPatch(["agents", "defaults", "model", "primary"], key);
+                          props.onFormPatch(["agents", "defaults", "models", key], {});
+                        };
+
+                        const onProviderChange = (nextRaw: string) => {
+                          const next = String(nextRaw ?? "").trim();
+                          if (!next) return;
+                          props.onFormPatch(["models", "activeProviderId"], next);
+                          const nextModels = providers[next]?.models ?? [];
+                          const nextModel = nextModels[0] ?? "";
+                          if (nextModel) props.onFormPatch(["models", "activeModelId"], nextModel);
+                        };
+
+                        const onModelChange = (nextRaw: string) => {
+                          const next = String(nextRaw ?? "").trim();
+                          if (!next) return;
+                          props.onFormPatch(["models", "activeModelId"], next);
+                        };
+
+                        const removeProvider = () => {
+                          if (!providerId) return;
+                          props.onFormRemove(["models", "providers", providerId]);
+                          if (activeProviderIdRaw === providerId) {
+                            props.onFormRemove(["models", "activeProviderId"]);
+                            props.onFormRemove(["models", "activeModelId"]);
+                          }
+                        };
+
+                        const removeModel = (id: string) => {
+                          if (!providerId) return;
+                          const index = providerModelsRaw.findIndex((m) =>
+                            m && typeof m === "object" && !Array.isArray(m) && (m as { id?: unknown }).id === id,
+                          );
+                          if (index < 0) return;
+                          props.onFormRemove(["models", "providers", providerId, "models", index]);
+                          if (activeModelIdRaw === id) {
+                            props.onFormRemove(["models", "activeModelId"]);
+                          }
+                        };
+
+                        const addModelToProvider = () => {
+                          if (!providerId) return;
+                          const nextId = String(props.modelsQuickModelId ?? "").trim();
+                          if (!nextId) return;
+                          const exists = providerModelsRaw.some(
+                            (m) =>
+                              m && typeof m === "object" && !Array.isArray(m) && (m as { id?: unknown }).id === nextId,
+                          );
+                          if (exists) return;
+
+                          const apiRaw = providerEntryRaw ? (providerEntryRaw as { api?: unknown }).api : undefined;
+                          const api = typeof apiRaw === "string" ? apiRaw : "openai-responses";
+                          const nextModel = {
+                            id: nextId,
+                            name: nextId,
+                            api,
+                            input: ["text"],
+                          };
+                          props.onFormPatch(
+                            ["models", "providers", providerId, "models"],
+                            [...providerModelsRaw, nextModel],
+                          );
+
+                          props.onFormPatch(["models", "activeProviderId"], providerId);
+                          props.onFormPatch(["models", "activeModelId"], nextId);
+                        };
+
+                        const seedTestProviders = () => {
+                          const seed = {
+                            openai_local: {
+                              baseUrl: "http://127.0.0.1:12345/v1",
+                              auth: "api-key",
+                              api: "openai-responses",
+                              models: [
+                                {
+                                  id: "gpt-4o-mini",
+                                  name: "gpt-4o-mini",
+                                  api: "openai-responses",
+                                  input: ["text"],
+                                },
+                                {
+                                  id: "text-embedding-3-small",
+                                  name: "text-embedding-3-small",
+                                  api: "openai-responses",
+                                  input: ["text"],
+                                },
+                              ],
+                            },
+                            openai_cloud: {
+                              baseUrl: "https://api.openai.com/v1",
+                              auth: "api-key",
+                              api: "openai-responses",
+                              models: [
+                                {
+                                  id: "gpt-4o-mini",
+                                  name: "gpt-4o-mini",
+                                  api: "openai-responses",
+                                  input: ["text"],
+                                },
+                              ],
+                            },
+                          };
+                          const merged = {
+                            ...(providersRaw ?? {}),
+                            ...seed,
+                          };
+                          props.onFormPatch(["models", "providers"], merged);
+                        };
+
+                        const canCreateProvider =
+                          props.connected &&
+                          !props.loading &&
+                          Boolean(normalizeProviderId(props.modelsNewProviderId)) &&
+                          Boolean(props.modelsNewBaseUrl.trim()) &&
+                          Boolean(normalizeModelId(props.modelsNewModelId));
+
+                        const createProvider = () => {
+                          const newId = normalizeProviderId(props.modelsNewProviderId);
+                          const baseUrl = props.modelsNewBaseUrl.trim();
+                          const apiKey = props.modelsNewApiKey.trim();
+                          const modelId = normalizeModelId(props.modelsNewModelId);
+                          if (!newId || !baseUrl || !modelId) return;
+
+                          const provider = {
+                            baseUrl,
+                            ...(apiKey ? { apiKey } : {}),
+                            auth: "api-key",
+                            api: "openai-responses",
+                            models: [
+                              {
+                                id: modelId,
+                                name: modelId,
+                                api: "openai-responses",
+                                input: ["text"],
+                              },
+                            ],
+                          };
+                          props.onFormPatch(["models", "providers", newId], provider);
+                          props.onFormPatch(["models", "activeProviderId"], newId);
+                          props.onFormPatch(["models", "activeModelId"], modelId);
+                        };
+
+                        const copyProviderAsNew = () => {
+                          const newId = normalizeProviderId(props.modelsNewProviderId);
+                          if (!newId || !providerId) return;
+                          if (!providerEntryRaw) return;
+
+                          const baseUrlOverride = props.modelsNewBaseUrl.trim();
+                          const apiKeyOverride = props.modelsNewApiKey.trim();
+                          const cloned: Record<string, unknown> = {
+                            ...providerEntryRaw,
+                            ...(baseUrlOverride ? { baseUrl: baseUrlOverride } : {}),
+                            ...(apiKeyOverride
+                              ? { apiKey: apiKeyOverride }
+                              : apiKeyOverride === ""
+                                ? {}
+                                : {}),
+                          };
+                          props.onFormPatch(["models", "providers", newId], cloned);
+                          props.onFormPatch(["models", "activeProviderId"], newId);
+
+                          const firstModel = providerModelsRaw
+                            .map((m) => (m && typeof m === "object" && !Array.isArray(m) ? (m as { id?: unknown }).id : null))
+                            .find((id): id is string => typeof id === "string" && id.trim().length > 0);
+                          if (firstModel) props.onFormPatch(["models", "activeModelId"], firstModel);
+                        };
+
+                        if (providerIds.length === 0) return nothing;
+                        return html`
+                          <section class="card" style="margin-bottom: 12px;">
+                            <div class="card-title">当前选择（仅 UI）</div>
+                            <div class="card-sub">
+                              仅用于 UI 的当前选择：当 <code>agents.defaults.model.primary</code> 未设置时，会回退到
+                              <code>models.activeProviderId</code> + <code>models.activeModelId</code>。
+                            </div>
+
+                            <div class="row" style="gap: 12px; flex-wrap: wrap; margin-top: 12px;">
+                              <label class="field" style="min-width: 220px;">
+                                <span>Provider（供应商）</span>
+                                <select
+                                  .value=${providerId}
+                                  @change=${(e: Event) =>
+                                    onProviderChange((e.target as HTMLSelectElement).value)}
+                                >
+                                  ${providerIds.map(
+                                    (id) => html`<option value=${id}>${id}</option>`,
+                                  )}
+                                </select>
+                              </label>
+                              <label class="field" style="min-width: 280px;">
+                                <span>Model（模型）</span>
+                                <select
+                                  .value=${modelId}
+                                  ?disabled=${models.length === 0}
+                                  @change=${(e: Event) =>
+                                    onModelChange((e.target as HTMLSelectElement).value)}
+                                >
+                                  ${models.map(
+                                    (id) => html`<option value=${id}>${id}</option>`,
+                                  )}
+                                </select>
+                              </label>
+                            </div>
+
+                            <div class="row" style="justify-content: flex-end; gap: 8px; margin-top: 12px;">
+                              <button
+                                class="btn"
+                                ?disabled=${!canWriteActive}
+                                @click=${setActive}
+                              >
+                                写入当前选择
+                              </button>
+                              <button
+                                class="btn primary"
+                                ?disabled=${!canWriteActive}
+                                @click=${setDefault}
+                              >
+                                设为默认主模型
+                              </button>
+                            </div>
+                          </section>
+
+                          <section class="card" style="margin-bottom: 12px;">
+                            <div class="card-title">供应商与模型管理</div>
+                            <div class="card-sub">
+                              这里提供对 <code>models.providers</code> 的增删改与模型列表维护；修改后记得点 Save + Apply。
+                            </div>
+
+                            <div class="row" style="gap: 12px; flex-wrap: wrap; margin-top: 12px;">
+                              <label class="field" style="min-width: 220px;">
+                                <span>新供应商 ID</span>
+                                <input
+                                  .value=${props.modelsNewProviderId}
+                                  @input=${(e: Event) =>
+                                    props.onModelsNewProviderIdChange((e.target as HTMLInputElement).value)}
+                                  placeholder="my-provider"
+                                />
+                              </label>
+                              <label class="field" style="min-width: 360px; flex: 1;">
+                                <span>新供应商 Base URL</span>
+                                <input
+                                  .value=${props.modelsNewBaseUrl}
+                                  @input=${(e: Event) =>
+                                    props.onModelsNewBaseUrlChange((e.target as HTMLInputElement).value)}
+                                  placeholder="https://api.example.com/v1"
+                                />
+                              </label>
+                            </div>
+
+                            <div class="row" style="gap: 12px; flex-wrap: wrap; margin-top: 12px;">
+                              <label class="field" style="min-width: 360px; flex: 1;">
+                                <span>新供应商 API Key（可空）</span>
+                                <input
+                                  type="password"
+                                  .value=${props.modelsNewApiKey}
+                                  @input=${(e: Event) =>
+                                    props.onModelsNewApiKeyChange((e.target as HTMLInputElement).value)}
+                                  placeholder="sk-..."
+                                />
+                              </label>
+                              <label class="field" style="min-width: 280px;">
+                                <span>首个模型 ID</span>
+                                <input
+                                  .value=${props.modelsNewModelId}
+                                  @input=${(e: Event) =>
+                                    props.onModelsNewModelIdChange((e.target as HTMLInputElement).value)}
+                                  placeholder="gpt-4o-mini"
+                                />
+                              </label>
+                            </div>
+
+                            <div class="row" style="justify-content: flex-end; gap: 8px; margin-top: 12px;">
+                              <button
+                                class="btn"
+                                ?disabled=${!canCreateProvider}
+                                @click=${createProvider}
+                              >
+                                创建新供应商
+                              </button>
+                              <button
+                                class="btn"
+                                ?disabled=${!props.connected || props.loading || !normalizeProviderId(props.modelsNewProviderId) || !providerId}
+                                @click=${copyProviderAsNew}
+                              >
+                                从当前供应商复制为新ID
+                              </button>
+                            </div>
+
+                            <div class="row" style="gap: 12px; flex-wrap: wrap; margin-top: 12px;">
+                              <label class="field" style="min-width: 220px;">
+                                <span>当前供应商</span>
+                                <select
+                                  .value=${providerId}
+                                  @change=${(e: Event) =>
+                                    onProviderChange((e.target as HTMLSelectElement).value)}
+                                >
+                                  ${providerIds.map(
+                                    (id) => html`<option value=${id}>${id}</option>`,
+                                  )}
+                                </select>
+                              </label>
+
+                              <button
+                                class="btn danger"
+                                style="margin-top: 22px;"
+                                ?disabled=${!props.connected || props.loading || !providerId}
+                                @click=${removeProvider}
+                              >
+                                删除该供应商
+                              </button>
+                            </div>
+
+                            <div class="row" style="gap: 12px; flex-wrap: wrap; margin-top: 12px;">
+                              <label class="field" style="min-width: 280px; flex: 1;">
+                                <span>向当前供应商新增模型（复用上面的 Model 输入）</span>
+                                <input
+                                  .value=${props.modelsQuickModelId}
+                                  @input=${(e: Event) =>
+                                    props.onModelsQuickModelIdChange((e.target as HTMLInputElement).value)}
+                                  placeholder="gpt-4o-mini"
+                                />
+                              </label>
+                              <button
+                                class="btn"
+                                style="margin-top: 22px;"
+                                ?disabled=${!props.connected || props.loading || !providerId || !String(props.modelsQuickModelId ?? "").trim()}
+                                @click=${addModelToProvider}
+                              >
+                                添加模型
+                              </button>
+                            </div>
+
+                            <div style="margin-top: 12px;">
+                              <div class="card-sub" style="margin-bottom: 8px;">
+                                当前供应商模型列表（点击删除即写入表单）：
+                              </div>
+                              <div class="row" style="gap: 8px; flex-wrap: wrap;">
+                                ${models.map(
+                                  (id) => html`
+                                    <span class="pill" style="display: inline-flex; gap: 8px; align-items: center;">
+                                      <span>${id}</span>
+                                      <button
+                                        class="btn danger"
+                                        style="padding: 2px 8px;"
+                                        ?disabled=${!props.connected || props.loading}
+                                        @click=${() => removeModel(id)}
+                                      >
+                                        删除
+                                      </button>
+                                    </span>
+                                  `,
+                                )}
+                              </div>
+                            </div>
+
+                            <div class="row" style="justify-content: flex-end; gap: 8px; margin-top: 12px;">
+                              <button
+                                class="btn"
+                                ?disabled=${!props.connected || props.loading}
+                                @click=${seedTestProviders}
+                              >
+                                填充测试供应商（示例）
+                              </button>
+                            </div>
+                          </section>
+                        `;
+                      })()}
                     `
                   : nothing}
 

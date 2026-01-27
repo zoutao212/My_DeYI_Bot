@@ -106,6 +106,8 @@ export type AgentDefaultsConfig = {
   skipBootstrap?: boolean;
   /** Max chars for injected bootstrap files before truncation (default: 20000). */
   bootstrapMaxChars?: number;
+  /** Default system prompt language (used when promptLanguage isn't provided by the caller). */
+  promptLanguage?: "en" | "zh";
   /** Optional IANA timezone for the user (used in system prompt; defaults to host timezone). */
   userTimezone?: string;
   /** Time format in system prompt: auto (OS preference), 12-hour, or 24-hour. */

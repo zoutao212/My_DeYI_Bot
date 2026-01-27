@@ -424,7 +424,7 @@ export async function startGatewayServer(
   installLlmFetchGate({
     requestApproval: async ({ request, timeoutMs }) => {
       const timeout = typeof timeoutMs === "number" ? timeoutMs : 120_000;
-      const record = llmApprovalManager.create(request, timeout, null);
+      const record = llmApprovalManager.createOrGet(request, timeout, null);
       const decisionPromise = llmApprovalManager.waitForDecision(record, timeout);
       broadcast(
         "llm.approval.requested",

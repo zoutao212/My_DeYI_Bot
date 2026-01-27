@@ -45,6 +45,7 @@ export function buildEmbeddedSystemPrompt(params: {
   userTime?: string;
   userTimeFormat?: ResolvedTimeFormat;
   contextFiles?: EmbeddedContextFile[];
+  promptLanguage?: "en" | "zh";
 }): string {
   return buildAgentSystemPrompt({
     workspaceDir: params.workspaceDir,
@@ -60,6 +61,7 @@ export function buildEmbeddedSystemPrompt(params: {
     workspaceNotes: params.workspaceNotes,
     reactionGuidance: params.reactionGuidance,
     promptMode: params.promptMode,
+    promptLanguage: params.promptLanguage,
     runtimeInfo: params.runtimeInfo,
     messageToolHints: params.messageToolHints,
     sandboxInfo: params.sandboxInfo,
