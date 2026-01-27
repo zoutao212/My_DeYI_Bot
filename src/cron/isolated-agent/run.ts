@@ -235,7 +235,9 @@ export async function runCronIsolatedAgentTurn(params: {
   const userTimeFormat = resolveUserTimeFormat(params.cfg.agents?.defaults?.timeFormat);
   const formattedTime =
     formatUserTime(new Date(now), userTimezone, userTimeFormat) ?? new Date(now).toISOString();
-  const timeLine = `Current time: ${formattedTime} (${userTimezone})`;
+  const promptLanguage = params.cfg.agents?.defaults?.promptLanguage === "zh" ? "zh" : "en";
+  const timePrefix = promptLanguage === "zh" ? "当前时间：" : "Current time:";
+  const timeLine = `${timePrefix} ${formattedTime} (${userTimezone})`;
   const commandBody = `${base}\n${timeLine}`.trim();
 
   const existingSnapshot = cronSession.sessionEntry.skillsSnapshot;

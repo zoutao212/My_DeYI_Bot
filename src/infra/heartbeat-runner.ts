@@ -13,6 +13,7 @@ import {
   DEFAULT_HEARTBEAT_ACK_MAX_CHARS,
   DEFAULT_HEARTBEAT_EVERY,
   isHeartbeatContentEffectivelyEmpty,
+  HEARTBEAT_PROMPT_ZH,
   resolveHeartbeatPrompt as resolveHeartbeatPromptText,
   stripHeartbeatToken,
 } from "../auto-reply/heartbeat.js";
@@ -92,10 +93,18 @@ const ACTIVE_HOURS_TIME_PATTERN = /^([01]\d|2[0-3]|24):([0-5]\d)$/;
 // Prompt used when an async exec has completed and the result should be relayed to the user.
 // This overrides the standard heartbeat prompt to ensure the model responds with the exec result
 // instead of just "HEARTBEAT_OK".
-const EXEC_EVENT_PROMPT =
+const EXEC_EVENT_PROMPT_EN =
   "An async command you ran earlier has completed. The result is shown in the system messages above. " +
   "Please relay the command output to the user in a helpful way. If the command succeeded, share the relevant output. " +
   "If it failed, explain what went wrong.";
+
+const EXEC_EVENT_PROMPT_ZH =
+  "你之前执行的一个异步命令已经完成。结果已经出现在上面的系统消息中。" +
+  "请用有帮助的方式把命令输出转述给用户。若命令成功，请分享关键输出；若失败，请解释哪里出了问题。";
+
+function resolvePromptLanguageFromCfg(cfg: ClawdbotConfig): "en" | "zh" {
+  return cfg.agents?.defaults?.promptLanguage === "zh" ? "zh" : "en";
+}
 
 function resolveActiveHoursTimezone(cfg: ClawdbotConfig, raw?: string): string {
   const trimmed = raw?.trim();
@@ -299,7 +308,12 @@ export function resolveHeartbeatIntervalMs(
 }
 
 export function resolveHeartbeatPrompt(cfg: ClawdbotConfig, heartbeat?: HeartbeatConfig) {
-  return resolveHeartbeatPromptText(heartbeat?.prompt ?? cfg.agents?.defaults?.heartbeat?.prompt);
+  const configured = heartbeat?.prompt ?? cfg.agents?.defaults?.heartbeat?.prompt;
+  if (typeof configured === "string" && configured.trim()) {
+    return resolveHeartbeatPromptText(configured);
+  }
+  const promptLanguage = resolvePromptLanguageFromCfg(cfg);
+  return resolveHeartbeatPromptText(promptLanguage === "zh" ? HEARTBEAT_PROMPT_ZH : undefined);
 }
 
 function resolveHeartbeatAckMaxChars(cfg: ClawdbotConfig, heartbeat?: HeartbeatConfig) {
@@ -502,7 +516,12 @@ export async function runHeartbeatOnce(opts: {
   const pendingEvents = isExecEvent ? peekSystemEvents(sessionKey) : [];
   const hasExecCompletion = pendingEvents.some((evt) => evt.includes("Exec finished"));
 
-  const prompt = hasExecCompletion ? EXEC_EVENT_PROMPT : resolveHeartbeatPrompt(cfg, heartbeat);
+  const promptLanguage = resolvePromptLanguageFromCfg(cfg);
+  const prompt = hasExecCompletion
+    ? promptLanguage === "zh"
+      ? EXEC_EVENT_PROMPT_ZH
+      : EXEC_EVENT_PROMPT_EN
+    : resolveHeartbeatPrompt(cfg, heartbeat);
   const ctx = {
     Body: prompt,
     From: sender,

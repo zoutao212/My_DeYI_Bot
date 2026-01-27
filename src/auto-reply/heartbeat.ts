@@ -4,6 +4,9 @@ import { HEARTBEAT_TOKEN } from "./tokens.js";
 // Keep it tight and avoid encouraging the model to invent/rehash "open loops" from prior chat context.
 export const HEARTBEAT_PROMPT =
   "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.";
+
+export const HEARTBEAT_PROMPT_ZH =
+  "如果存在 HEARTBEAT.md（工作区上下文）请阅读并严格遵循。不要从历史对话里推断或复述旧任务。如果没有任何需要处理的事项，请回复 HEARTBEAT_OK。";
 export const DEFAULT_HEARTBEAT_EVERY = "30m";
 export const DEFAULT_HEARTBEAT_ACK_MAX_CHARS = 300;
 
