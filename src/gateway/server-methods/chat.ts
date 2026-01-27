@@ -1,9 +1,23 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 
 import { CURRENT_SESSION_VERSION } from "@mariozechner/pi-coding-agent";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
+import { resolveAgentWorkspaceDir } from "../../agents/agent-scope.js";
+import { resolveBootstrapContextForRun } from "../../agents/bootstrap-files.js";
+import { buildSystemPromptParams } from "../../agents/system-prompt-params.js";
+import { buildAgentSystemPrompt } from "../../agents/system-prompt.js";
+import { buildToolSummaryMap } from "../../agents/tool-summaries.js";
+import { createClawdbotCodingTools } from "../../agents/pi-tools.js";
+import { buildWorkspaceSkillSnapshot } from "../../agents/skills.js";
+import { getSkillsSnapshotVersion } from "../../agents/skills/refresh.js";
+import { resolveDefaultModelForAgent } from "../../agents/model-selection.js";
+import { resolveSandboxRuntimeStatus } from "../../agents/sandbox.js";
+import { resolveClawdbotDocsPath } from "../../agents/docs-path.js";
+import { getRemoteSkillEligibility } from "../../infra/skills-remote.js";
+import { buildTtsSystemPromptHint } from "../../tts/tts.js";
 import { resolveEffectiveMessagesConfig, resolveIdentityName } from "../../agents/identity.js";
 import { resolveThinkingDefault } from "../../agents/model-selection.js";
 import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
@@ -31,6 +45,7 @@ import {
   validateChatHistoryParams,
   validateChatInjectParams,
   validateChatSendParams,
+  validateChatSendPreviewParams,
 } from "../protocol/index.js";
 import { getMaxChatHistoryMessagesBytes } from "../server-constants.js";
 import {
@@ -229,6 +244,162 @@ export const chatHandlers: GatewayRequestHandlers = {
       sessionId,
       messages: capped,
       thinkingLevel,
+    });
+  },
+  "chat.send.preview": async ({ params, respond, context }) => {
+    if (!validateChatSendPreviewParams(params)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid chat.send.preview params: ${formatValidationErrors(validateChatSendPreviewParams.errors)}`,
+        ),
+      );
+      return;
+    }
+
+    const p = params as {
+      sessionKey: string;
+      message: string;
+      thinking?: string;
+      attachments?: Array<{
+        type?: string;
+        mimeType?: string;
+        fileName?: string;
+        content?: unknown;
+      }>;
+    };
+
+    const { cfg, entry } = loadSessionEntry(p.sessionKey);
+    const agentId = resolveSessionAgentId({ sessionKey: p.sessionKey, config: cfg });
+    const { provider, model } = resolveSessionModelRef(cfg, entry);
+    const catalog = await context.loadGatewayModelCatalog();
+    const thinkingLevel =
+      entry?.thinkingLevel ??
+      cfg.agents?.defaults?.thinkingDefault ??
+      resolveThinkingDefault({ cfg, provider, model, catalog });
+
+    let systemPrompt: string | null = null;
+    try {
+      const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
+      const effectiveWorkspaceDir = workspaceDir || process.cwd();
+      const docsPath = await resolveClawdbotDocsPath({
+        workspaceDir: effectiveWorkspaceDir,
+        argv1: process.argv[1],
+        cwd: process.cwd(),
+        moduleUrl: import.meta.url,
+      });
+      const ttsHint = cfg ? buildTtsSystemPromptHint(cfg) : undefined;
+      const { contextFiles } = await resolveBootstrapContextForRun({
+        workspaceDir: effectiveWorkspaceDir,
+        config: cfg,
+        sessionKey: p.sessionKey,
+        sessionId: entry?.sessionId,
+        agentId,
+      });
+      const skillsSnapshot = (() => {
+        try {
+          return buildWorkspaceSkillSnapshot(effectiveWorkspaceDir, {
+            config: cfg,
+            eligibility: { remote: getRemoteSkillEligibility() },
+            snapshotVersion: getSkillsSnapshotVersion(effectiveWorkspaceDir),
+          });
+        } catch {
+          return { prompt: "", skills: [], resolvedSkills: [] };
+        }
+      })();
+      const tools = (() => {
+        try {
+          return createClawdbotCodingTools({
+            config: cfg,
+            workspaceDir: effectiveWorkspaceDir,
+            sessionKey: p.sessionKey,
+            messageProvider: entry?.channel,
+            groupId: entry?.groupId ?? undefined,
+            groupChannel: entry?.groupChannel ?? undefined,
+            groupSpace: entry?.space ?? undefined,
+            spawnedBy: entry?.spawnedBy ?? undefined,
+            modelProvider: provider,
+            modelId: model,
+          });
+        } catch {
+          return [];
+        }
+      })();
+      const toolSummaries = buildToolSummaryMap(tools);
+      const toolNames = tools.map((t) => t.name);
+      const defaultModelRef = resolveDefaultModelForAgent({ cfg, agentId });
+      const defaultModelLabel = `${defaultModelRef.provider}/${defaultModelRef.model}`;
+      const { runtimeInfo, userTimezone, userTime, userTimeFormat } = buildSystemPromptParams({
+        config: cfg,
+        agentId,
+        workspaceDir: effectiveWorkspaceDir,
+        cwd: process.cwd(),
+        runtime: {
+          host: os.hostname(),
+          os: process.platform,
+          arch: process.arch,
+          node: process.version,
+          model: `${provider}/${model}`,
+          defaultModel: defaultModelLabel,
+          channel: entry?.channel,
+        },
+      });
+      const sandboxRuntime = resolveSandboxRuntimeStatus({ cfg, sessionKey: p.sessionKey });
+
+      systemPrompt = buildAgentSystemPrompt({
+        workspaceDir: effectiveWorkspaceDir,
+        defaultThinkLevel: undefined,
+        extraSystemPrompt: undefined,
+        toolNames,
+        toolSummaries,
+        userTimezone,
+        userTime,
+        userTimeFormat,
+        contextFiles,
+        skillsPrompt: skillsSnapshot.prompt ?? "",
+        docsPath: docsPath ?? undefined,
+        ttsHint,
+        runtimeInfo,
+        sandboxInfo: { enabled: sandboxRuntime.sandboxed },
+      });
+
+      // Ensure we didn't accidentally return an empty/whitespace-only prompt.
+      if (typeof systemPrompt === "string") {
+        const trimmed = systemPrompt.trim();
+        systemPrompt = trimmed ? systemPrompt : null;
+      }
+    } catch {
+      systemPrompt = null;
+    }
+
+    const normalizedAttachments =
+      p.attachments
+        ?.map((a) => ({
+          type: typeof a?.type === "string" ? a.type : undefined,
+          mimeType: typeof a?.mimeType === "string" ? a.mimeType : undefined,
+          fileName: typeof a?.fileName === "string" ? a.fileName : undefined,
+          bytes:
+            typeof a?.content === "string"
+              ? a.content.length
+              : ArrayBuffer.isView(a?.content)
+                ? a.content.byteLength
+                : undefined,
+        }))
+        .filter((a) => a.bytes != null || a.fileName || a.mimeType || a.type) ?? [];
+
+    respond(true, {
+      sessionKey: p.sessionKey,
+      agentId,
+      provider,
+      model,
+      modelRef: `${provider}/${model}`,
+      thinkingLevel,
+      extraSystemPrompt: systemPrompt,
+      clientToolsStatus: "not_applicable",
+      clientTools: null,
+      attachments: normalizedAttachments,
     });
   },
   "chat.abort": ({ params, respond, context }) => {

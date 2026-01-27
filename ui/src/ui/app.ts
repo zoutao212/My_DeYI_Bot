@@ -130,6 +130,31 @@ export class ClawdbotApp extends LitElement {
   @state() chatAvatarUrl: string | null = null;
   @state() chatThinkingLevel: string | null = null;
   @state() chatQueue: ChatQueueItem[] = [];
+  @state() chatSendApprovalRequest: {
+    message: string;
+    sessionKey: string;
+    agentId: string | null;
+    createdAtMs: number;
+  } | null = null;
+  @state() chatSendApprovalPreviewLoading = false;
+  @state() chatSendApprovalPreviewError: string | null = null;
+  @state() chatSendApprovalPreviewResult: {
+    sessionKey: string;
+    agentId: string;
+    provider: string;
+    model: string;
+    modelRef: string;
+    thinkingLevel: string;
+    extraSystemPrompt?: string | null;
+    clientToolsStatus?: string;
+    clientTools?: unknown[] | null;
+    attachments?: Array<{
+      type?: string;
+      mimeType?: string;
+      fileName?: string;
+      bytes?: number;
+    }>;
+  } | null = null;
   // Sidebar state for tool output viewing
   @state() sidebarOpen = false;
   @state() sidebarContent: string | null = null;
@@ -267,6 +292,7 @@ export class ClawdbotApp extends LitElement {
   private logsScrollFrame: number | null = null;
   private toolStreamById = new Map<string, ToolStreamEntry>();
   private toolStreamOrder: string[] = [];
+  private chatSendApprovalResolver: ((decision: "allow" | "deny") => void) | null = null;
   basePath = "";
   private popStateHandler = () =>
     onPopStateInternal(
@@ -394,6 +420,54 @@ export class ClawdbotApp extends LitElement {
       messageOverride,
       opts,
     );
+  }
+
+  requestChatSendApproval(request: {
+    message: string;
+    sessionKey: string;
+    agentId: string | null;
+    createdAtMs: number;
+  }): Promise<"allow" | "deny"> {
+    this.chatSendApprovalRequest = request;
+    this.chatSendApprovalPreviewLoading = true;
+    this.chatSendApprovalPreviewError = null;
+    this.chatSendApprovalPreviewResult = null;
+    if (this.client && this.connected) {
+      void this.client
+        .request("chat.send.preview", {
+          sessionKey: request.sessionKey,
+          message: request.message,
+        })
+        .then((res) => {
+          this.chatSendApprovalPreviewResult = res as typeof this.chatSendApprovalPreviewResult;
+        })
+        .catch((err) => {
+          this.chatSendApprovalPreviewError = String(err);
+        })
+        .finally(() => {
+          this.chatSendApprovalPreviewLoading = false;
+        });
+    } else {
+      this.chatSendApprovalPreviewLoading = false;
+      this.chatSendApprovalPreviewError = "gateway not connected";
+    }
+    return new Promise((resolve) => {
+      this.chatSendApprovalResolver = resolve;
+    });
+  }
+
+  handleChatSendApprovalDecision(decision: "allow" | "deny") {
+    const resolver = this.chatSendApprovalResolver;
+    this.chatSendApprovalResolver = null;
+    this.chatSendApprovalRequest = null;
+    this.chatSendApprovalPreviewLoading = false;
+    this.chatSendApprovalPreviewError = null;
+    this.chatSendApprovalPreviewResult = null;
+    resolver?.(decision);
+  }
+
+  handleChatSendApprovalCancel() {
+    this.handleChatSendApprovalDecision("deny");
   }
 
   async handleWhatsAppStart(force: boolean) {

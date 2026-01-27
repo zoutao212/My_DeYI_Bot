@@ -45,6 +45,44 @@ export const ChatSendParamsSchema = Type.Object(
   { additionalProperties: false },
 );
 
+export const ChatSendPreviewParamsSchema = Type.Object(
+  {
+    sessionKey: NonEmptyString,
+    message: NonEmptyString,
+    thinking: Type.Optional(Type.String()),
+    attachments: Type.Optional(Type.Array(Type.Unknown())),
+  },
+  { additionalProperties: false },
+);
+
+export const ChatSendPreviewResultSchema = Type.Object(
+  {
+    sessionKey: NonEmptyString,
+    agentId: NonEmptyString,
+    provider: NonEmptyString,
+    model: NonEmptyString,
+    modelRef: NonEmptyString,
+    thinkingLevel: NonEmptyString,
+    extraSystemPrompt: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    clientToolsStatus: Type.Optional(Type.String()),
+    clientTools: Type.Optional(Type.Union([Type.Array(Type.Unknown()), Type.Null()])),
+    attachments: Type.Optional(
+      Type.Array(
+        Type.Object(
+          {
+            type: Type.Optional(Type.String()),
+            mimeType: Type.Optional(Type.String()),
+            fileName: Type.Optional(Type.String()),
+            bytes: Type.Optional(Type.Integer({ minimum: 0 })),
+          },
+          { additionalProperties: false },
+        ),
+      ),
+    ),
+  },
+  { additionalProperties: false },
+);
+
 export const ChatAbortParamsSchema = Type.Object(
   {
     sessionKey: NonEmptyString,

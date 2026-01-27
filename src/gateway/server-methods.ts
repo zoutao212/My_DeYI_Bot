@@ -71,6 +71,7 @@ const READ_METHODS = new Set([
   "node.list",
   "node.describe",
   "chat.history",
+  "chat.send.preview",
 ]);
 const WRITE_METHODS = new Set([
   "send",

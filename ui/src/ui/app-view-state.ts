@@ -59,6 +59,39 @@ export type AppViewState = {
   chatAvatarUrl: string | null;
   chatThinkingLevel: string | null;
   chatQueue: ChatQueueItem[];
+  chatSendApprovalRequest: {
+    message: string;
+    sessionKey: string;
+    agentId: string | null;
+    createdAtMs: number;
+  } | null;
+  requestChatSendApproval: (request: {
+    message: string;
+    sessionKey: string;
+    agentId: string | null;
+    createdAtMs: number;
+  }) => Promise<"allow" | "deny">;
+  chatSendApprovalPreviewLoading: boolean;
+  chatSendApprovalPreviewError: string | null;
+  chatSendApprovalPreviewResult: {
+    sessionKey: string;
+    agentId: string;
+    provider: string;
+    model: string;
+    modelRef: string;
+    thinkingLevel: string;
+    extraSystemPrompt?: string | null;
+    clientToolsStatus?: string;
+    clientTools?: unknown[] | null;
+    attachments?: Array<{
+      type?: string;
+      mimeType?: string;
+      fileName?: string;
+      bytes?: number;
+    }>;
+  } | null;
+  handleChatSendApprovalDecision: (decision: "allow" | "deny") => void;
+  handleChatSendApprovalCancel: () => void;
   compactionStatus: CompactionStatus | null;
   resetToolStream: () => void;
   resetChatScroll: () => void;

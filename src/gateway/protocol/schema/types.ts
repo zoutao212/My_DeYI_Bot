@@ -79,7 +79,11 @@ import type {
 import type {
   ChatAbortParamsSchema,
   ChatEventSchema,
+  ChatHistoryParamsSchema,
   ChatInjectParamsSchema,
+  ChatSendParamsSchema,
+  ChatSendPreviewParamsSchema,
+  ChatSendPreviewResultSchema,
   LogsTailParamsSchema,
   LogsTailResultSchema,
 } from "./logs-chat.js";

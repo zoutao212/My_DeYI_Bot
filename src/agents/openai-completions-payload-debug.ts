@@ -139,11 +139,43 @@ function walkAndPatch(params: {
 
   if (Array.isArray(rec.tool_calls)) {
     ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
+    for (let i = 0; i < rec.tool_calls.length; i += 1) {
+      const entry = rec.tool_calls[i];
+      if (entry && typeof entry === "object") {
+        ensureThoughtSignatureOnRecord({
+          record: entry as Record<string, unknown>,
+          path: `${params.path}.tool_calls[${i}]`,
+          report: params.report,
+        });
+      }
+    }
+  }
+  if (Array.isArray(rec.toolCalls)) {
+    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
+    for (let i = 0; i < rec.toolCalls.length; i += 1) {
+      const entry = rec.toolCalls[i];
+      if (entry && typeof entry === "object") {
+        ensureThoughtSignatureOnRecord({
+          record: entry as Record<string, unknown>,
+          path: `${params.path}.toolCalls[${i}]`,
+          report: params.report,
+        });
+      }
+    }
   }
   if (rec.function_call && typeof rec.function_call === "object") {
+    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
     ensureThoughtSignatureOnRecord({
       record: rec.function_call as Record<string, unknown>,
       path: `${params.path}.function_call`,
+      report: params.report,
+    });
+  }
+  if (rec.functionCall && typeof rec.functionCall === "object") {
+    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
+    ensureThoughtSignatureOnRecord({
+      record: rec.functionCall as Record<string, unknown>,
+      path: `${params.path}.functionCall`,
       report: params.report,
     });
   }

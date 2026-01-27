@@ -19,6 +19,12 @@ type ChatHost = {
   basePath: string;
   hello: GatewayHelloOk | null;
   chatAvatarUrl: string | null;
+  requestChatSendApproval: (request: {
+    message: string;
+    sessionKey: string;
+    agentId: string | null;
+    createdAtMs: number;
+  }) => Promise<"allow" | "deny">;
 };
 
 export function isChatBusy(host: ChatHost) {
@@ -58,11 +64,31 @@ function enqueueChatMessage(host: ChatHost, text: string) {
   ];
 }
 
+async function confirmChatSend(host: ChatHost, message: string): Promise<boolean> {
+  const trimmed = message.trim();
+  if (!trimmed) return false;
+  const agentId = resolveAgentIdForSession(host);
+  const decision = await host.requestChatSendApproval({
+    message: trimmed,
+    sessionKey: host.sessionKey,
+    agentId,
+    createdAtMs: Date.now(),
+  });
+  return decision === "allow";
+}
+
 async function sendChatMessageNow(
   host: ChatHost,
   message: string,
   opts?: { previousDraft?: string; restoreDraft?: boolean },
 ) {
+  const allowed = await confirmChatSend(host, message);
+  if (!allowed) {
+    if (opts?.previousDraft != null) {
+      host.chatMessage = opts.previousDraft;
+    }
+    return false;
+  }
   resetToolStream(host as unknown as Parameters<typeof resetToolStream>[0]);
   const ok = await sendChatMessage(host as unknown as ClawdbotApp, message);
   if (!ok && opts?.previousDraft != null) {
