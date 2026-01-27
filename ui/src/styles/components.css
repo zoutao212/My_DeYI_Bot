@@ -1407,12 +1407,21 @@
 }
 
 .exec-approval-card {
-  width: min(540px, 100%);
+  width: min(760px, calc(100vw - 48px));
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 20px;
+  max-height: calc(100dvh - 48px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   animation: scale-in 0.2s var(--ease-out);
+}
+
+.exec-approval-body {
+  overflow: auto;
+  min-height: 0;
 }
 
 .exec-approval-header {
@@ -1449,6 +1458,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   word-break: break-word;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
   font-family: var(--mono);
   font-size: 13px;
@@ -1465,12 +1475,20 @@
 .exec-approval-meta-row {
   display: flex;
   justify-content: space-between;
+  align-items: flex-start;
   gap: 12px;
+}
+
+.exec-approval-meta-row span {
+  min-width: 0;
 }
 
 .exec-approval-meta-row span:last-child {
   color: var(--text);
   font-family: var(--mono);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  text-align: right;
 }
 
 .exec-approval-error {
@@ -1484,4 +1502,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  position: sticky;
+  bottom: 0;
+  background: var(--card);
 }

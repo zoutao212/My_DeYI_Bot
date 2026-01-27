@@ -1,6 +1,7 @@
 import { html, nothing } from "lit";
 
 import type { AppViewState } from "../app-view-state";
+import { getUiL10n } from "../ui-l10n";
 
 function renderMetaRow(label: string, value?: string | null) {
   if (!value) return nothing;
@@ -27,6 +28,8 @@ function resolveSessionModelMeta(state: AppViewState, sessionKey: string): {
 export function renderChatSendApprovalPrompt(state: AppViewState) {
   const request = state.chatSendApprovalRequest;
   if (!request) return nothing;
+
+  const l10n = getUiL10n(state.settings.uiLanguage);
 
   const preview = state.chatSendApprovalPreviewResult;
   const previewError = state.chatSendApprovalPreviewError;
@@ -61,57 +64,71 @@ export function renderChatSendApprovalPrompt(state: AppViewState) {
           </button>
         </div>
 
-        <div class="exec-approval-command mono">${request.message}</div>
+        <div class="exec-approval-body">
+          <div class="exec-approval-command mono">${request.message}</div>
 
-        <div class="exec-approval-meta">
-          ${renderMetaRow("Agent", request.agentId)}
-          ${renderMetaRow("Session", request.sessionKey)}
-          ${renderMetaRow("Model", modelRef)}
-          ${renderMetaRow("Thinking", thinkingLevel)}
-          ${previewLoading ? renderMetaRow("Preview", "loading...") : nothing}
-          ${previewError ? renderMetaRow("Preview error", previewError) : nothing}
-          ${renderMetaRow(
-            "Extra system",
-            extraSystemPrompt ? extraSystemPrompt : "(none)",
-          )}
-          ${renderMetaRow(
-            "Client tools",
-            clientToolsStatus === "not_applicable"
-              ? "not applicable"
-              : clientToolsCount > 0
-                ? String(clientToolsCount)
-                : "(none)",
-          )}
-          ${renderMetaRow(
-            "Attachments",
-            attachments.length > 0 ? String(attachments.length) : "(none)",
-          )}
+          <div class="exec-approval-meta">
+            ${renderMetaRow("Agent", request.agentId)}
+            ${renderMetaRow("Session", request.sessionKey)}
+            ${renderMetaRow("Model", modelRef)}
+            ${renderMetaRow("Thinking", thinkingLevel)}
+            ${previewLoading ? renderMetaRow("Preview", "loading...") : nothing}
+            ${previewError ? renderMetaRow("Preview error", previewError) : nothing}
+            ${renderMetaRow(
+              "Extra system",
+              extraSystemPrompt ? "(see below)" : "(none)",
+            )}
+            ${renderMetaRow(
+              "Client tools",
+              clientToolsStatus === "not_applicable"
+                ? "not applicable"
+                : clientToolsCount > 0
+                  ? String(clientToolsCount)
+                  : "(none)",
+            )}
+            ${renderMetaRow(
+              "Attachments",
+              attachments.length > 0 ? String(attachments.length) : "(none)",
+            )}
+          </div>
+
+          ${attachments.length > 0
+            ? html`<div class="exec-approval-command mono">
+                ${attachments
+                  .map((a) => {
+                    const name = typeof a.fileName === "string" && a.fileName.trim() ? a.fileName : "(unnamed)";
+                    const mime = typeof a.mimeType === "string" && a.mimeType.trim() ? a.mimeType : "";
+                    const bytes = typeof a.bytes === "number" ? `${a.bytes} bytes` : "";
+                    const parts = [name, mime, bytes].filter((p) => String(p).trim().length > 0);
+                    return parts.join(" ");
+                  })
+                  .join("\n")}
+              </div>`
+            : nothing}
+
+          ${extraSystemPrompt
+            ? html`<div class="exec-approval-command mono">${extraSystemPrompt}</div>`
+            : nothing}
         </div>
 
-        ${attachments.length > 0
-          ? html`<div class="exec-approval-command mono">
-              ${attachments
-                .map((a) => {
-                  const name = typeof a.fileName === "string" && a.fileName.trim() ? a.fileName : "(unnamed)";
-                  const mime = typeof a.mimeType === "string" && a.mimeType.trim() ? a.mimeType : "";
-                  const bytes = typeof a.bytes === "number" ? `${a.bytes} bytes` : "";
-                  const parts = [name, mime, bytes].filter((p) => String(p).trim().length > 0);
-                  return parts.join(" ");
-                })
-                .join("\n")}
-            </div>`
-          : nothing}
-
-        ${extraSystemPrompt
-          ? html`<div class="exec-approval-command mono">${extraSystemPrompt}</div>`
-          : nothing}
-
         <div class="exec-approval-actions">
+          <button
+            class="btn"
+            @click=${() => {
+              state.setTab("overview");
+              setTimeout(() => {
+                const el = document.getElementById("system-prompt-language");
+                el?.scrollIntoView({ block: "center" });
+              }, 50);
+            }}
+          >
+            ${l10n.approval.languageSettings}
+          </button>
           <button class="btn primary" @click=${() => state.handleChatSendApprovalDecision("allow")}>
-            Allow
+            ${l10n.approval.allow}
           </button>
           <button class="btn danger" @click=${() => state.handleChatSendApprovalDecision("deny")}>
-            Deny
+            ${l10n.approval.deny}
           </button>
         </div>
       </div>

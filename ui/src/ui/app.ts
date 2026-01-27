@@ -437,6 +437,7 @@ export class ClawdbotApp extends LitElement {
         .request("chat.send.preview", {
           sessionKey: request.sessionKey,
           message: request.message,
+          promptLanguage: this.settings.systemPromptLanguage,
         })
         .then((res) => {
           this.chatSendApprovalPreviewResult = res as typeof this.chatSendApprovalPreviewResult;

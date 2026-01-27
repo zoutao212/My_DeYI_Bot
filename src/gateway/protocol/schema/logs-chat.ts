@@ -50,6 +50,7 @@ export const ChatSendPreviewParamsSchema = Type.Object(
     sessionKey: NonEmptyString,
     message: NonEmptyString,
     thinking: Type.Optional(Type.String()),
+    promptLanguage: Type.Optional(Type.Union([Type.Literal("en"), Type.Literal("zh")])),
     attachments: Type.Optional(Type.Array(Type.Unknown())),
   },
   { additionalProperties: false },

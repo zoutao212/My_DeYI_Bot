@@ -43,6 +43,7 @@ import { renderOverview } from "./views/overview";
 import { renderSessions } from "./views/sessions";
 import { renderExecApprovalPrompt } from "./views/exec-approval";
 import { renderChatSendApprovalPrompt } from "./views/chat-send-approval";
+import { getUiL10n } from "./ui-l10n";
 import {
   approveDevicePairing,
   loadDevices,
@@ -102,6 +103,8 @@ function resolveAssistantAvatarUrl(state: AppViewState): string | undefined {
 }
 
 export function renderApp(state: AppViewState) {
+  const uiLang = state.settings.uiLanguage;
+  const l10n = getUiL10n(uiLang);
   const presenceCount = state.presenceEntries.length;
   const sessionsCount = state.sessionsResult?.count ?? null;
   const cronNext = state.cronStatus?.nextWakeAtMs ?? null;
@@ -142,41 +145,55 @@ export function renderApp(state: AppViewState) {
           <div class="pill">
             <span class="statusDot ${state.connected ? "ok" : ""}"></span>
             <span>Health</span>
-            <span class="mono">${state.connected ? "OK" : "Offline"}</span>
+            <div class="topbar-title">${titleForTab(state.tab, uiLang)}</div>
+            <div class="topbar-sub">${subtitleForTab(state.tab, uiLang)}</div>
           </div>
           ${renderThemeToggle(state)}
         </div>
       </header>
       <aside class="nav ${state.settings.navCollapsed ? "nav--collapsed" : ""}">
-        ${TAB_GROUPS.map((group) => {
-          const isGroupCollapsed = state.settings.navGroupsCollapsed[group.label] ?? false;
-          const hasActiveTab = group.tabs.some((tab) => tab === state.tab);
+        ${TAB_GROUPS.map((group: (typeof TAB_GROUPS)[number]) => {
+          const normalized = group as unknown as { label: string; tabs: Tab[] };
+          const groupLabel = normalized.label;
+          const groupTabs = normalized.tabs;
+
+          const isGroupCollapsed = state.settings.navGroupsCollapsed[groupLabel] ?? false;
+          const hasActiveTab = groupTabs.some((tab) => tab === state.tab);
+          const displayLabel = (() => {
+            if (uiLang !== "zh") return groupLabel;
+            if (groupLabel === "Chat") return "聊天";
+            if (groupLabel === "Control") return "控制";
+            if (groupLabel === "Agent") return "代理";
+            if (groupLabel === "Settings") return "设置";
+            return groupLabel;
+          })();
           return html`
-            <div class="nav-group ${isGroupCollapsed && !hasActiveTab ? "nav-group--collapsed" : ""}">
+            <div class="nav-group">
               <button
-                class="nav-label"
+                class="nav-label ${hasActiveTab ? "active" : ""}"
                 @click=${() => {
-                  const next = { ...state.settings.navGroupsCollapsed };
-                  next[group.label] = !isGroupCollapsed;
+                  const next = !isGroupCollapsed;
                   state.applySettings({
                     ...state.settings,
-                    navGroupsCollapsed: next,
+                    navGroupsCollapsed: {
+                      ...state.settings.navGroupsCollapsed,
+                      [groupLabel]: next,
+                    },
                   });
                 }}
-                aria-expanded=${!isGroupCollapsed}
               >
-                <span class="nav-label__text">${group.label}</span>
+                <span class="nav-label__text">${displayLabel}</span>
                 <span class="nav-label__chevron">${isGroupCollapsed ? "+" : "−"}</span>
               </button>
               <div class="nav-group__items">
-                ${group.tabs.map((tab) => renderTab(state, tab))}
+                ${groupTabs.map((tab) => renderTab(state, tab))}
               </div>
             </div>
           `;
         })}
         <div class="nav-group nav-group--links">
           <div class="nav-label nav-label--static">
-            <span class="nav-label__text">Resources</span>
+            <span class="nav-label__text">${l10n.resources.title}</span>
           </div>
           <div class="nav-group__items">
             <a
@@ -184,10 +201,10 @@ export function renderApp(state: AppViewState) {
               href="https://docs.clawd.bot"
               target="_blank"
               rel="noreferrer"
-              title="Docs (opens in new tab)"
+              title=${l10n.resources.docsTitle}
             >
               <span class="nav-item__icon" aria-hidden="true">${icons.book}</span>
-              <span class="nav-item__text">Docs</span>
+              <span class="nav-item__text">${l10n.resources.docs}</span>
             </a>
           </div>
         </div>
@@ -195,8 +212,8 @@ export function renderApp(state: AppViewState) {
       <main class="content ${isChat ? "content--chat" : ""}">
         <section class="content-header">
           <div>
-            <div class="page-title">${titleForTab(state.tab)}</div>
-            <div class="page-sub">${subtitleForTab(state.tab)}</div>
+            <div class="page-title">${titleForTab(state.tab, uiLang)}</div>
+            <div class="page-sub">${subtitleForTab(state.tab, uiLang)}</div>
           </div>
           <div class="page-meta">
             ${state.lastError

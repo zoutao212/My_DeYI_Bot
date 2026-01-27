@@ -263,6 +263,7 @@ export const chatHandlers: GatewayRequestHandlers = {
       sessionKey: string;
       message: string;
       thinking?: string;
+      promptLanguage?: string;
       attachments?: Array<{
         type?: string;
         mimeType?: string;
@@ -297,6 +298,7 @@ export const chatHandlers: GatewayRequestHandlers = {
         sessionKey: p.sessionKey,
         sessionId: entry?.sessionId,
         agentId,
+        promptLanguage: p.promptLanguage === "zh" ? "zh" : "en",
       });
       const skillsSnapshot = (() => {
         try {
@@ -352,6 +354,7 @@ export const chatHandlers: GatewayRequestHandlers = {
         workspaceDir: effectiveWorkspaceDir,
         defaultThinkLevel: undefined,
         extraSystemPrompt: undefined,
+        promptLanguage: p.promptLanguage === "zh" ? "zh" : "en",
         toolNames,
         toolSummaries,
         userTimezone,

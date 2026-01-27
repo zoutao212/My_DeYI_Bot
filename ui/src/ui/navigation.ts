@@ -129,59 +129,61 @@ export function iconForTab(tab: Tab): IconName {
   }
 }
 
-export function titleForTab(tab: Tab) {
+export function titleForTab(tab: Tab, lang: "en" | "zh" = "en") {
+  const zh = lang === "zh";
   switch (tab) {
     case "overview":
-      return "Overview";
+      return zh ? "概览" : "Overview";
     case "channels":
-      return "Channels";
+      return zh ? "渠道" : "Channels";
     case "instances":
-      return "Instances";
+      return zh ? "实例" : "Instances";
     case "sessions":
-      return "Sessions";
+      return zh ? "会话" : "Sessions";
     case "cron":
-      return "Cron Jobs";
+      return zh ? "定时任务" : "Cron Jobs";
     case "skills":
-      return "Skills";
+      return zh ? "技能" : "Skills";
     case "nodes":
-      return "Nodes";
+      return zh ? "节点" : "Nodes";
     case "chat":
-      return "Chat";
+      return zh ? "聊天" : "Chat";
     case "config":
-      return "Config";
+      return zh ? "配置" : "Config";
     case "debug":
-      return "Debug";
+      return zh ? "调试" : "Debug";
     case "logs":
-      return "Logs";
+      return zh ? "日志" : "Logs";
     default:
-      return "Control";
+      return zh ? "控制" : "Control";
   }
 }
 
-export function subtitleForTab(tab: Tab) {
+export function subtitleForTab(tab: Tab, lang: "en" | "zh" = "en") {
+  const zh = lang === "zh";
   switch (tab) {
     case "overview":
-      return "Gateway status, entry points, and a fast health read.";
+      return zh ? "网关状态、入口与快速健康信息。" : "Gateway status, entry points, and a fast health read.";
     case "channels":
-      return "Manage channels and settings.";
+      return zh ? "管理渠道与相关设置。" : "Manage channels and settings.";
     case "instances":
-      return "Presence beacons from connected clients and nodes.";
+      return zh ? "已连接客户端与节点的在线/存在信息。" : "Presence beacons from connected clients and nodes.";
     case "sessions":
-      return "Inspect active sessions and adjust per-session defaults.";
+      return zh ? "查看会话并调整会话默认值。" : "Inspect active sessions and adjust per-session defaults.";
     case "cron":
-      return "Schedule wakeups and recurring agent runs.";
+      return zh ? "安排唤醒与周期性运行。" : "Schedule wakeups and recurring agent runs.";
     case "skills":
-      return "Manage skill availability and API key injection.";
+      return zh ? "管理技能可用性与 API Key 注入。" : "Manage skill availability and API key injection.";
     case "nodes":
-      return "Paired devices, capabilities, and command exposure.";
+      return zh ? "配对设备、能力与命令暴露。" : "Paired devices, capabilities, and command exposure.";
     case "chat":
-      return "Direct gateway chat session for quick interventions.";
+      return zh ? "直接与网关对话，便于快速干预。" : "Direct gateway chat session for quick interventions.";
     case "config":
-      return "Edit ~/.clawdbot/clawdbot.json safely.";
+      return zh ? "安全编辑 ~/.clawdbot/clawdbot.json。" : "Edit ~/.clawdbot/clawdbot.json safely.";
     case "debug":
-      return "Gateway snapshots, events, and manual RPC calls.";
+      return zh ? "网关快照、事件与手动 RPC 调用。" : "Gateway snapshots, events, and manual RPC calls.";
     case "logs":
-      return "Live tail of the gateway file logs.";
+      return zh ? "实时查看网关日志。" : "Live tail of the gateway file logs.";
     default:
       return "";
   }

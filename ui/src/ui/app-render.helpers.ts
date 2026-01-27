@@ -12,6 +12,8 @@ import type { ThemeTransitionContext } from "./theme-transition";
 
 export function renderTab(state: AppViewState, tab: Tab) {
   const href = pathForTab(tab, state.basePath);
+  const lang = state.settings.uiLanguage;
+  const title = titleForTab(tab, lang);
   return html`
     <a
       href=${href}
@@ -30,10 +32,10 @@ export function renderTab(state: AppViewState, tab: Tab) {
         event.preventDefault();
         state.setTab(tab);
       }}
-      title=${titleForTab(tab)}
+      title=${title}
     >
       <span class="nav-item__icon" aria-hidden="true">${icons[iconForTab(tab)]}</span>
-      <span class="nav-item__text">${titleForTab(tab)}</span>
+      <span class="nav-item__text">${title}</span>
     </a>
   `;
 }

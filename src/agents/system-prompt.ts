@@ -3,6 +3,8 @@ import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import { listDeliverableMessageChannels } from "../utils/message-channel.js";
 import type { ResolvedTimeFormat } from "./date-time.js";
 import type { EmbeddedContextFile } from "./pi-embedded-helpers.js";
+import { SYSTEM_PROMPT_L10N_EN } from "./system-prompt.l10n.en.js";
+import { SYSTEM_PROMPT_L10N_ZH } from "./system-prompt.l10n.zh.js";
 
 /**
  * Controls which hardcoded sections are included in the system prompt.
@@ -11,58 +13,85 @@ import type { EmbeddedContextFile } from "./pi-embedded-helpers.js";
  * - "none": Just basic identity line, no sections
  */
 export type PromptMode = "full" | "minimal" | "none";
+export type PromptLanguage = "en" | "zh";
+
+function formatTemplate(template: string, vars: Record<string, string>) {
+  return template.replaceAll(/\{([a-zA-Z0-9_]+)\}/g, (_match, key: string) => {
+    const value = vars[key];
+    return value == null ? `{${key}}` : value;
+  });
+}
 
 function buildSkillsSection(params: {
   skillsPrompt?: string;
   isMinimal: boolean;
   readToolName: string;
+  l10n: typeof SYSTEM_PROMPT_L10N_EN;
 }) {
   if (params.isMinimal) return [];
   const trimmed = params.skillsPrompt?.trim();
   if (!trimmed) return [];
   return [
-    "## Skills (mandatory)",
-    "Before replying: scan <available_skills> <description> entries.",
-    `- If exactly one skill clearly applies: read its SKILL.md at <location> with \`${params.readToolName}\`, then follow it.`,
-    "- If multiple could apply: choose the most specific one, then read/follow it.",
-    "- If none clearly apply: do not read any SKILL.md.",
-    "Constraints: never read more than one skill up front; only read after selecting.",
+    params.l10n.skillsTitle,
+    params.l10n.skillsScanLine,
+    formatTemplate(params.l10n.skillsExactlyOneLine, { readTool: params.readToolName }),
+    params.l10n.skillsMultipleLine,
+    params.l10n.skillsNoneLine,
+    params.l10n.skillsConstraintsLine,
     trimmed,
     "",
   ];
 }
 
-function buildMemorySection(params: { isMinimal: boolean; availableTools: Set<string> }) {
+function buildMemorySection(params: {
+  isMinimal: boolean;
+  availableTools: Set<string>;
+  l10n: typeof SYSTEM_PROMPT_L10N_EN;
+}) {
   if (params.isMinimal) return [];
   if (!params.availableTools.has("memory_search") && !params.availableTools.has("memory_get")) {
     return [];
   }
   return [
-    "## Memory Recall",
-    "Before answering anything about prior work, decisions, dates, people, preferences, or todos: run memory_search on MEMORY.md + memory/*.md; then use memory_get to pull only the needed lines. If low confidence after search, say you checked.",
+    params.l10n.memoryRecallTitle,
+    params.l10n.memoryRecallLine,
     "",
   ];
 }
 
-function buildUserIdentitySection(ownerLine: string | undefined, isMinimal: boolean) {
-  if (!ownerLine || isMinimal) return [];
-  return ["## User Identity", ownerLine, ""];
-}
-
-function buildTimeSection(params: { userTimezone?: string }) {
-  if (!params.userTimezone) return [];
-  return ["## Current Date & Time", `Time zone: ${params.userTimezone}`, ""];
-}
-
-function buildReplyTagsSection(isMinimal: boolean) {
-  if (isMinimal) return [];
+function buildUserIdentitySection(params: {
+  ownerLine: string | undefined;
+  isMinimal: boolean;
+  promptLanguage: PromptLanguage;
+}) {
+  if (!params.ownerLine || params.isMinimal) return [];
   return [
-    "## Reply Tags",
-    "To request a native reply/quote on supported surfaces, include one tag in your reply:",
-    "- [[reply_to_current]] replies to the triggering message.",
-    "- [[reply_to:<id>]] replies to a specific message id when you have it.",
-    "Whitespace inside the tag is allowed (e.g. [[ reply_to_current ]] / [[ reply_to: 123 ]]).",
-    "Tags are stripped before sending; support depends on the current channel config.",
+    params.promptLanguage === "zh" ? "## 用户身份（User Identity）" : "## User Identity",
+    params.ownerLine,
+    "",
+  ];
+}
+
+function buildTimeSection(params: { userTimezone?: string; promptLanguage: PromptLanguage }) {
+  if (!params.userTimezone) return [];
+  return [
+    params.promptLanguage === "zh"
+      ? "## 当前日期与时间（Current Date & Time）"
+      : "## Current Date & Time",
+    params.promptLanguage === "zh" ? `时区：${params.userTimezone}` : `Time zone: ${params.userTimezone}`,
+    "",
+  ];
+}
+
+function buildReplyTagsSection(params: { isMinimal: boolean; l10n: typeof SYSTEM_PROMPT_L10N_EN }) {
+  if (params.isMinimal) return [];
+  return [
+    params.l10n.replyTagsTitle,
+    params.l10n.replyTagsIntroLine,
+    params.l10n.replyTagsCurrentLine,
+    params.l10n.replyTagsIdLine,
+    params.l10n.replyTagsWhitespaceLine,
+    params.l10n.replyTagsStrippedLine,
     "",
   ];
 }
@@ -74,25 +103,33 @@ function buildMessagingSection(params: {
   inlineButtonsEnabled: boolean;
   runtimeChannel?: string;
   messageToolHints?: string[];
+  silentReplyToken: string;
+  l10n: typeof SYSTEM_PROMPT_L10N_EN;
 }) {
   if (params.isMinimal) return [];
   return [
-    "## Messaging",
-    "- Reply in current session → automatically routes to the source channel (Signal, Telegram, etc.)",
-    "- Cross-session messaging → use sessions_send(sessionKey, message)",
-    "- Never use exec/curl for provider messaging; Clawdbot handles all routing internally.",
+    params.l10n.messagingTitle,
+    params.l10n.messagingReplyInSessionLine,
+    params.l10n.messagingCrossSessionLine,
+    params.l10n.messagingNeverUseExecCurlLine,
     params.availableTools.has("message")
       ? [
           "",
-          "### message tool",
-          "- Use `message` for proactive sends + channel actions (polls, reactions, etc.).",
-          "- For `action=send`, include `to` and `message`.",
-          `- If multiple channels are configured, pass \`channel\` (${params.messageChannelOptions}).`,
-          `- If you use \`message\` (\`action=send\`) to deliver your user-visible reply, respond with ONLY: ${SILENT_REPLY_TOKEN} (avoid duplicate replies).`,
+          params.l10n.messagingToolTitle,
+          params.l10n.messagingToolUseLine,
+          params.l10n.messagingToolActionSendLine,
+          formatTemplate(params.l10n.messagingToolMultiChannelLine, {
+            messageChannelOptions: params.messageChannelOptions,
+          }),
+          formatTemplate(params.l10n.messagingToolSilentReplyLine, {
+            silentReplyToken: params.silentReplyToken,
+          }),
           params.inlineButtonsEnabled
-            ? "- Inline buttons supported. Use `action=send` with `buttons=[[{text,callback_data}]]` (callback_data routes back as a user message)."
+            ? params.l10n.messagingInlineButtonsSupportedLine
             : params.runtimeChannel
-              ? `- Inline buttons not enabled for ${params.runtimeChannel}. If you need them, ask to set ${params.runtimeChannel}.capabilities.inlineButtons ("dm"|"group"|"all"|"allowlist").`
+              ? formatTemplate(params.l10n.messagingInlineButtonsNotEnabledTemplate, {
+                  runtimeChannel: params.runtimeChannel,
+                })
               : "",
           ...(params.messageToolHints ?? []),
         ]
@@ -107,21 +144,26 @@ function buildVoiceSection(params: { isMinimal: boolean; ttsHint?: string }) {
   if (params.isMinimal) return [];
   const hint = params.ttsHint?.trim();
   if (!hint) return [];
-  return ["## Voice (TTS)", hint, ""];
+  return ["## 语音（TTS）", hint, ""];
 }
 
-function buildDocsSection(params: { docsPath?: string; isMinimal: boolean; readToolName: string }) {
+function buildDocsSection(params: {
+  docsPath?: string;
+  isMinimal: boolean;
+  readToolName: string;
+  l10n: typeof SYSTEM_PROMPT_L10N_EN;
+}) {
   const docsPath = params.docsPath?.trim();
   if (!docsPath || params.isMinimal) return [];
   return [
-    "## Documentation",
-    `Clawdbot docs: ${docsPath}`,
-    "Mirror: https://docs.clawd.bot",
-    "Source: https://github.com/clawdbot/clawdbot",
-    "Community: https://discord.com/invite/clawd",
-    "Find new skills: https://clawdhub.com",
-    "For Clawdbot behavior, commands, config, or architecture: consult local docs first.",
-    "When diagnosing issues, run `clawdbot status` yourself when possible; only ask the user if you lack access (e.g., sandboxed).",
+    params.l10n.docsTitle,
+    formatTemplate(params.l10n.docsIntroLine, { docsPath }),
+    params.l10n.docsMirrorLine,
+    params.l10n.docsSourceLine,
+    params.l10n.docsCommunityLine,
+    params.l10n.docsFindSkillsLine,
+    params.l10n.docsConsultLocalFirstLine,
+    params.l10n.docsStatusHintLine,
     "",
   ];
 }
@@ -181,35 +223,11 @@ export function buildAgentSystemPrompt(params: {
     level: "minimal" | "extensive";
     channel: string;
   };
+  promptLanguage?: PromptLanguage;
 }) {
-  const coreToolSummaries: Record<string, string> = {
-    read: "Read file contents",
-    write: "Create or overwrite files",
-    edit: "Make precise edits to files",
-    apply_patch: "Apply multi-file patches",
-    grep: "Search file contents for patterns",
-    find: "Find files by glob pattern",
-    ls: "List directory contents",
-    exec: "Run shell commands (pty available for TTY-required CLIs)",
-    process: "Manage background exec sessions",
-    web_search: "Search the web (Brave API)",
-    web_fetch: "Fetch and extract readable content from a URL",
-    // Channel docking: add login tools here when a channel needs interactive linking.
-    browser: "Control web browser",
-    canvas: "Present/eval/snapshot the Canvas",
-    nodes: "List/describe/notify/camera/screen on paired nodes",
-    cron: "Manage cron jobs and wake events (use for reminders; when scheduling a reminder, write the systemEvent text as something that will read like a reminder when it fires, and mention that it is a reminder depending on the time gap between setting and firing; include recent context in reminder text if appropriate)",
-    message: "Send messages and channel actions",
-    gateway: "Restart, apply config, or run updates on the running Clawdbot process",
-    agents_list: "List agent ids allowed for sessions_spawn",
-    sessions_list: "List other sessions (incl. sub-agents) with filters/last",
-    sessions_history: "Fetch history for another session/sub-agent",
-    sessions_send: "Send a message to another session/sub-agent",
-    sessions_spawn: "Spawn a sub-agent session",
-    session_status:
-      "Show a /status-equivalent status card (usage + time + Reasoning/Verbose/Elevated); use for model-use questions (📊 session_status); optional per-session model override",
-    image: "Analyze an image with the configured image model",
-  };
+  const promptLanguage = params.promptLanguage ?? "en";
+  const l10n = promptLanguage === "zh" ? SYSTEM_PROMPT_L10N_ZH : SYSTEM_PROMPT_L10N_EN;
+  const coreToolSummaries: Record<string, string> = { ...l10n.toolSummaries };
 
   const toolOrder = [
     "read",
@@ -281,27 +299,42 @@ export function buildAgentSystemPrompt(params: {
   const ownerNumbers = (params.ownerNumbers ?? []).map((value) => value.trim()).filter(Boolean);
   const ownerLine =
     ownerNumbers.length > 0
-      ? `Owner numbers: ${ownerNumbers.join(", ")}. Treat messages from these numbers as the user.`
+      ? (promptLanguage === "zh"
+          ? `Owner numbers: ${ownerNumbers.join(", ")}。来自这些号码的消息应被视为用户本人（用于鉴权与对话归属判断）。`
+          : `Owner numbers: ${ownerNumbers.join(", ")}. Treat messages from these numbers as the user.`)
       : undefined;
   const reasoningHint = params.reasoningTagHint
     ? [
-        "ALL internal reasoning MUST be inside <think>...</think>.",
-        "Do not output any analysis outside <think>.",
-        "Format every reply as <think>...</think> then <final>...</final>, with no other text.",
-        "Only the final user-visible reply may appear inside <final>.",
-        "Only text inside <final> is shown to the user; everything else is discarded and never seen by the user.",
-        "Example:",
-        "<think>Short internal reasoning.</think>",
-        "<final>Hey there! What would you like to do next?</final>",
+        ...(promptLanguage === "zh"
+          ? [
+              "所有内部推理必须放在 <think>...</think> 内。",
+              "不要在 <think>...</think> 之外输出任何分析内容。",
+              "每次回复必须严格按：<think>...</think> 然后 <final>...</final> 的格式输出，除此之外不要输出任何其它文字。",
+              "只有给用户看的最终回复允许出现在 <final>...</final> 内。",
+              "系统只会展示 <final> 中的文本；其它内容会被丢弃，用户不可见。",
+              "示例：",
+              "<think>这里是简短的内部推理。</think>",
+              "<final>你好！你接下来想做什么？</final>",
+            ]
+          : [
+              "ALL internal reasoning MUST be inside <think>...</think>.",
+              "Do not output any analysis outside <think>.",
+              "Format every reply as <think>...</think> then <final>...</final>, with no other text.",
+              "Only the final user-visible reply may appear inside <final>.",
+              "Only text inside <final> is shown to the user; everything else is discarded and never seen by the user.",
+              "Example:",
+              "<think>Short internal reasoning.</think>",
+              "<final>Hey there! What would you like to do next?</final>",
+            ]),
       ].join(" ")
     : undefined;
   const reasoningLevel = params.reasoningLevel ?? "off";
   const userTimezone = params.userTimezone?.trim();
   const skillsPrompt = params.skillsPrompt?.trim();
   const heartbeatPrompt = params.heartbeatPrompt?.trim();
-  const heartbeatPromptLine = heartbeatPrompt
-    ? `Heartbeat prompt: ${heartbeatPrompt}`
-    : "Heartbeat prompt: (configured)";
+  const heartbeatPromptLine = formatTemplate(l10n.heartbeatsPromptLineTemplate, {
+    heartbeatPrompt: heartbeatPrompt || "(configured)",
+  });
   const runtimeInfo = params.runtimeInfo;
   const runtimeChannel = runtimeInfo?.channel?.trim().toLowerCase();
   const runtimeCapabilities = (runtimeInfo?.capabilities ?? [])
@@ -316,154 +349,178 @@ export function buildAgentSystemPrompt(params: {
     skillsPrompt,
     isMinimal,
     readToolName,
+    l10n,
   });
-  const memorySection = buildMemorySection({ isMinimal, availableTools });
+  const memorySection = buildMemorySection({ isMinimal, availableTools, l10n });
   const docsSection = buildDocsSection({
     docsPath: params.docsPath,
     isMinimal,
     readToolName,
+    l10n,
   });
   const workspaceNotes = (params.workspaceNotes ?? []).map((note) => note.trim()).filter(Boolean);
 
   // For "none" mode, return just the basic identity line
   if (promptMode === "none") {
-    return "You are a personal assistant running inside Clawdbot.";
+    return l10n.identityLine;
   }
 
   const lines = [
-    "You are a personal assistant running inside Clawdbot.",
+    l10n.identityLine,
     "",
-    "## Tooling",
-    "Tool availability (filtered by policy):",
-    "Tool names are case-sensitive. Call tools exactly as listed.",
+    l10n.toolingTitle,
+    l10n.toolingAvailability,
+    l10n.toolingCaseSensitive,
     toolLines.length > 0
       ? toolLines.join("\n")
       : [
-          "Pi lists the standard tools above. This runtime enables:",
-          "- grep: search file contents for patterns",
-          "- find: find files by glob pattern",
-          "- ls: list directory contents",
-          "- apply_patch: apply multi-file patches",
-          `- ${execToolName}: run shell commands (supports background via yieldMs/background)`,
-          `- ${processToolName}: manage background exec sessions`,
-          "- browser: control clawd's dedicated browser",
-          "- canvas: present/eval/snapshot the Canvas",
-          "- nodes: list/describe/notify/camera/screen on paired nodes",
-          "- cron: manage cron jobs and wake events (use for reminders; when scheduling a reminder, write the systemEvent text as something that will read like a reminder when it fires, and mention that it is a reminder depending on the time gap between setting and firing; include recent context in reminder text if appropriate)",
-          "- sessions_list: list sessions",
-          "- sessions_history: fetch session history",
-          "- sessions_send: send to another session",
+          l10n.toolingFallbackIntro,
+          ...l10n.toolingFallbackLines.map((line) =>
+            formatTemplate(line, { execTool: execToolName, processTool: processToolName }),
+          ),
         ].join("\n"),
-    "TOOLS.md does not control tool availability; it is user guidance for how to use external tools.",
-    "If a task is more complex or takes longer, spawn a sub-agent. It will do the work for you and ping you when it's done. You can always check up on it.",
+    l10n.toolsMdNote,
+    l10n.subagentNote,
     "",
-    "## Tool Call Style",
-    "Default: do not narrate routine, low-risk tool calls (just call the tool).",
-    "Narrate only when it helps: multi-step work, complex/challenging problems, sensitive actions (e.g., deletions), or when the user explicitly asks.",
-    "Keep narration brief and value-dense; avoid repeating obvious steps.",
-    "Use plain human language for narration unless in a technical context.",
+    l10n.toolCallStyleTitle,
+    l10n.toolCallStyleDefault,
+    l10n.toolCallStyleNarrateOnlyWhen,
+    l10n.toolCallStyleKeepBrief,
+    l10n.toolCallStylePlainLanguage,
     "",
-    "## Clawdbot CLI Quick Reference",
-    "Clawdbot is controlled via subcommands. Do not invent commands.",
-    "To manage the Gateway daemon service (start/stop/restart):",
-    "- clawdbot gateway status",
-    "- clawdbot gateway start",
-    "- clawdbot gateway stop",
-    "- clawdbot gateway restart",
-    "If unsure, ask the user to run `clawdbot help` (or `clawdbot gateway --help`) and paste the output.",
+    l10n.cliQuickRefTitle,
+    l10n.cliQuickRefIntro,
+    l10n.cliQuickRefGatewayHeader,
+    l10n.cliQuickRefGatewayItems.join("\n"),
+    l10n.cliQuickRefHelpHint,
     "",
     ...skillsSection,
     ...memorySection,
     // Skip self-update for subagent/none modes
-    hasGateway && !isMinimal ? "## Clawdbot Self-Update" : "",
+    hasGateway && !isMinimal ? l10n.selfUpdateTitle : "",
     hasGateway && !isMinimal
       ? [
-          "Get Updates (self-update) is ONLY allowed when the user explicitly asks for it.",
-          "Do not run config.apply or update.run unless the user explicitly requests an update or config change; if it's not explicit, ask first.",
-          "Actions: config.get, config.schema, config.apply (validate + write full config, then restart), update.run (update deps or git, then restart).",
-          "After restart, Clawdbot pings the last active session automatically.",
+          l10n.selfUpdateOnlyWhenAskedLine,
+          l10n.selfUpdateDoNotRunLine,
+          l10n.selfUpdateActionsLine,
+          l10n.selfUpdateAfterRestartLine,
         ].join("\n")
       : "",
     hasGateway && !isMinimal ? "" : "",
     "",
     // Skip model aliases for subagent/none modes
     params.modelAliasLines && params.modelAliasLines.length > 0 && !isMinimal
-      ? "## Model Aliases"
+      ? l10n.modelAliasesTitle
       : "",
     params.modelAliasLines && params.modelAliasLines.length > 0 && !isMinimal
-      ? "Prefer aliases when specifying model overrides; full provider/model is also accepted."
+      ? l10n.modelAliasesIntro
       : "",
     params.modelAliasLines && params.modelAliasLines.length > 0 && !isMinimal
       ? params.modelAliasLines.join("\n")
       : "",
     params.modelAliasLines && params.modelAliasLines.length > 0 && !isMinimal ? "" : "",
-    "## Workspace",
-    `Your working directory is: ${params.workspaceDir}`,
-    "Treat this directory as the single global workspace for file operations unless explicitly instructed otherwise.",
+    l10n.workspaceTitle,
+    `${l10n.workspaceDirLinePrefix} ${params.workspaceDir}`,
+    l10n.workspaceDirGuidance,
     ...workspaceNotes,
     "",
     ...docsSection,
-    params.sandboxInfo?.enabled ? "## Sandbox" : "",
+    params.sandboxInfo?.enabled ? l10n.sandboxTitle : "",
     params.sandboxInfo?.enabled
       ? [
-          "You are running in a sandboxed runtime (tools execute in Docker).",
-          "Some tools may be unavailable due to sandbox policy.",
-          "Sub-agents stay sandboxed (no elevated/host access). Need outside-sandbox read/write? Don't spawn; ask first.",
+          l10n.sandboxIntroLine,
+          l10n.sandboxAvailabilityLine,
+          l10n.sandboxSubagentsLine,
           params.sandboxInfo.workspaceDir
-            ? `Sandbox workspace: ${params.sandboxInfo.workspaceDir}`
+            ? (promptLanguage === "zh"
+                ? `沙箱工作区：${params.sandboxInfo.workspaceDir}`
+                : `Sandbox workspace: ${params.sandboxInfo.workspaceDir}`)
             : "",
           params.sandboxInfo.workspaceAccess
-            ? `Agent workspace access: ${params.sandboxInfo.workspaceAccess}${
-                params.sandboxInfo.agentWorkspaceMount
-                  ? ` (mounted at ${params.sandboxInfo.agentWorkspaceMount})`
-                  : ""
-              }`
+            ? (promptLanguage === "zh"
+                ? `代理工作区访问权限：${params.sandboxInfo.workspaceAccess}${
+                    params.sandboxInfo.agentWorkspaceMount
+                      ? `（挂载到 ${params.sandboxInfo.agentWorkspaceMount}）`
+                      : ""
+                  }`
+                : `Agent workspace access: ${params.sandboxInfo.workspaceAccess}${
+                    params.sandboxInfo.agentWorkspaceMount
+                      ? ` (mounted at ${params.sandboxInfo.agentWorkspaceMount})`
+                      : ""
+                  }`)
             : "",
           params.sandboxInfo.browserControlUrl
-            ? `Sandbox browser control URL: ${params.sandboxInfo.browserControlUrl}`
+            ? (promptLanguage === "zh"
+                ? `沙箱浏览器控制 URL：${params.sandboxInfo.browserControlUrl}`
+                : `Sandbox browser control URL: ${params.sandboxInfo.browserControlUrl}`)
             : "",
           params.sandboxInfo.browserNoVncUrl
-            ? `Sandbox browser observer (noVNC): ${params.sandboxInfo.browserNoVncUrl}`
+            ? (promptLanguage === "zh"
+                ? `沙箱浏览器观察视图（noVNC）：${params.sandboxInfo.browserNoVncUrl}`
+                : `Sandbox browser observer (noVNC): ${params.sandboxInfo.browserNoVncUrl}`)
             : "",
           params.sandboxInfo.hostBrowserAllowed === true
-            ? "Host browser control: allowed."
+            ? promptLanguage === "zh"
+              ? "宿主机浏览器控制：允许。"
+              : "Host browser control: allowed."
             : params.sandboxInfo.hostBrowserAllowed === false
-              ? "Host browser control: blocked."
+              ? promptLanguage === "zh"
+                ? "宿主机浏览器控制：已阻止。"
+                : "Host browser control: blocked."
               : "",
           params.sandboxInfo.allowedControlUrls?.length
-            ? `Browser control URL allowlist: ${params.sandboxInfo.allowedControlUrls.join(", ")}`
+            ? (promptLanguage === "zh"
+                ? `浏览器控制 URL 白名单：${params.sandboxInfo.allowedControlUrls.join(", ")}`
+                : `Browser control URL allowlist: ${params.sandboxInfo.allowedControlUrls.join(", ")}`)
             : "",
           params.sandboxInfo.allowedControlHosts?.length
-            ? `Browser control host allowlist: ${params.sandboxInfo.allowedControlHosts.join(", ")}`
+            ? (promptLanguage === "zh"
+                ? `浏览器控制 Host 白名单：${params.sandboxInfo.allowedControlHosts.join(", ")}`
+                : `Browser control host allowlist: ${params.sandboxInfo.allowedControlHosts.join(", ")}`)
             : "",
           params.sandboxInfo.allowedControlPorts?.length
-            ? `Browser control port allowlist: ${params.sandboxInfo.allowedControlPorts.join(", ")}`
+            ? (promptLanguage === "zh"
+                ? `浏览器控制端口白名单：${params.sandboxInfo.allowedControlPorts.join(", ")}`
+                : `Browser control port allowlist: ${params.sandboxInfo.allowedControlPorts.join(", ")}`)
             : "",
           params.sandboxInfo.elevated?.allowed
-            ? "Elevated exec is available for this session."
+            ? promptLanguage === "zh"
+              ? "本会话可使用 elevated exec。"
+              : "Elevated exec is available for this session."
             : "",
           params.sandboxInfo.elevated?.allowed
-            ? "User can toggle with /elevated on|off|ask|full."
+            ? promptLanguage === "zh"
+              ? "用户可以用 /elevated on|off|ask|full 切换。"
+              : "User can toggle with /elevated on|off|ask|full."
             : "",
           params.sandboxInfo.elevated?.allowed
-            ? "You may also send /elevated on|off|ask|full when needed."
+            ? promptLanguage === "zh"
+              ? "如有必要，你也可以发送 /elevated on|off|ask|full。"
+              : "You may also send /elevated on|off|ask|full when needed."
             : "",
           params.sandboxInfo.elevated?.allowed
-            ? `Current elevated level: ${params.sandboxInfo.elevated.defaultLevel} (ask runs exec on host with approvals; full auto-approves).`
+            ? (promptLanguage === "zh"
+                ? `当前 elevated 级别：${params.sandboxInfo.elevated.defaultLevel}（ask：在宿主机执行需审批；full：自动批准）。`
+                : `Current elevated level: ${params.sandboxInfo.elevated.defaultLevel} (ask runs exec on host with approvals; full auto-approves).`)
             : "",
         ]
           .filter(Boolean)
           .join("\n")
       : "",
     params.sandboxInfo?.enabled ? "" : "",
-    ...buildUserIdentitySection(ownerLine, isMinimal),
+    ...buildUserIdentitySection({
+      ownerLine,
+      isMinimal,
+      promptLanguage,
+    }),
     ...buildTimeSection({
       userTimezone,
+      promptLanguage,
     }),
-    "## Workspace Files (injected)",
-    "These user-editable files are loaded by Clawdbot and included below in Project Context.",
+    l10n.injectedFilesTitle,
+    l10n.injectedFilesIntro,
     "",
-    ...buildReplyTagsSection(isMinimal),
+    ...buildReplyTagsSection({ isMinimal, l10n }),
     ...buildMessagingSection({
       isMinimal,
       availableTools,
@@ -471,6 +528,8 @@ export function buildAgentSystemPrompt(params: {
       inlineButtonsEnabled,
       runtimeChannel,
       messageToolHints: params.messageToolHints,
+      silentReplyToken: SILENT_REPLY_TOKEN,
+      l10n,
     }),
     ...buildVoiceSection({ isMinimal, ttsHint: params.ttsHint }),
   ];
@@ -478,7 +537,7 @@ export function buildAgentSystemPrompt(params: {
   if (extraSystemPrompt) {
     // Use "Subagent Context" header for minimal mode (subagents), otherwise "Group Chat Context"
     const contextHeader =
-      promptMode === "minimal" ? "## Subagent Context" : "## Group Chat Context";
+      promptMode === "minimal" ? l10n.extraContextSubagentTitle : l10n.extraContextGroupTitle;
     lines.push(contextHeader, extraSystemPrompt, "");
   }
   if (params.reactionGuidance) {
@@ -486,26 +545,26 @@ export function buildAgentSystemPrompt(params: {
     const guidanceText =
       level === "minimal"
         ? [
-            `Reactions are enabled for ${channel} in MINIMAL mode.`,
-            "React ONLY when truly relevant:",
-            "- Acknowledge important user requests or confirmations",
-            "- Express genuine sentiment (humor, appreciation) sparingly",
-            "- Avoid reacting to routine messages or your own replies",
-            "Guideline: at most 1 reaction per 5-10 exchanges.",
+            formatTemplate(l10n.reactionsEnabledLineTemplate, { channel }),
+            l10n.reactionsMinimalIntroLine,
+            l10n.reactionsMinimalItem1,
+            l10n.reactionsMinimalItem2,
+            l10n.reactionsMinimalItem3,
+            l10n.reactionsMinimalGuidelineLine,
           ].join("\n")
         : [
-            `Reactions are enabled for ${channel} in EXTENSIVE mode.`,
-            "Feel free to react liberally:",
-            "- Acknowledge messages with appropriate emojis",
-            "- Express sentiment and personality through reactions",
-            "- React to interesting content, humor, or notable events",
-            "- Use reactions to confirm understanding or agreement",
-            "Guideline: react whenever it feels natural.",
+            formatTemplate(l10n.reactionsExtensiveEnabledLineTemplate, { channel }),
+            l10n.reactionsExtensiveIntroLine,
+            l10n.reactionsExtensiveItem1,
+            l10n.reactionsExtensiveItem2,
+            l10n.reactionsExtensiveItem3,
+            l10n.reactionsExtensiveItem4,
+            l10n.reactionsExtensiveGuidelineLine,
           ].join("\n");
-    lines.push("## Reactions", guidanceText, "");
+    lines.push(l10n.reactionsTitle, guidanceText, "");
   }
   if (reasoningHint) {
-    lines.push("## Reasoning Format", reasoningHint, "");
+    lines.push(l10n.reasoningFormatTitle, reasoningHint, "");
   }
 
   const contextFiles = params.contextFiles ?? [];
@@ -515,11 +574,9 @@ export function buildAgentSystemPrompt(params: {
       const baseName = normalizedPath.split("/").pop() ?? normalizedPath;
       return baseName.toLowerCase() === "soul.md";
     });
-    lines.push("# Project Context", "", "The following project context files have been loaded:");
+    lines.push(l10n.projectContextTitle, "", l10n.projectContextFilesLoadedLine);
     if (hasSoulFile) {
-      lines.push(
-        "If SOUL.md is present, embody its persona and tone. Avoid stiff, generic replies; follow its guidance unless higher-priority instructions override it.",
-      );
+      lines.push(l10n.projectContextSoulLine);
     }
     lines.push("");
     for (const file of contextFiles) {
@@ -530,17 +587,17 @@ export function buildAgentSystemPrompt(params: {
   // Skip silent replies for subagent/none modes
   if (!isMinimal) {
     lines.push(
-      "## Silent Replies",
-      `When you have nothing to say, respond with ONLY: ${SILENT_REPLY_TOKEN}`,
+      l10n.silentRepliesTitle,
+      formatTemplate(l10n.silentRepliesWhenNothingLine, { silentReplyToken: SILENT_REPLY_TOKEN }),
       "",
-      "⚠️ Rules:",
-      "- It must be your ENTIRE message — nothing else",
-      `- Never append it to an actual response (never include "${SILENT_REPLY_TOKEN}" in real replies)`,
-      "- Never wrap it in markdown or code blocks",
+      l10n.silentRepliesRulesTitle,
+      l10n.silentRepliesRuleEntireMessageLine,
+      formatTemplate(l10n.silentRepliesRuleNeverAppendLine, { silentReplyToken: SILENT_REPLY_TOKEN }),
+      l10n.silentRepliesRuleNeverWrapLine,
       "",
-      `❌ Wrong: "Here's help... ${SILENT_REPLY_TOKEN}"`,
-      `❌ Wrong: "${SILENT_REPLY_TOKEN}"`,
-      `✅ Right: ${SILENT_REPLY_TOKEN}`,
+      formatTemplate(l10n.silentRepliesWrongAppendLine, { silentReplyToken: SILENT_REPLY_TOKEN }),
+      formatTemplate(l10n.silentRepliesWrongOnlyTokenLine, { silentReplyToken: SILENT_REPLY_TOKEN }),
+      formatTemplate(l10n.silentRepliesRightOnlyTokenLine, { silentReplyToken: SILENT_REPLY_TOKEN }),
       "",
     );
   }
@@ -548,20 +605,20 @@ export function buildAgentSystemPrompt(params: {
   // Skip heartbeats for subagent/none modes
   if (!isMinimal) {
     lines.push(
-      "## Heartbeats",
+      l10n.heartbeatsTitle,
       heartbeatPromptLine,
-      "If you receive a heartbeat poll (a user message matching the heartbeat prompt above), and there is nothing that needs attention, reply exactly:",
-      "HEARTBEAT_OK",
-      'Clawdbot treats a leading/trailing "HEARTBEAT_OK" as a heartbeat ack (and may discard it).',
-      'If something needs attention, do NOT include "HEARTBEAT_OK"; reply with the alert text instead.',
+      l10n.heartbeatsIfPollLine,
+      l10n.heartbeatsOkTokenLine,
+      l10n.heartbeatsAckLine,
+      l10n.heartbeatsIfAttentionLine,
       "",
     );
   }
 
   lines.push(
-    "## Runtime",
+    l10n.runtimeTitle,
     buildRuntimeLine(runtimeInfo, runtimeChannel, runtimeCapabilities, params.defaultThinkLevel),
-    `Reasoning: ${reasoningLevel} (hidden unless on/stream). Toggle /reasoning; /status shows Reasoning when enabled.`,
+    formatTemplate(l10n.runtimeReasoningLineTemplate, { reasoningLevel }),
   );
 
   return lines.filter(Boolean).join("\n");

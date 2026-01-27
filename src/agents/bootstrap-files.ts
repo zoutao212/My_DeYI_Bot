@@ -22,10 +22,11 @@ export async function resolveBootstrapFilesForRun(params: {
   sessionKey?: string;
   sessionId?: string;
   agentId?: string;
+  promptLanguage?: "en" | "zh";
 }): Promise<WorkspaceBootstrapFile[]> {
   const sessionKey = params.sessionKey ?? params.sessionId;
   const bootstrapFiles = filterBootstrapFilesForSession(
-    await loadWorkspaceBootstrapFiles(params.workspaceDir),
+    await loadWorkspaceBootstrapFiles(params.workspaceDir, { promptLanguage: params.promptLanguage }),
     sessionKey,
   );
   return applyBootstrapHookOverrides({
@@ -45,6 +46,7 @@ export async function resolveBootstrapContextForRun(params: {
   sessionId?: string;
   agentId?: string;
   warn?: (message: string) => void;
+  promptLanguage?: "en" | "zh";
 }): Promise<{
   bootstrapFiles: WorkspaceBootstrapFile[];
   contextFiles: EmbeddedContextFile[];

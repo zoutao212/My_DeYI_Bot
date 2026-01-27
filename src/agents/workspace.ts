@@ -70,6 +70,34 @@ export type WorkspaceBootstrapFile = {
   missing: boolean;
 };
 
+async function resolveLocalizedBootstrapFile(params: {
+  dir: string;
+  name: WorkspaceBootstrapFileName;
+  promptLanguage?: "en" | "zh";
+}): Promise<{ resolvedPath: string; content: string } | null> {
+  const filePath = path.join(params.dir, params.name);
+  const language = params.promptLanguage;
+  const languageSuffix = language === "zh" || language === "en" ? `.${language}` : "";
+  const localizedPath = languageSuffix
+    ? path.join(params.dir, params.name.replace(/\.md$/i, `${languageSuffix}.md`))
+    : null;
+
+  if (localizedPath) {
+    try {
+      const content = await fs.readFile(localizedPath, "utf-8");
+      return { resolvedPath: localizedPath, content };
+    } catch {
+      // fall through
+    }
+  }
+  try {
+    const content = await fs.readFile(filePath, "utf-8");
+    return { resolvedPath: filePath, content };
+  } catch {
+    return null;
+  }
+}
+
 async function writeFileIfMissing(filePath: string, content: string) {
   try {
     await fs.writeFile(filePath, content, {
@@ -184,7 +212,10 @@ export async function ensureAgentWorkspace(params?: {
   };
 }
 
-export async function loadWorkspaceBootstrapFiles(dir: string): Promise<WorkspaceBootstrapFile[]> {
+export async function loadWorkspaceBootstrapFiles(
+  dir: string,
+  opts?: { promptLanguage?: "en" | "zh" },
+): Promise<WorkspaceBootstrapFile[]> {
   const resolvedDir = resolveUserPath(dir);
 
   const entries: Array<{
@@ -223,16 +254,24 @@ export async function loadWorkspaceBootstrapFiles(dir: string): Promise<Workspac
 
   const result: WorkspaceBootstrapFile[] = [];
   for (const entry of entries) {
-    try {
-      const content = await fs.readFile(entry.filePath, "utf-8");
+    const resolved = await resolveLocalizedBootstrapFile({
+      dir: resolvedDir,
+      name: entry.name,
+      promptLanguage: opts?.promptLanguage,
+    });
+    if (resolved) {
+      result.push({
+        name: entry.name,
+        path: resolved.resolvedPath,
+        content: resolved.content,
+        missing: false,
+      });
+    } else {
       result.push({
         name: entry.name,
         path: entry.filePath,
-        content,
-        missing: false,
+        missing: true,
       });
-    } catch {
-      result.push({ name: entry.name, path: entry.filePath, missing: true });
     }
   }
   return result;
