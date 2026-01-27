@@ -60,6 +60,7 @@ export type ChatProps = {
   onAbort?: () => void;
   onQueueRemove: (id: string) => void;
   onNewSession: () => void;
+  onNewSessionNoSummary: () => void;
   onOpenSidebar?: (content: string) => void;
   onCloseSidebar?: () => void;
   onSplitRatioChange?: (ratio: number) => void;
@@ -153,6 +154,30 @@ export function renderChat(props: ChatProps) {
 
   return html`
     <section class="card chat">
+      <div class="row" style="justify-content: space-between; gap: 12px; align-items: center;">
+        <div class="mono" style="font-size: 12px; opacity: 0.9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+          ${props.sessionKey}
+        </div>
+        <div class="row" style="gap: 8px;">
+          <button
+            class="btn"
+            type="button"
+            ?disabled=${!props.connected || props.sending}
+            @click=${props.onNewSession}
+          >
+            新会话（带总结）
+          </button>
+          <button
+            class="btn"
+            type="button"
+            ?disabled=${!props.connected || props.sending}
+            @click=${props.onNewSessionNoSummary}
+          >
+            全新开始（不总结）
+          </button>
+        </div>
+      </div>
+
       ${props.disabledReason
         ? html`<div class="callout">${props.disabledReason}</div>`
         : nothing}
@@ -254,13 +279,17 @@ export function renderChat(props: ChatProps) {
           ></textarea>
         </label>
         <div class="chat-compose__actions">
-          <button
-            class="btn"
-            ?disabled=${!props.connected || (!canAbort && props.sending)}
-            @click=${canAbort ? props.onAbort : props.onNewSession}
-          >
-            ${canAbort ? "Stop" : "New session"}
-          </button>
+          ${canAbort
+            ? html`
+                <button
+                  class="btn"
+                  ?disabled=${!props.connected || props.sending}
+                  @click=${props.onAbort}
+                >
+                  Stop
+                </button>
+              `
+            : nothing}
           <button
             class="btn primary"
             ?disabled=${!props.connected}

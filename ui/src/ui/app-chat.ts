@@ -46,6 +46,13 @@ export function isChatStopCommand(text: string) {
   );
 }
 
+export function createFreshSessionKey(current: string): string {
+  const parsed = parseAgentSessionKey(current);
+  const agentId = (parsed?.agentId ?? "main").trim() || "main";
+  const mainKey = generateUUID().toLowerCase();
+  return `agent:${agentId}:${mainKey}`;
+}
+
 export async function handleAbortChat(host: ChatHost) {
   if (!host.connected) return;
   host.chatMessage = "";

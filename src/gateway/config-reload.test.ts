@@ -108,6 +108,24 @@ describe("buildGatewayReloadPlan", () => {
     expect(plan.noopPaths).toContain("gateway.remote.url");
   });
 
+  it("treats meta changes as no-op", () => {
+    const plan = buildGatewayReloadPlan(["meta.lastTouchedAt"]);
+    expect(plan.restartGateway).toBe(false);
+    expect(plan.noopPaths).toContain("meta.lastTouchedAt");
+  });
+
+  it("treats models changes as hot reload", () => {
+    const plan = buildGatewayReloadPlan(["models.activeProviderId"]);
+    expect(plan.restartGateway).toBe(false);
+    expect(plan.hotReasons).toContain("models.activeProviderId");
+  });
+
+  it("treats agents changes as hot reload", () => {
+    const plan = buildGatewayReloadPlan(["agents.defaults.model.primary"]);
+    expect(plan.restartGateway).toBe(false);
+    expect(plan.hotReasons).toContain("agents.defaults.model.primary");
+  });
+
   it("defaults unknown paths to restart", () => {
     const plan = buildGatewayReloadPlan(["unknownField"]);
     expect(plan.restartGateway).toBe(true);

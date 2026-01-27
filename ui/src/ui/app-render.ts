@@ -30,7 +30,7 @@ import type {
   StatusSummary,
 } from "./types";
 import type { ChatQueueItem, CronFormState } from "./ui-types";
-import { refreshChatAvatar } from "./app-chat";
+import { createFreshSessionKey, refreshChatAvatar } from "./app-chat";
 import { renderChat } from "./views/chat";
 import { renderConfig } from "./views/config";
 import { renderChannels } from "./views/channels";
@@ -445,9 +445,8 @@ export function renderApp(state: AppViewState) {
           : nothing}
 
         ${state.tab === "chat"
-          ? renderChat({
-              sessionKey: state.sessionKey,
-              onSessionKeyChange: (next) => {
+          ? (() => {
+              const onSessionKeyChange = (next: string) => {
                 state.sessionKey = next;
                 state.chatMessage = "";
                 state.chatStream = null;
@@ -464,7 +463,11 @@ export function renderApp(state: AppViewState) {
                 void state.loadAssistantIdentity();
                 void loadChatHistory(state);
                 void refreshChatAvatar(state);
-              },
+              };
+
+              return renderChat({
+                sessionKey: state.sessionKey,
+                onSessionKeyChange,
               thinkingLevel: state.chatThinkingLevel,
               showThinking,
               loading: state.chatLoading,
@@ -502,6 +505,9 @@ export function renderApp(state: AppViewState) {
               onQueueRemove: (id) => state.removeQueuedMessage(id),
               onNewSession: () =>
                 state.handleSendChat("/new", { restoreDraft: true }),
+              onNewSessionNoSummary: () => {
+                onSessionKeyChange(createFreshSessionKey(state.sessionKey));
+              },
               // Sidebar props for tool output viewing
               sidebarOpen: state.sidebarOpen,
               sidebarContent: state.sidebarContent,
@@ -512,7 +518,8 @@ export function renderApp(state: AppViewState) {
               onSplitRatioChange: (ratio: number) => state.handleSplitRatioChange(ratio),
               assistantName: state.assistantName,
               assistantAvatar: state.assistantAvatar,
-            })
+              });
+            })()
           : nothing}
 
         ${state.tab === "config"

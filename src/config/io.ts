@@ -539,6 +539,10 @@ function clearConfigCache(): void {
   configCache = null;
 }
 
+export function resetConfigCache(): void {
+  clearConfigCache();
+}
+
 export function loadConfig(): ClawdbotConfig {
   const configPath = resolveConfigPath();
   const now = Date.now();

@@ -11,7 +11,6 @@ import {
 import { applyLegacyMigrations } from "../../config/legacy.js";
 import { applyMergePatch } from "../../config/merge-patch.js";
 import { buildConfigSchema } from "../../config/schema.js";
-import { scheduleGatewaySigusr1Restart } from "../../infra/restart.js";
 import {
   formatDoctorNonInteractiveHint,
   type RestartSentinelPayload,
@@ -293,17 +292,20 @@ export const configHandlers: GatewayRequestHandlers = {
     } catch {
       sentinelPath = null;
     }
-    const restart = scheduleGatewaySigusr1Restart({
-      delayMs: restartDelayMs,
-      reason: "config.patch",
-    });
     respond(
       true,
       {
         ok: true,
         path: CONFIG_PATH_CLAWDBOT,
         config: validated.config,
-        restart,
+        restart: {
+          ok: false,
+          pid: process.pid,
+          signal: "SIGUSR1" as const,
+          delayMs: restartDelayMs ?? 0,
+          reason: "config.patch",
+          mode: "emit" as const,
+        },
         sentinel: {
           path: sentinelPath,
           payload,
@@ -390,17 +392,20 @@ export const configHandlers: GatewayRequestHandlers = {
     } catch {
       sentinelPath = null;
     }
-    const restart = scheduleGatewaySigusr1Restart({
-      delayMs: restartDelayMs,
-      reason: "config.apply",
-    });
     respond(
       true,
       {
         ok: true,
         path: CONFIG_PATH_CLAWDBOT,
         config: validated.config,
-        restart,
+        restart: {
+          ok: false,
+          pid: process.pid,
+          signal: "SIGUSR1" as const,
+          delayMs: restartDelayMs ?? 0,
+          reason: "config.apply",
+          mode: "emit" as const,
+        },
         sentinel: {
           path: sentinelPath,
           payload,

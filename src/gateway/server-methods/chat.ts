@@ -56,6 +56,7 @@ import {
 } from "../session-utils.js";
 import { stripEnvelopeFromMessages } from "../chat-sanitize.js";
 import { formatForLog } from "../ws-log.js";
+import { getRuntimeLogDir, writeRuntimeLog } from "../runtime-log.js";
 import type { GatewayRequestContext, GatewayRequestHandlers } from "./types.js";
 
 type TranscriptAppendResult = {
@@ -64,6 +65,8 @@ type TranscriptAppendResult = {
   message?: Record<string, unknown>;
   error?: string;
 };
+
+let didLogChatSendPromptLanguage = false;
 
 function resolveTranscriptPath(params: {
   sessionId: string;
@@ -483,6 +486,7 @@ export const chatHandlers: GatewayRequestHandlers = {
       sessionKey: string;
       message: string;
       thinking?: string;
+      promptLanguage?: string;
       deliver?: boolean;
       attachments?: Array<{
         type?: string;
@@ -528,12 +532,60 @@ export const chatHandlers: GatewayRequestHandlers = {
       }
     }
     const { cfg, entry } = loadSessionEntry(p.sessionKey);
+    const cfgForRun =
+      p.promptLanguage === "zh"
+        ? {
+            ...cfg,
+            agents: {
+              ...(cfg.agents ?? {}),
+              defaults: {
+                ...(cfg.agents?.defaults ?? {}),
+                promptLanguage: "zh" as const,
+              },
+            },
+          }
+        : cfg;
     const timeoutMs = resolveAgentTimeoutMs({
-      cfg,
+      cfg: cfgForRun,
       overrideMs: p.timeoutMs,
     });
     const now = Date.now();
     const clientRunId = p.idempotencyKey;
+
+    const sendLogPathPromise = writeRuntimeLog({
+      kind: "sendmsg",
+      ts: now,
+      sessionKey: p.sessionKey,
+      runId: clientRunId,
+      payload: {
+        sessionKey: p.sessionKey,
+        runId: clientRunId,
+        message: typeof parsedMessage === "string" ? parsedMessage : String(p.message),
+        promptLanguage: p.promptLanguage,
+        thinking: p.thinking,
+        deliver: p.deliver,
+        attachments: normalizedAttachments.map((a) => ({
+          type: a.type,
+          mimeType: a.mimeType,
+          fileName: a.fileName,
+          contentBytesBase64: typeof a.content === "string" ? a.content.length : undefined,
+        })),
+      },
+    });
+    void sendLogPathPromise.then((logPath) => {
+      if (logPath) return;
+      context.logGateway.warn(
+        `[runtimelog] write failed kind=sendmsg dir=${getRuntimeLogDir()} sessionKey=${p.sessionKey} runId=${clientRunId}`,
+      );
+    });
+
+    if (!didLogChatSendPromptLanguage) {
+      didLogChatSendPromptLanguage = true;
+      const normalizedPromptLanguage = p.promptLanguage === "zh" ? "zh" : "en";
+      context.logGateway.warn(
+        `[debug-once] chat.send promptLanguage sessionKey=${p.sessionKey} runId=${clientRunId} raw=${String(p.promptLanguage)} normalized=${normalizedPromptLanguage}`,
+      );
+    }
 
     const sendPolicy = resolveSendPolicy({
       cfg,
@@ -633,6 +685,12 @@ export const chatHandlers: GatewayRequestHandlers = {
       let prefixContext: ResponsePrefixContext = {
         identityName: resolveIdentityName(cfg, agentId),
       };
+      const modelSelected: {
+        provider?: string;
+        model?: string;
+        modelFull?: string;
+        thinkingLevel?: string;
+      } = {};
       const finalReplyParts: string[] = [];
       const dispatcher = createReplyDispatcher({
         responsePrefix: resolveEffectiveMessagesConfig(cfg, agentId).responsePrefix,
@@ -651,7 +709,7 @@ export const chatHandlers: GatewayRequestHandlers = {
       let agentRunStarted = false;
       void dispatchInboundMessage({
         ctx,
-        cfg,
+        cfg: cfgForRun,
         dispatcher,
         replyOptions: {
           runId: clientRunId,
@@ -666,6 +724,11 @@ export const chatHandlers: GatewayRequestHandlers = {
             prefixContext.model = extractShortModelName(ctx.model);
             prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
             prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+
+            modelSelected.provider = ctx.provider;
+            modelSelected.model = extractShortModelName(ctx.model);
+            modelSelected.modelFull = `${ctx.provider}/${ctx.model}`;
+            modelSelected.thinkingLevel = ctx.thinkLevel ?? "off";
           },
         },
       })
@@ -717,6 +780,29 @@ export const chatHandlers: GatewayRequestHandlers = {
             ok: true,
             payload: { runId: clientRunId, status: "ok" as const },
           });
+
+          const resOkLogPathPromise = writeRuntimeLog({
+            kind: "resmsg",
+            ts: Date.now(),
+            sessionKey: p.sessionKey,
+            runId: clientRunId,
+            payload: {
+              sessionKey: p.sessionKey,
+              runId: clientRunId,
+              modelSelected,
+              reply: finalReplyParts
+                .map((part) => part.trim())
+                .filter(Boolean)
+                .join("\n\n")
+                .trim(),
+            },
+          });
+          void resOkLogPathPromise.then((logPath) => {
+            if (logPath) return;
+            context.logGateway.warn(
+              `[runtimelog] write failed kind=resmsg dir=${getRuntimeLogDir()} sessionKey=${p.sessionKey} runId=${clientRunId}`,
+            );
+          });
         })
         .catch((err) => {
           const error = errorShape(ErrorCodes.UNAVAILABLE, String(err));
@@ -735,6 +821,25 @@ export const chatHandlers: GatewayRequestHandlers = {
             runId: clientRunId,
             sessionKey: p.sessionKey,
             errorMessage: String(err),
+          });
+
+          const resErrLogPathPromise = writeRuntimeLog({
+            kind: "resmsg",
+            ts: Date.now(),
+            sessionKey: p.sessionKey,
+            runId: clientRunId,
+            payload: {
+              sessionKey: p.sessionKey,
+              runId: clientRunId,
+              modelSelected,
+              error: String(err),
+            },
+          });
+          void resErrLogPathPromise.then((logPath: string | null) => {
+            if (logPath) return;
+            context.logGateway.warn(
+              `[runtimelog] write failed kind=resmsg dir=${getRuntimeLogDir()} sessionKey=${p.sessionKey} runId=${clientRunId}`,
+            );
           });
         })
         .finally(() => {

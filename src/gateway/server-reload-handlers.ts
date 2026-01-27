@@ -1,5 +1,7 @@
 import type { CliDeps } from "../cli/deps.js";
 import type { loadConfig } from "../config/config.js";
+import { resetConfigCache } from "../config/io.js";
+import { resetModelCatalogCache } from "../agents/model-catalog.js";
 import { startGmailWatcher, stopGmailWatcher } from "../hooks/gmail-watcher.js";
 import type { HeartbeatRunner } from "../infra/heartbeat-runner.js";
 import { resetDirectoryCache } from "../infra/outbound/target-resolver.js";
@@ -44,6 +46,8 @@ export function createGatewayReloadHandlers(params: {
     plan: GatewayReloadPlan,
     nextConfig: ReturnType<typeof loadConfig>,
   ) => {
+    resetConfigCache();
+    resetModelCatalogCache();
     setGatewaySigusr1RestartPolicy({ allowExternal: nextConfig.commands?.restart === true });
     const state = params.getState();
     const nextState = { ...state };

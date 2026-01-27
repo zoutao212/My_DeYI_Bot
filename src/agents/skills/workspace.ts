@@ -234,9 +234,26 @@ export function buildWorkspaceSkillsPrompt(
     (entry) => entry.invocation?.disableModelInvocation !== true,
   );
   const remoteNote = opts?.eligibility?.remote?.note?.trim();
-  return [remoteNote, formatSkillsForPrompt(promptEntries.map((entry) => entry.skill))]
+  const promptLanguage = opts?.config?.agents?.defaults?.promptLanguage === "zh" ? "zh" : "en";
+  let prompt = [remoteNote, formatSkillsForPrompt(promptEntries.map((entry) => entry.skill))]
     .filter(Boolean)
     .join("\n");
+  if (promptLanguage === "zh") {
+    prompt = prompt
+      .replace(
+        "The following skills provide specialized instructions for specific tasks.",
+        "以下技能为特定任务提供了专门的操作指引。",
+      )
+      .replace(
+        "Use the read tool to load a skill's file when the task matches its description.",
+        "当任务与某个技能的描述匹配时，请使用 read 工具加载该技能文件。",
+      )
+      .replace(
+        "Use this when a task matches a skill's description.",
+        "当任务匹配某个技能的描述时使用它。",
+      );
+  }
+  return prompt;
 }
 
 export function resolveSkillsPromptForRun(params: {

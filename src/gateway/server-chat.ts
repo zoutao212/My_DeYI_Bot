@@ -2,6 +2,7 @@ import { normalizeVerboseLevel } from "../auto-reply/thinking.js";
 import { type AgentEventPayload, getAgentRunContext } from "../infra/agent-events.js";
 import { loadSessionEntry } from "./session-utils.js";
 import { formatForLog } from "./ws-log.js";
+import { INTERNAL_MESSAGE_CHANNEL } from "../utils/message-channel.js";
 
 export type ChatRunEntry = {
   sessionKey: string;
@@ -180,6 +181,7 @@ export function createAgentEventHandler({
     if (!sessionKey) return false;
     try {
       const { cfg, entry } = loadSessionEntry(sessionKey);
+      if (entry?.channel === INTERNAL_MESSAGE_CHANNEL) return true;
       const sessionVerbose = normalizeVerboseLevel(entry?.verboseLevel);
       if (sessionVerbose) return sessionVerbose === "on";
       const defaultVerbose = normalizeVerboseLevel(cfg.agents?.defaults?.verboseDefault);

@@ -63,11 +63,12 @@ const BASE_RELOAD_RULES: ReloadRule[] = [
 ];
 
 const BASE_RELOAD_RULES_TAIL: ReloadRule[] = [
+  { prefix: "meta", kind: "none" },
   { prefix: "identity", kind: "none" },
   { prefix: "wizard", kind: "none" },
   { prefix: "logging", kind: "none" },
-  { prefix: "models", kind: "none" },
-  { prefix: "agents", kind: "none" },
+  { prefix: "models", kind: "hot" },
+  { prefix: "agents", kind: "hot" },
   { prefix: "tools", kind: "none" },
   { prefix: "bindings", kind: "none" },
   { prefix: "audio", kind: "none" },

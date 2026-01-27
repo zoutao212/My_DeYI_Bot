@@ -33,6 +33,11 @@ export function resetModelCatalogCacheForTest() {
   importPiSdk = defaultImportPiSdk;
 }
 
+export function resetModelCatalogCache() {
+  modelCatalogPromise = null;
+  hasLoggedModelCatalogError = false;
+}
+
 // Test-only escape hatch: allow mocking the dynamic import to simulate transient failures.
 export function __setModelCatalogImportForTest(loader?: () => Promise<PiSdkModule>) {
   importPiSdk = loader ?? defaultImportPiSdk;

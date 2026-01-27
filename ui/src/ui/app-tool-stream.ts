@@ -20,6 +20,8 @@ export type ToolStreamEntry = {
   name: string;
   args?: unknown;
   output?: string;
+  result?: unknown;
+  isError?: boolean;
   startedAt: number;
   updatedAt: number;
   message: Record<string, unknown>;
@@ -82,11 +84,13 @@ function buildToolStreamMessage(entry: ToolStreamEntry): Record<string, unknown>
     name: entry.name,
     arguments: entry.args ?? {},
   });
-  if (entry.output) {
+  if (entry.output || entry.result !== undefined) {
     content.push({
       type: "toolresult",
       name: entry.name,
-      text: entry.output,
+      text: entry.output ?? "",
+      result: entry.result,
+      isError: entry.isError ?? false,
     });
   }
   return {
@@ -207,6 +211,8 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
   const name = typeof data.name === "string" ? data.name : "tool";
   const phase = typeof data.phase === "string" ? data.phase : "";
   const args = phase === "start" ? data.args : undefined;
+  const isError = phase === "result" ? Boolean(data.isError) : undefined;
+  const resultRaw = phase === "result" ? data.result : undefined;
   const outputRaw =
     phase === "update"
       ? formatToolOutput(data.partialResult)
@@ -225,6 +231,8 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
       name,
       args,
       output,
+      result: resultRaw,
+      isError,
       startedAt: typeof payload.ts === "number" ? payload.ts : now,
       updatedAt: now,
       message: {},
@@ -235,6 +243,8 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
     entry.name = name;
     if (args !== undefined) entry.args = args;
     if (output !== undefined) entry.output = output;
+    if (resultRaw !== undefined) entry.result = resultRaw;
+    if (isError !== undefined) entry.isError = isError;
     entry.updatedAt = now;
   }
 

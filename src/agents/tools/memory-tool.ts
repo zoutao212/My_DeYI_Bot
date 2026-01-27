@@ -34,7 +34,7 @@ export function createMemorySearchTool(options: {
     label: "Memory Search",
     name: "memory_search",
     description:
-      "Mandatory recall step: semantically search MEMORY.md + memory/*.md (and optional session transcripts) before answering questions about prior work, decisions, dates, people, preferences, or todos; returns top snippets with path + lines.",
+      "记忆检索（强制步骤）：在回答与既往工作/决策/日期/人物/偏好/待办相关的问题前，先在 MEMORY.md + memory/*.md（可选含会话记录）里做语义搜索；返回命中的片段路径与行号范围。",
     parameters: MemorySearchSchema,
     execute: async (_toolCallId, params) => {
       const query = readStringParam(params, "query", { required: true });
@@ -83,7 +83,7 @@ export function createMemoryGetTool(options: {
     label: "Memory Get",
     name: "memory_get",
     description:
-      "Safe snippet read from MEMORY.md or memory/*.md with optional from/lines; use after memory_search to pull only the needed lines and keep context small.",
+      "记忆读取（安全片段）：从 MEMORY.md 或 memory/*.md 读取指定范围内容（可选 from/lines）；建议先用 memory_search 定位，再只取必要片段以保持上下文精简。",
     parameters: MemoryGetSchema,
     execute: async (_toolCallId, params) => {
       const relPath = readStringParam(params, "path", { required: true });

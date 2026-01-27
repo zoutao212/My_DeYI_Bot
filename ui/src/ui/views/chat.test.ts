@@ -45,6 +45,7 @@ function createProps(overrides: Partial<ChatProps> = {}): ChatProps {
     onSend: () => undefined,
     onQueueRemove: () => undefined,
     onNewSession: () => undefined,
+    onNewSessionNoSummary: () => undefined,
     ...overrides,
   };
 }
@@ -72,25 +73,33 @@ describe("chat view", () => {
     expect(container.textContent).not.toContain("New session");
   });
 
-  it("shows a new session button when aborting is unavailable", () => {
+  it("shows new session buttons in the header", () => {
     const container = document.createElement("div");
     const onNewSession = vi.fn();
+    const onNewSessionNoSummary = vi.fn();
     render(
       renderChat(
         createProps({
           canAbort: false,
           onNewSession,
+          onNewSessionNoSummary,
         }),
       ),
       container,
     );
 
-    const newSessionButton = Array.from(container.querySelectorAll("button")).find(
-      (btn) => btn.textContent?.trim() === "New session",
+    const summarizeButton = Array.from(container.querySelectorAll("button")).find(
+      (btn) => btn.textContent?.trim() === "新会话（带总结）",
     );
-    expect(newSessionButton).not.toBeUndefined();
-    newSessionButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(summarizeButton).not.toBeUndefined();
+    summarizeButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(onNewSession).toHaveBeenCalledTimes(1);
-    expect(container.textContent).not.toContain("Stop");
+
+    const noSummaryButton = Array.from(container.querySelectorAll("button")).find(
+      (btn) => btn.textContent?.trim() === "全新开始（不总结）",
+    );
+    expect(noSummaryButton).not.toBeUndefined();
+    noSummaryButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(onNewSessionNoSummary).toHaveBeenCalledTimes(1);
   });
 });

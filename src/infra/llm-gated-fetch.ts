@@ -57,8 +57,32 @@ function tryParseJson(text: string): object | null {
 
 function summarizeBody(params: { bodyText?: string | null; bodyJson?: unknown }): string | null {
   if (params.bodyJson && typeof params.bodyJson === "object") {
-    const keys = Object.keys(params.bodyJson as Record<string, unknown>);
-    return keys.length > 0 ? `json keys: ${keys.slice(0, 24).join(", ")}` : "json";
+    const obj = params.bodyJson as Record<string, unknown>;
+    const model = typeof obj.model === "string" ? obj.model : null;
+    const stream = typeof obj.stream === "boolean" ? obj.stream : null;
+    const store = typeof obj.store === "boolean" ? obj.store : null;
+    const maxTokens =
+      typeof obj.max_completion_tokens === "number"
+        ? obj.max_completion_tokens
+        : typeof obj.max_tokens === "number"
+          ? obj.max_tokens
+          : null;
+    const reasoning = typeof obj.reasoning_effort === "string" ? obj.reasoning_effort : null;
+
+    const messagesCount = Array.isArray(obj.messages) ? obj.messages.length : null;
+    const toolsCount = Array.isArray(obj.tools) ? obj.tools.length : null;
+
+    const parts: string[] = [];
+    if (model) parts.push(`model=${model}`);
+    if (messagesCount != null) parts.push(`messages=${messagesCount}`);
+    if (toolsCount != null) parts.push(`tools=${toolsCount}`);
+    if (stream != null) parts.push(`stream=${stream ? "yes" : "no"}`);
+    if (store != null) parts.push(`store=${store ? "yes" : "no"}`);
+    if (maxTokens != null) parts.push(`max_tokens=${maxTokens}`);
+    if (reasoning) parts.push(`reasoning=${reasoning}`);
+
+    const summary = parts.join(" · ").trim();
+    return summary || "json";
   }
   const text = (params.bodyText ?? "").trim();
   if (!text) return null;

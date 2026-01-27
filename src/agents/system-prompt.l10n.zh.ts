@@ -30,6 +30,9 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
     sessions_spawn: "派生一个子代理会话",
     session_status:
       "显示 /status 等价的状态卡（用量 + 时间 + Reasoning/Verbose/Elevated）；用于回答模型使用问题；也可按会话覆盖模型",
+    memory_get: "从 MEMORY.md 或 memory/*.md 安全读取片段（建议先 memory_search 再按需读取）",
+    memory_search:
+      "在 MEMORY.md + memory/*.md（可选含会话记录）中做语义检索；用于回答既往工作/决策/偏好/待办等相关问题",
     image: "使用配置的图像模型分析图片",
   },
   toolingFallbackIntro: "如果当前运行时没有提供完整工具清单，可按以下理解：",

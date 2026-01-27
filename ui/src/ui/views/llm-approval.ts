@@ -39,6 +39,100 @@ function tryPrettyJson(raw: string): string | null {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function stringifyMaybe(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number") return String(value);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function normalizeMessageContentToText(content: unknown): string {
+  if (content == null) return "";
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const item of content) {
+      if (isRecord(item)) {
+        const type = typeof item.type === "string" ? item.type : "";
+        if (type === "text") {
+          parts.push(typeof item.text === "string" ? item.text : stringifyMaybe(item.text));
+          continue;
+        }
+        if (type) {
+          parts.push(`[${type}] ${stringifyMaybe(item)}`);
+          continue;
+        }
+      }
+      parts.push(stringifyMaybe(item));
+    }
+    return parts.join("\n");
+  }
+  return stringifyMaybe(content);
+}
+
+function tryPrettyOpenAiPayload(raw: string, isZh: boolean): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+
+  const model = typeof parsed.model === "string" ? parsed.model : "";
+  const messages = Array.isArray(parsed.messages) ? parsed.messages : null;
+  const tools = Array.isArray(parsed.tools) ? parsed.tools : null;
+  const stream = typeof parsed.stream === "boolean" ? parsed.stream : null;
+  const store = typeof parsed.store === "boolean" ? parsed.store : null;
+  const maxTokens =
+    typeof parsed.max_completion_tokens === "number"
+      ? parsed.max_completion_tokens
+      : typeof parsed.max_tokens === "number"
+        ? parsed.max_tokens
+        : null;
+  const reasoning = typeof parsed.reasoning_effort === "string" ? parsed.reasoning_effort : "";
+
+  const lines: string[] = [];
+  lines.push(isZh ? "LLM 请求体（已美化）" : "LLM request body (pretty)");
+  if (model) lines.push(`${isZh ? "模型" : "Model"}: ${model}`);
+  if (stream != null) lines.push(`${isZh ? "流式" : "Stream"}: ${stream ? "是" : "否"}`);
+  if (store != null) lines.push(`${isZh ? "存储" : "Store"}: ${store ? "是" : "否"}`);
+  if (maxTokens != null) lines.push(`${isZh ? "最大 tokens" : "Max tokens"}: ${maxTokens}`);
+  if (reasoning) lines.push(`${isZh ? "推理强度" : "Reasoning"}: ${reasoning}`);
+  if (tools) lines.push(`${isZh ? "工具数量" : "Tools"}: ${tools.length}`);
+  if (messages) lines.push(`${isZh ? "消息数量" : "Messages"}: ${messages.length}`);
+
+  if (messages && messages.length > 0) {
+    lines.push("");
+    lines.push(isZh ? "--- messages ---" : "--- messages ---");
+    for (let i = 0; i < messages.length; i += 1) {
+      const m = messages[i];
+      if (!isRecord(m)) continue;
+      const role = typeof m.role === "string" ? m.role : "unknown";
+      const name = typeof m.name === "string" ? m.name : "";
+      const header = name ? `#${i + 1} role=${role} name=${name}` : `#${i + 1} role=${role}`;
+      lines.push(header);
+      const content = normalizeMessageContentToText(m.content);
+      lines.push(content || (isZh ? "(空)" : "(empty)"));
+      lines.push("");
+    }
+  }
+
+  const out = lines.join("\n").trimEnd();
+  return out ? out : null;
+}
+
 function collapseBlankLines(text: string): string {
   return text.replace(/\n{3,}/g, "\n\n");
 }
@@ -77,7 +171,9 @@ export function renderLlmApprovalPrompt(state: AppViewState) {
       return visualizeFormatting(payloadText);
     }
 
-    const prettyBody = request.bodyText ? tryPrettyJson(request.bodyText) : null;
+    const prettyBody = request.bodyText
+      ? tryPrettyOpenAiPayload(request.bodyText, isZh) ?? tryPrettyJson(request.bodyText)
+      : null;
     const prettyPayload = prettyBody
       ? (() => {
           const headerLines = Object.entries(request.headers ?? {})
