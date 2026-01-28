@@ -121,6 +121,7 @@ function renderRunPanelInChat(props: ChatProps) {
             清空
           </button>
         </div>
+        <div style="max-height: 320px; overflow: auto;">
         ${runIds.map((runId) => {
           const list = (byRun.get(runId) ?? []).slice().sort((a, b) => b.ts - a.ts);
           const head = list[0];
@@ -135,10 +136,20 @@ function renderRunPanelInChat(props: ChatProps) {
                   return html`
                     <details class="details">
                       <summary class="details-summary">
-                        <span class="pill">${ts}</span>
-                        <span class="pill">${kind}</span>
+                        <span
+                          class="mono"
+                          style="font-size: 12px; opacity: 0.85; display: inline-block; width: 160px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+                        >
+                          ${ts}
+                        </span>
+                        <span
+                          class="mono"
+                          style="font-size: 12px; display: inline-block; max-width: calc(100% - 180px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+                        >
+                          ${kind}
+                        </span>
                       </summary>
-                      <pre class="codeblock">${safeJson(evt.payload)}</pre>
+                      <pre class="codeblock" style="max-height: 260px; overflow: auto;">${safeJson(evt.payload)}</pre>
                     </details>
                   `;
                 })}
@@ -146,6 +157,7 @@ function renderRunPanelInChat(props: ChatProps) {
             </details>
           `;
         })}
+        </div>
       </div>
     </details>
   `;

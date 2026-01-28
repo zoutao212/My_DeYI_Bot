@@ -62,6 +62,15 @@ function resolveTraceFilePath(params: { dir: string; sessionKey?: string; runId?
   return path.join(params.dir, filename);
 }
 
+export function getTraceFilePathForRun(params: {
+  sessionKey?: string;
+  runId?: string;
+  env?: NodeJS.ProcessEnv;
+}): string {
+  const dir = resolveRuntimeLogDir(params.env);
+  return resolveTraceFilePath({ dir, sessionKey: params.sessionKey, runId: params.runId });
+}
+
 export async function appendRuntimeTrace(params: {
   ts?: number;
   sessionKey?: string;
@@ -99,6 +108,37 @@ export async function appendRuntimeTrace(params: {
       console.warn(`[runtimelog] trace append failed filePath=${filePath} err=${msg}`);
     } catch {
       // ignore
+    }
+    return null;
+  }
+}
+
+export async function writeRunBundleLog(params: {
+  ts?: number;
+  sessionKey?: string;
+  runId?: string;
+  payload: unknown;
+}): Promise<string | null> {
+  const dir = resolveRuntimeLogDir();
+  const ts = typeof params.ts === "number" ? params.ts : Date.now();
+  const stamp = safeTimestampForFilename(ts);
+  const sessionKeySafe = safeKeyForFilename(params.sessionKey ?? "", 80);
+  const runIdSafe = safeKeyForFilename(params.runId ?? "", 40);
+  const suffix = [sessionKeySafe, runIdSafe].filter(Boolean).join("__");
+  const filename = `runbundle_${stamp}${suffix ? `__${suffix}` : ""}.json`;
+  const filePath = path.join(dir, filename);
+
+  try {
+    await fs.promises.mkdir(dir, { recursive: true });
+    const redacted = redactSecrets(params.payload);
+    const text = truncateText(JSON.stringify(redacted, null, 2), 400_000);
+    await fs.promises.writeFile(filePath, text + "\n", "utf-8");
+    return filePath;
+  } catch (err) {
+    try {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[runtimelog] runbundle write failed filePath=${filePath} err=${msg}`);
+    } catch {
     }
     return null;
   }

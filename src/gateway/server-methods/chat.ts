@@ -56,7 +56,12 @@ import {
 } from "../session-utils.js";
 import { stripEnvelopeFromMessages } from "../chat-sanitize.js";
 import { formatForLog } from "../ws-log.js";
-import { getRuntimeLogDir, writeRuntimeLog } from "../runtime-log.js";
+import {
+  getRuntimeLogDir,
+  getTraceFilePathForRun,
+  writeRunBundleLog,
+  writeRuntimeLog,
+} from "../runtime-log.js";
 import type { GatewayRequestContext, GatewayRequestHandlers } from "./types.js";
 
 type TranscriptAppendResult = {
@@ -173,6 +178,73 @@ function extractMessageIdMarker(value: string): string | null {
   return extracted ? extracted : null;
 }
 
+function matchesRunMarker(text: string, markerId: string): boolean {
+  const marker = `[message_id: ${markerId}]`;
+  if (text.includes(marker)) return true;
+  if (text.includes(`runId=${markerId}`)) return true;
+  if (text.includes(`runId="${markerId}"`)) return true;
+  if (text.includes(`runId: ${markerId}`)) return true;
+  return false;
+}
+
+function readTraceEventsForRun(params: {
+  sessionKey: string;
+  runId: string;
+}): Array<{ ts: number; event: string; payload: unknown }> {
+  const filePath = getTraceFilePathForRun({ sessionKey: params.sessionKey, runId: params.runId });
+  try {
+    if (!fs.existsSync(filePath)) return [];
+    const raw = fs.readFileSync(filePath, "utf-8");
+    const lines = raw.split(/\r?\n/).filter(Boolean);
+    const out: Array<{ ts: number; event: string; payload: unknown }> = [];
+    for (const line of lines.slice(-500)) {
+      try {
+        const rec = JSON.parse(line) as {
+          ts?: number;
+          event?: string;
+          sessionKey?: string;
+          runId?: string;
+          payload?: unknown;
+        };
+        if (rec.sessionKey !== params.sessionKey) continue;
+        if (rec.runId !== params.runId) continue;
+        if (typeof rec.event !== "string") continue;
+        out.push({ ts: typeof rec.ts === "number" ? rec.ts : 0, event: rec.event, payload: rec.payload });
+      } catch {
+        continue;
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function buildFallbackRunSummaryFromTrace(events: Array<{ ts: number; event: string; payload: unknown }>): string {
+  const toolNames = new Set<string>();
+  const llmSeqs = new Set<number>();
+  for (const e of events) {
+    if (e.event === "tool.start" || e.event === "tool.end") {
+      const p = e.payload as Record<string, unknown> | undefined;
+      const toolName = typeof p?.toolName === "string" ? p.toolName : "";
+      if (toolName) toolNames.add(toolName);
+    }
+    if (e.event === "llm.payload" || e.event === "llm.done") {
+      const p = e.payload as Record<string, unknown> | undefined;
+      const seq = typeof p?.seq === "number" ? p.seq : NaN;
+      if (Number.isFinite(seq)) llmSeqs.add(seq);
+    }
+  }
+  const toolsText = toolNames.size > 0 ? Array.from(toolNames).join(", ") : "(无)";
+  const llmText = llmSeqs.size > 0 ? Array.from(llmSeqs).sort((a, b) => a - b).join(", ") : "(无)";
+  const hasExec = toolNames.has("exec");
+  return [
+    `- trace工具: ${toolsText}`,
+    `- 是否出现exec: ${hasExec ? "是" : "否"}`,
+    `- trace LLM seq: ${llmText}`,
+  ].join("\n");
+}
+
 function broadcastChatFinal(params: {
   context: Pick<GatewayRequestContext, "broadcast" | "nodeSendToSession" | "agentRunSeq">;
   runId: string;
@@ -193,10 +265,8 @@ function broadcastChatFinal(params: {
 
 function extractLastToolResultText(messages: Record<string, unknown>[]): string | null {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const msg = messages[i] as Record<string, unknown>;
-    const message = msg.message;
-    if (!message || typeof message !== "object") continue;
-    const m = message as Record<string, unknown>;
+    const m = extractTranscriptMessage(messages[i]);
+    if (!m) continue;
     if (m.role !== "toolResult") continue;
     const content = m.content;
     if (!Array.isArray(content)) continue;
@@ -222,6 +292,14 @@ function stripTerminalControlSequences(value: string): string {
     .replace(/\[[0-9;?]*[A-Za-z]/g, "")
     .replace(/\r/g, "")
     .trim();
+}
+
+function extractTranscriptMessage(entry: unknown): Record<string, unknown> | null {
+  if (!entry || typeof entry !== "object") return null;
+  const rec = entry as Record<string, unknown>;
+  const nested = rec.message;
+  if (nested && typeof nested === "object") return nested as Record<string, unknown>;
+  return rec;
 }
 
 function normalizeToolSummaryTail(value: string, limit = 240): string {
@@ -254,13 +332,11 @@ function extractLlmProgressForRun(params: {
   messages: Record<string, unknown>[];
   markerId: string;
 }): { entries: LlmProgressEntry[]; connectionErrors: number } {
-  const marker = `[message_id: ${params.markerId}]`;
   let startIndex = -1;
   for (let i = params.messages.length - 1; i >= 0; i -= 1) {
     const entry = params.messages[i];
-    const message = entry?.message;
-    if (!message || typeof message !== "object") continue;
-    const m = message as Record<string, unknown>;
+    const m = extractTranscriptMessage(entry);
+    if (!m) continue;
     if (m.role !== "user") continue;
     const content = m.content;
     if (!Array.isArray(content)) continue;
@@ -268,7 +344,7 @@ function extractLlmProgressForRun(params: {
       .map((part) => (part && typeof part === "object" ? (part as Record<string, unknown>).text : null))
       .filter((t): t is string => typeof t === "string")
       .join("\n");
-    if (text.includes(marker)) {
+    if (matchesRunMarker(text, params.markerId)) {
       startIndex = i;
       break;
     }
@@ -277,9 +353,8 @@ function extractLlmProgressForRun(params: {
   if (startIndex < 0) {
     for (let i = params.messages.length - 1; i >= 0; i -= 1) {
       const entry = params.messages[i];
-      const message = entry?.message;
-      if (!message || typeof message !== "object") continue;
-      const m = message as Record<string, unknown>;
+      const m = extractTranscriptMessage(entry);
+      if (!m) continue;
       if (m.role === "user") {
         startIndex = i;
         break;
@@ -294,9 +369,8 @@ function extractLlmProgressForRun(params: {
 
   for (let i = startIndex + 1; i < params.messages.length; i += 1) {
     const entry = params.messages[i];
-    const message = entry?.message;
-    if (!message || typeof message !== "object") continue;
-    const m = message as Record<string, unknown>;
+    const m = extractTranscriptMessage(entry);
+    if (!m) continue;
     if (m.role === "user") break;
 
     if (m.role === "assistant") {
@@ -429,13 +503,11 @@ function extractToolSummariesForRun(params: {
   messages: Record<string, unknown>[];
   markerId: string;
 }): ToolSummaryEntry[] {
-  const marker = `[message_id: ${params.markerId}]`;
   let startIndex = -1;
   for (let i = params.messages.length - 1; i >= 0; i -= 1) {
     const entry = params.messages[i];
-    const message = entry?.message;
-    if (!message || typeof message !== "object") continue;
-    const m = message as Record<string, unknown>;
+    const m = extractTranscriptMessage(entry);
+    if (!m) continue;
     if (m.role !== "user") continue;
     const content = m.content;
     if (!Array.isArray(content)) continue;
@@ -443,7 +515,7 @@ function extractToolSummariesForRun(params: {
       .map((part) => (part && typeof part === "object" ? (part as Record<string, unknown>).text : null))
       .filter((t): t is string => typeof t === "string")
       .join("\n");
-    if (text.includes(marker)) {
+    if (matchesRunMarker(text, params.markerId)) {
       startIndex = i;
       break;
     }
@@ -452,9 +524,8 @@ function extractToolSummariesForRun(params: {
   if (startIndex < 0) {
     for (let i = params.messages.length - 1; i >= 0; i -= 1) {
       const entry = params.messages[i];
-      const message = entry?.message;
-      if (!message || typeof message !== "object") continue;
-      const m = message as Record<string, unknown>;
+      const m = extractTranscriptMessage(entry);
+      if (!m) continue;
       if (m.role === "user") {
         startIndex = i;
         break;
@@ -469,9 +540,8 @@ function extractToolSummariesForRun(params: {
 
   for (let i = startIndex + 1; i < params.messages.length; i += 1) {
     const entry = params.messages[i];
-    const message = entry?.message;
-    if (!message || typeof message !== "object") continue;
-    const m = message as Record<string, unknown>;
+    const m = extractTranscriptMessage(entry);
+    if (!m) continue;
 
     if (m.role === "user") break;
 
@@ -1232,6 +1302,11 @@ export const chatHandlers: GatewayRequestHandlers = {
               ? readSessionMessages(latestSessionId, latestStorePath, latestEntry?.sessionFile)
               : [];
 
+          const traceEvents = readTraceEventsForRun({ sessionKey: p.sessionKey, runId: clientRunId });
+
+          const traceFallbackSummary =
+            traceEvents.length > 0 ? buildFallbackRunSummaryFromTrace(traceEvents) : "";
+
           const lastToolResultText = extractLastToolResultText(
             (Array.isArray(recentMessages) ? recentMessages.slice(-80) : []) as Record<string, unknown>[],
           );
@@ -1269,6 +1344,57 @@ export const chatHandlers: GatewayRequestHandlers = {
             messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
             markerId,
           });
+
+          const toolsForReply = extractToolSummariesForRun({
+            messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
+            markerId,
+          });
+          const llmForReply = extractLlmProgressForRun({
+            messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
+            markerId,
+          });
+
+          const safeReplyNoConnError =
+            safeReplyWithToolsAndSummary?.trim() === "Connection error." &&
+            (toolsForReply.length > 0 || llmForReply.entries.length > 0 || traceFallbackSummary)
+              ? [
+                  "(模型连接异常，已回放本次运行证据)",
+                  traceFallbackSummary ? `[运行摘要]\n${traceFallbackSummary}` : safeReplyWithToolsAndSummary,
+                ]
+                  .filter(Boolean)
+                  .join("\n\n")
+                  .trim()
+              : safeReplyWithToolsAndSummary;
+
+          if (
+            safeReplyNoConnError &&
+            safeReplyWithToolsAndSummary &&
+            safeReplyNoConnError.trim() !== safeReplyWithToolsAndSummary.trim()
+          ) {
+            const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(p.sessionKey);
+            const sessionIdForAppend = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
+            const appended = appendAssistantTranscriptMessage({
+              message: safeReplyNoConnError,
+              sessionId: sessionIdForAppend,
+              storePath: latestStorePath,
+              sessionFile: latestEntry?.sessionFile,
+              createIfMissing: true,
+            });
+            broadcastChatFinal({
+              context,
+              runId: clientRunId,
+              sessionKey: p.sessionKey,
+              message: appended.ok
+                ? appended.message
+                : {
+                    role: "assistant",
+                    content: [{ type: "text", text: safeReplyNoConnError }],
+                    timestamp: Date.now(),
+                    stopReason: "injected",
+                    usage: { input: 0, output: 0, totalTokens: 0 },
+                  },
+            });
+          }
 
           const summaries = extractToolSummariesForRun({
             messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
@@ -1344,7 +1470,7 @@ export const chatHandlers: GatewayRequestHandlers = {
               runId: clientRunId,
               request: runtimeLogRequest,
               modelSelected,
-              reply: safeReplyWithToolsAndSummary,
+              reply: safeReplyNoConnError,
             },
           });
           void resOkLogPathPromise.then((logPath) => {
@@ -1352,6 +1478,27 @@ export const chatHandlers: GatewayRequestHandlers = {
             context.logGateway.warn(
               `[runtimelog] write failed kind=resmsg dir=${getRuntimeLogDir()} sessionKey=${p.sessionKey} runId=${clientRunId}`,
             );
+          });
+
+          void writeRunBundleLog({
+            ts: Date.now(),
+            sessionKey: p.sessionKey,
+            runId: clientRunId,
+            payload: {
+              kind: "chat.send",
+              sessionKey: p.sessionKey,
+              runId: clientRunId,
+              markerId,
+              modelSelected,
+              recentMessagesCount: Array.isArray(recentMessages) ? recentMessages.length : 0,
+              traceFile: getTraceFilePathForRun({ sessionKey: p.sessionKey, runId: clientRunId }),
+              traceEventsCount: traceEvents.length,
+              traceFallbackSummary: traceFallbackSummary || undefined,
+              rawReply: rawReply || undefined,
+              reply: safeReplyNoConnError || undefined,
+              toolSummaries: toolsForReply,
+              llmProgress: llmForReply,
+            },
           });
         })
         .catch((err) => {

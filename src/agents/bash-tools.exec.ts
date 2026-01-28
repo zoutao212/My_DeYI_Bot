@@ -390,6 +390,70 @@ function maybeBypassClaudePermissions(command: string): string {
   return `${command} --dangerously-skip-permissions`;
 }
 
+function splitCmdAndAnd(command: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i];
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (!inSingle && !inDouble && command[i] === "&" && command[i + 1] === "&") {
+      parts.push(command.slice(start, i).trim());
+      i += 1;
+      start = i + 1;
+    }
+  }
+  parts.push(command.slice(start).trim());
+  return parts.filter(Boolean);
+}
+
+function escapePwshSingleQuoted(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
+function unwrapQuotes(value: string): string {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function maybeRewriteWindowsCmdToPowerShell(command: string): string {
+  if (process.platform !== "win32") return command;
+  const trimmed = command.trimStart();
+  if (!/^cd\s+/i.test(trimmed)) return command;
+  if (!trimmed.includes("&&")) return command;
+
+  const segments = splitCmdAndAnd(command);
+  if (segments.length < 2) return command;
+
+  const first = segments[0];
+  const cdMatch = first.match(/^cd\s+(?:\/d\s+)?(.+)$/i);
+  if (!cdMatch) return command;
+  const rawPath = unwrapQuotes(cdMatch[1] ?? "");
+  if (!rawPath) return command;
+
+  const setLocation = `Set-Location -LiteralPath '${escapePwshSingleQuoted(rawPath)}'`;
+  const out: string[] = [setLocation, "if (-not $?) { exit 1 }"];
+  for (const seg of segments.slice(1)) {
+    out.push(seg);
+    out.push("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }");
+  }
+  return out.join("; ");
+}
+
 function isClaudeSkipPermissionsEnabled(): boolean {
   const enabledRaw = (process.env.CLAWDBOT_CLAUDE_SKIP_PERMISSIONS ?? "").trim().toLowerCase();
   return enabledRaw === "1" || enabledRaw === "true" || enabledRaw === "yes";
@@ -1514,7 +1578,9 @@ export function createExecTool(
       const effectiveTimeout =
         typeof params.timeout === "number" ? params.timeout : defaultTimeoutSec;
       const getWarningText = () => (warnings.length ? `${warnings.join("\n")}\n\n` : "");
-      const commandText = maybeBypassClaudePermissions(maybeRemoveClaudeYesFlag(params.command));
+      const commandText = maybeRewriteWindowsCmdToPowerShell(
+        maybeBypassClaudePermissions(maybeRemoveClaudeYesFlag(params.command)),
+      );
       const inferredPty = inferPtyForCommand({ command: commandText, pty: params.pty });
       if (inferredPty) {
         warnings.push(
