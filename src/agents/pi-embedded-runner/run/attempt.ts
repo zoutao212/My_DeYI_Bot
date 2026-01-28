@@ -23,6 +23,8 @@ import { resolveUserPath } from "../../../utils.js";
 import { createCacheTrace } from "../../cache-trace.js";
 import { createAnthropicPayloadLogger } from "../../anthropic-payload-log.js";
 import { createOpenAiCompletionsPayloadDebugger } from "../../openai-completions-payload-debug.js";
+import { createGeminiPayloadThoughtSignaturePatcher } from "../../gemini-payload-thought-signature.js";
+import { createLlmCallConsoleLogger } from "../../llm-call-console-log.js";
 import { resolveClawdbotAgentDir } from "../../agent-paths.js";
 import { resolveSessionAgentIds } from "../../agent-scope.js";
 import { makeBootstrapWarn, resolveBootstrapContextForRun } from "../../bootstrap-files.js";
@@ -500,6 +502,24 @@ export async function runEmbeddedAttempt(
         modelId: params.modelId,
         modelApi: params.model.api,
       });
+      const geminiPayloadThoughtSignaturePatcher = createGeminiPayloadThoughtSignaturePatcher({
+        env: process.env,
+        runId: params.runId,
+        sessionId: activeSession.sessionId,
+        sessionKey: params.sessionKey,
+        provider: params.provider,
+        modelId: params.modelId,
+        modelApi: params.model.api,
+      });
+      const llmCallConsoleLogger = createLlmCallConsoleLogger({
+        env: process.env,
+        runId: params.runId,
+        sessionId: activeSession.sessionId,
+        sessionKey: params.sessionKey,
+        provider: params.provider,
+        modelId: params.modelId,
+        modelApi: params.model.api,
+      });
 
       // Force a stable streamFn reference so vitest can reliably mock @mariozechner/pi-ai.
       activeSession.agent.streamFn = streamSimple;
@@ -529,6 +549,14 @@ export async function runEmbeddedAttempt(
         activeSession.agent.streamFn = openAiCompletionsPayloadDebugger.wrapStreamFn(
           activeSession.agent.streamFn,
         );
+      }
+      if (geminiPayloadThoughtSignaturePatcher) {
+        activeSession.agent.streamFn = geminiPayloadThoughtSignaturePatcher.wrapStreamFn(
+          activeSession.agent.streamFn,
+        );
+      }
+      if (llmCallConsoleLogger) {
+        activeSession.agent.streamFn = llmCallConsoleLogger.wrapStreamFn(activeSession.agent.streamFn);
       }
 
       try {

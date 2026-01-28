@@ -46,6 +46,55 @@ function truncateText(value: string, limit: number): string {
   return `${value.slice(0, limit)}\n... truncated (${value.length} chars)`;
 }
 
+function safeKeyForFilename(value: string, maxLen: number): string {
+  return value
+    .trim()
+    .slice(0, maxLen)
+    .replace(/[^a-zA-Z0-9_-]+/g, "-");
+}
+
+function resolveTraceFilePath(params: { dir: string; sessionKey?: string; runId?: string }): string {
+  const sessionKeySafe = safeKeyForFilename(params.sessionKey ?? "", 80);
+  const runIdSafe = safeKeyForFilename(params.runId ?? "", 40);
+  const suffix = [sessionKeySafe, runIdSafe].filter(Boolean).join("__");
+  const filename = `trace${suffix ? `__${suffix}` : ""}.jsonl`;
+  return path.join(params.dir, filename);
+}
+
+export async function appendRuntimeTrace(params: {
+  ts?: number;
+  sessionKey?: string;
+  runId?: string;
+  event: string;
+  payload: unknown;
+}): Promise<string | null> {
+  const dir = resolveRuntimeLogDir();
+  const ts = typeof params.ts === "number" ? params.ts : Date.now();
+  const filePath = resolveTraceFilePath({
+    dir,
+    sessionKey: params.sessionKey,
+    runId: params.runId,
+  });
+  try {
+    await fs.promises.mkdir(dir, { recursive: true });
+    const redacted = redactSecrets(params.payload);
+    const line = truncateText(
+      JSON.stringify({ ts, event: params.event, sessionKey: params.sessionKey, runId: params.runId, payload: redacted }),
+      200_000,
+    );
+    await fs.promises.appendFile(filePath, line + "\n", "utf-8");
+    return filePath;
+  } catch (err) {
+    try {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[runtimelog] trace append failed filePath=${filePath} err=${msg}`);
+    } catch {
+      // ignore
+    }
+    return null;
+  }
+}
+
 export async function writeRuntimeLog(params: {
   kind: "sendmsg" | "resmsg";
   ts?: number;
@@ -56,14 +105,8 @@ export async function writeRuntimeLog(params: {
   const dir = resolveRuntimeLogDir();
   const ts = typeof params.ts === "number" ? params.ts : Date.now();
   const stamp = safeTimestampForFilename(ts);
-  const sessionKeySafe = (params.sessionKey ?? "")
-    .trim()
-    .slice(0, 80)
-    .replace(/[^a-zA-Z0-9_-]+/g, "-");
-  const runIdSafe = (params.runId ?? "")
-    .trim()
-    .slice(0, 40)
-    .replace(/[^a-zA-Z0-9_-]+/g, "-");
+  const sessionKeySafe = safeKeyForFilename(params.sessionKey ?? "", 80);
+  const runIdSafe = safeKeyForFilename(params.runId ?? "", 40);
   const suffix = [sessionKeySafe, runIdSafe].filter(Boolean).join("__");
   const filename = `${params.kind}_${stamp}${suffix ? `__${suffix}` : ""}.log`;
   const filePath = path.join(dir, filename);
@@ -77,10 +120,8 @@ export async function writeRuntimeLog(params: {
   } catch (err) {
     try {
       const msg = err instanceof Error ? err.message : String(err);
-      // 注意：这里故意用 console，确保即使 logger 链路有问题也能看到写入失败原因。
       console.warn(`[runtimelog] write failed filePath=${filePath} err=${msg}`);
     } catch {
-      // ignore
     }
     return null;
   }

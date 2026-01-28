@@ -199,17 +199,17 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
     typeof payload.sessionKey === "string" ? payload.sessionKey : undefined;
   if (sessionKey && sessionKey !== host.sessionKey) return;
 
-  // Only process tool stream while a chat run is active.
-  // Do not require runId equality: the gateway may emit a different runId than
-  // the client-side idempotencyKey, and strict filtering can leave the UI stuck
-  // in a pending state until a manual refresh rehydrates history.
-  if (!host.chatRunId) return;
-
   const data = payload.data ?? {};
   const toolCallId = typeof data.toolCallId === "string" ? data.toolCallId : "";
   if (!toolCallId) return;
   const name = typeof data.name === "string" ? data.name : "tool";
   const phase = typeof data.phase === "string" ? data.phase : "";
+
+  // Tool result events can arrive slightly after the chat lifecycle ends.
+  // If we drop them when chatRunId is cleared, the UI shows "已完成" but no output.
+  const isLateAllowed = phase === "result" || host.toolStreamById.has(toolCallId);
+  if (!host.chatRunId && !isLateAllowed) return;
+
   const args = phase === "start" ? data.args : undefined;
   const isError = phase === "result" ? Boolean(data.isError) : undefined;
   const resultRaw = phase === "result" ? data.result : undefined;

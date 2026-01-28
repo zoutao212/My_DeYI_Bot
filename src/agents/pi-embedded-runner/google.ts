@@ -109,20 +109,44 @@ function ensureGeminiToolThoughtSignatures(messages: AgentMessage[]): {
         };
         const hasSnake = typeof rec.thought_signature === "string" && rec.thought_signature.trim();
         const hasCamel = typeof rec.thoughtSignature === "string" && rec.thoughtSignature.trim();
-        if (hasSnake || hasCamel) return call;
 
         const id = typeof rec.id === "string" ? rec.id : "";
-        const signature = makeStableThoughtSignatureBase64(id || JSON.stringify(call));
+        const signature =
+          (hasSnake ? String(rec.thought_signature) : hasCamel ? String(rec.thoughtSignature) : "") ||
+          makeStableThoughtSignatureBase64(id || JSON.stringify(call));
         const toolName =
           typeof rec.name === "string" && rec.name.trim() ? rec.name.trim() : "(unknown)";
-        byTool.set(toolName, (byTool.get(toolName) ?? 0) + 1);
-        added += 1;
+
+        const callRecord = call as unknown as Record<string, unknown>;
+        const nextRecord: Record<string, unknown> = { ...callRecord };
+        let changed = false;
+        if (!(hasSnake || hasCamel)) {
+          nextRecord.thoughtSignature = signature;
+          nextRecord.thought_signature = signature;
+          byTool.set(toolName, (byTool.get(toolName) ?? 0) + 1);
+          added += 1;
+          changed = true;
+        }
+
+        const fnObj = nextRecord.function;
+        if (fnObj && typeof fnObj === "object") {
+          const fnRec = fnObj as Record<string, unknown>;
+          const fnHasSnake = typeof fnRec.thought_signature === "string" && fnRec.thought_signature.trim();
+          const fnHasCamel = typeof fnRec.thoughtSignature === "string" && fnRec.thoughtSignature.trim();
+          if (!(fnHasSnake || fnHasCamel)) {
+            nextRecord.function = {
+              ...fnRec,
+              thoughtSignature: signature,
+              thought_signature: signature,
+            };
+            added += 1;
+            changed = true;
+          }
+        }
+
+        if (!changed) return call;
         toolCallsChanged = true;
-        return {
-          ...(call as unknown as Record<string, unknown>),
-          thoughtSignature: signature,
-          thought_signature: signature,
-        };
+        return nextRecord;
       });
     }
 

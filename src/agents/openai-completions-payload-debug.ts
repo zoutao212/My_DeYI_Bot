@@ -147,6 +147,15 @@ function walkAndPatch(params: {
           path: `${params.path}.tool_calls[${i}]`,
           report: params.report,
         });
+
+        const fnObj = (entry as Record<string, unknown>).function;
+        if (fnObj && typeof fnObj === "object") {
+          ensureThoughtSignatureOnRecord({
+            record: fnObj as Record<string, unknown>,
+            path: `${params.path}.tool_calls[${i}].function`,
+            report: params.report,
+          });
+        }
       }
     }
   }
@@ -158,6 +167,34 @@ function walkAndPatch(params: {
         ensureThoughtSignatureOnRecord({
           record: entry as Record<string, unknown>,
           path: `${params.path}.toolCalls[${i}]`,
+          report: params.report,
+        });
+
+        const fnObj = (entry as Record<string, unknown>).function;
+        if (fnObj && typeof fnObj === "object") {
+          ensureThoughtSignatureOnRecord({
+            record: fnObj as Record<string, unknown>,
+            path: `${params.path}.toolCalls[${i}].function`,
+            report: params.report,
+          });
+        }
+      }
+    }
+  }
+  if (Array.isArray(rec.tools)) {
+    for (let i = 0; i < rec.tools.length; i += 1) {
+      const entry = rec.tools[i];
+      if (!entry || typeof entry !== "object") continue;
+      ensureThoughtSignatureOnRecord({
+        record: entry as Record<string, unknown>,
+        path: `${params.path}.tools[${i}]`,
+        report: params.report,
+      });
+      const fnObj = (entry as Record<string, unknown>).function;
+      if (fnObj && typeof fnObj === "object") {
+        ensureThoughtSignatureOnRecord({
+          record: fnObj as Record<string, unknown>,
+          path: `${params.path}.tools[${i}].function`,
           report: params.report,
         });
       }

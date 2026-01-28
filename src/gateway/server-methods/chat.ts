@@ -68,6 +68,11 @@ type TranscriptAppendResult = {
 
 let didLogChatSendPromptLanguage = false;
 
+function truncateRuntimeLogText(value: string, limit: number): string {
+  if (value.length <= limit) return value;
+  return `${value.slice(0, limit)}\n... truncated (${value.length} chars)`;
+}
+
 function resolveTranscriptPath(params: {
   sessionId: string;
   storePath: string | undefined;
@@ -536,15 +541,28 @@ export const chatHandlers: GatewayRequestHandlers = {
       p.promptLanguage === "zh"
         ? {
             ...cfg,
-            agents: {
-              ...(cfg.agents ?? {}),
-              defaults: {
-                ...(cfg.agents?.defaults ?? {}),
-                promptLanguage: "zh" as const,
-              },
-            },
+            agents: cfg.agents
+              ? {
+                  ...cfg.agents,
+                  defaults: {
+                    ...cfg.agents.defaults,
+                    promptLanguage: "zh" as const,
+                  },
+                }
+              : {
+                  defaults: {
+                    promptLanguage: "zh" as const,
+                  },
+                },
           }
         : cfg;
+    const sendPolicy = resolveSendPolicy({
+      cfg,
+      entry,
+      sessionKey: p.sessionKey,
+      channel: entry?.channel,
+      chatType: entry?.chatType,
+    });
     const timeoutMs = resolveAgentTimeoutMs({
       cfg: cfgForRun,
       overrideMs: p.timeoutMs,
@@ -552,25 +570,78 @@ export const chatHandlers: GatewayRequestHandlers = {
     const now = Date.now();
     const clientRunId = p.idempotencyKey;
 
+    const trimmedMessage = parsedMessage.trim();
+    const injectThinking = Boolean(
+      p.thinking && trimmedMessage && !trimmedMessage.startsWith("/"),
+    );
+    const commandBody = injectThinking ? `/think ${p.thinking} ${parsedMessage}` : parsedMessage;
+    const modelRef = resolveSessionModelRef(cfg, entry);
+    const agentId = resolveSessionAgentId({
+      sessionKey: p.sessionKey,
+      config: cfg,
+    });
+    const clientInfo = client?.connect?.client;
+    const clientSummary = clientInfo
+      ? {
+          id: clientInfo.id,
+          displayName: clientInfo.displayName,
+          mode: clientInfo.mode,
+        }
+      : undefined;
+    const entrySummary = entry
+      ? {
+          sessionId: entry.sessionId,
+          channel: entry.channel,
+          chatType: entry.chatType,
+          modelOverride: entry.modelOverride,
+          providerOverride: entry.providerOverride,
+          thinkingLevel: entry.thinkingLevel,
+          verboseLevel: entry.verboseLevel,
+          reasoningLevel: entry.reasoningLevel,
+          sendPolicy: entry.sendPolicy,
+          spawnedBy: entry.spawnedBy,
+          updatedAt: entry.updatedAt,
+          lastChannel: entry.lastChannel,
+          lastTo: entry.lastTo,
+        }
+      : undefined;
+    const runtimeLogRequest = {
+      sessionKey: p.sessionKey,
+      runId: clientRunId,
+      now,
+      client: clientSummary,
+      agentId,
+      sendPolicy,
+      session: entrySummary,
+      modelRef,
+      promptLanguage: p.promptLanguage,
+      thinking: p.thinking,
+      deliver: p.deliver,
+      timeoutMs: p.timeoutMs,
+      resolvedTimeoutMs: timeoutMs,
+      message: truncateRuntimeLogText(String(p.message ?? ""), 20_000),
+      parsedMessage: truncateRuntimeLogText(String(parsedMessage ?? ""), 20_000),
+      commandBody: truncateRuntimeLogText(commandBody, 20_000),
+      injectThinking,
+      stopCommand,
+      attachments: normalizedAttachments.map((a) => ({
+        type: a.type,
+        mimeType: a.mimeType,
+        fileName: a.fileName,
+        contentBytesBase64: typeof a.content === "string" ? a.content.length : undefined,
+      })),
+      images: parsedImages.map((img) => ({
+        mimeType: img.mimeType,
+        bytesBase64: typeof img.data === "string" ? img.data.length : undefined,
+      })),
+    };
+
     const sendLogPathPromise = writeRuntimeLog({
       kind: "sendmsg",
       ts: now,
       sessionKey: p.sessionKey,
       runId: clientRunId,
-      payload: {
-        sessionKey: p.sessionKey,
-        runId: clientRunId,
-        message: typeof parsedMessage === "string" ? parsedMessage : String(p.message),
-        promptLanguage: p.promptLanguage,
-        thinking: p.thinking,
-        deliver: p.deliver,
-        attachments: normalizedAttachments.map((a) => ({
-          type: a.type,
-          mimeType: a.mimeType,
-          fileName: a.fileName,
-          contentBytesBase64: typeof a.content === "string" ? a.content.length : undefined,
-        })),
-      },
+      payload: runtimeLogRequest,
     });
     void sendLogPathPromise.then((logPath) => {
       if (logPath) return;
@@ -586,14 +657,6 @@ export const chatHandlers: GatewayRequestHandlers = {
         `[debug-once] chat.send promptLanguage sessionKey=${p.sessionKey} runId=${clientRunId} raw=${String(p.promptLanguage)} normalized=${normalizedPromptLanguage}`,
       );
     }
-
-    const sendPolicy = resolveSendPolicy({
-      cfg,
-      entry,
-      sessionKey: p.sessionKey,
-      channel: entry?.channel,
-      chatType: entry?.chatType,
-    });
     if (sendPolicy === "deny") {
       respond(
         false,
@@ -654,11 +717,6 @@ export const chatHandlers: GatewayRequestHandlers = {
       };
       respond(true, ackPayload, undefined, { runId: clientRunId });
 
-      const trimmedMessage = parsedMessage.trim();
-      const injectThinking = Boolean(
-        p.thinking && trimmedMessage && !trimmedMessage.startsWith("/"),
-      );
-      const commandBody = injectThinking ? `/think ${p.thinking} ${parsedMessage}` : parsedMessage;
       const clientInfo = client?.connect?.client;
       const ctx: MsgContext = {
         Body: parsedMessage,
@@ -789,6 +847,7 @@ export const chatHandlers: GatewayRequestHandlers = {
             payload: {
               sessionKey: p.sessionKey,
               runId: clientRunId,
+              request: runtimeLogRequest,
               modelSelected,
               reply: finalReplyParts
                 .map((part) => part.trim())
@@ -831,6 +890,7 @@ export const chatHandlers: GatewayRequestHandlers = {
             payload: {
               sessionKey: p.sessionKey,
               runId: clientRunId,
+              request: runtimeLogRequest,
               modelSelected,
               error: String(err),
             },

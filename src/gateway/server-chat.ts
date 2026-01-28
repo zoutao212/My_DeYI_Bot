@@ -3,6 +3,7 @@ import { type AgentEventPayload, getAgentRunContext } from "../infra/agent-event
 import { loadSessionEntry } from "./session-utils.js";
 import { formatForLog } from "./ws-log.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../utils/message-channel.js";
+import { appendRuntimeTrace } from "./runtime-log.js";
 
 export type ChatRunEntry = {
   sessionKey: string;
@@ -197,12 +198,55 @@ export function createAgentEventHandler({
     const clientRunId = chatLink?.clientRunId ?? evt.runId;
     const isAborted =
       chatRunState.abortedRuns.has(clientRunId) || chatRunState.abortedRuns.has(evt.runId);
-    // Include sessionKey so Control UI can filter tool streams per session.
     const agentPayload = sessionKey ? { ...evt, sessionKey } : evt;
     const last = agentRunSeq.get(evt.runId) ?? 0;
     if (evt.stream === "tool" && !shouldEmitToolEvents(evt.runId, sessionKey)) {
       agentRunSeq.set(evt.runId, evt.seq);
       return;
+    }
+
+    if (evt.stream === "tool") {
+      try {
+        const entry = sessionKey ? loadSessionEntry(sessionKey).entry : undefined;
+        if (entry?.channel === INTERNAL_MESSAGE_CHANNEL) {
+          void appendRuntimeTrace({
+            ts: typeof evt.ts === "number" ? evt.ts : Date.now(),
+            sessionKey,
+            runId: evt.runId,
+            event: "agent.tool",
+            payload: {
+              runId: evt.runId,
+              seq: evt.seq,
+              data: evt.data,
+            },
+          });
+        }
+      } catch {
+      }
+    }
+
+    if (evt.stream === "lifecycle") {
+      try {
+        const entry = sessionKey ? loadSessionEntry(sessionKey).entry : undefined;
+        if (entry?.channel === INTERNAL_MESSAGE_CHANNEL) {
+          const phase = typeof evt.data?.phase === "string" ? evt.data.phase : "";
+          if (phase === "error") {
+            void appendRuntimeTrace({
+              ts: typeof evt.ts === "number" ? evt.ts : Date.now(),
+              sessionKey,
+              runId: evt.runId,
+              event: "agent.lifecycle",
+              payload: {
+                runId: evt.runId,
+                seq: evt.seq,
+                phase,
+                error: evt.data?.error,
+              },
+            });
+          }
+        }
+      } catch {
+      }
     }
     if (evt.seq !== last + 1) {
       broadcast("agent", {
