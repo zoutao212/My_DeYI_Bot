@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { parseBooleanValue } from "../utils/boolean.js";
+import { appendRuntimeTrace } from "../gateway/runtime-log.js";
 
 import type { StreamFn } from "@mariozechner/pi-agent-core";
 import type { Api, Model } from "@mariozechner/pi-ai";
@@ -118,6 +119,18 @@ export function createLlmCallConsoleLogger(params: {
           log.info(
             `→ LLM请求 seq=${callSeq} model=${modelTag} api=${apiTag} runId=${base.runId ?? ""} sessionKey=${base.sessionKey ?? ""} payloadBytes=${payloadBytes} payloadPreview=${truncate(payloadText, 600)}`,
           );
+
+          void appendRuntimeTrace({
+            sessionKey: base.sessionKey,
+            runId: base.runId,
+            event: "llm.payload",
+            payload: {
+              seq: callSeq,
+              model: modelTag,
+              api: apiTag,
+              payload,
+            },
+          });
         }
         options?.onPayload?.(payload);
       };
@@ -132,12 +145,39 @@ export function createLlmCallConsoleLogger(params: {
         log.info(
           `← LLM回复 seq=${callSeq} ok durationMs=${durationMs} model=${modelTag} api=${apiTag} runId=${base.runId ?? ""} sessionKey=${base.sessionKey ?? ""}`,
         );
+
+        void appendRuntimeTrace({
+          sessionKey: base.sessionKey,
+          runId: base.runId,
+          event: "llm.done",
+          payload: {
+            seq: callSeq,
+            ok: true,
+            durationMs,
+            model: modelTag,
+            api: apiTag,
+          },
+        });
       };
       const finishErr = (err: unknown) => {
         const durationMs = Date.now() - startedAt;
         log.warn(
           `← LLM回复 seq=${callSeq} error durationMs=${durationMs} model=${modelTag} api=${apiTag} runId=${base.runId ?? ""} sessionKey=${base.sessionKey ?? ""} err=${truncate(formatError(err), 800)}`,
         );
+
+        void appendRuntimeTrace({
+          sessionKey: base.sessionKey,
+          runId: base.runId,
+          event: "llm.done",
+          payload: {
+            seq: callSeq,
+            ok: false,
+            durationMs,
+            model: modelTag,
+            api: apiTag,
+            err,
+          },
+        });
       };
 
       if (isAsyncIterable(result)) {
