@@ -1,6 +1,7 @@
 import type { AgentEvent } from "@mariozechner/pi-agent-core";
 
 import { emitAgentEvent } from "../infra/agent-events.js";
+import { appendRuntimeTrace } from "../gateway/runtime-log.js";
 import { normalizeTextForComparison } from "./pi-embedded-helpers.js";
 import { isMessagingTool, isMessagingToolSendAction } from "./pi-embedded-messaging.js";
 import type { EmbeddedPiSubscribeContext } from "./pi-embedded-subscribe.handlers.types.js";
@@ -13,6 +14,48 @@ import {
 } from "./pi-embedded-subscribe.tools.js";
 import { inferToolMetaFromArgs } from "./pi-embedded-utils.js";
 import { normalizeToolName } from "./tool-policy.js";
+
+function stripTerminalControlSequences(value: string): string {
+  return value
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
+    .replace(/\[[0-9;?]*[A-Za-z]/g, "")
+    .replace(/\r/g, "")
+    .trim();
+}
+
+function normalizeTail(value: string, limit = 320): string {
+  const stripped = stripTerminalControlSequences(value);
+  if (stripped.length <= limit) return stripped;
+  return stripped.slice(stripped.length - limit);
+}
+
+function extractToolDetails(value: unknown): {
+  status?: string;
+  exitCode?: number | null;
+  durationMs?: number;
+  cwd?: string;
+  aggregated?: string;
+} {
+  if (!value || typeof value !== "object") return {};
+  const rec = value as Record<string, unknown>;
+  const details = rec.details;
+  if (!details || typeof details !== "object") return {};
+  const d = details as Record<string, unknown>;
+  const out: {
+    status?: string;
+    exitCode?: number | null;
+    durationMs?: number;
+    cwd?: string;
+    aggregated?: string;
+  } = {};
+  if (typeof d.status === "string") out.status = d.status;
+  if (typeof d.exitCode === "number") out.exitCode = d.exitCode;
+  if (d.exitCode === null) out.exitCode = null;
+  if (typeof d.durationMs === "number") out.durationMs = d.durationMs;
+  if (typeof d.cwd === "string") out.cwd = d.cwd;
+  if (typeof d.aggregated === "string") out.aggregated = d.aggregated;
+  return out;
+}
 
 function extendExecMeta(toolName: string, args: unknown, meta?: string): string | undefined {
   const normalized = toolName.trim().toLowerCase();
@@ -58,6 +101,18 @@ export async function handleToolExecutionStart(
   ctx.log.debug(
     `embedded run tool start: runId=${ctx.params.runId} tool=${toolName} toolCallId=${toolCallId}`,
   );
+
+  void appendRuntimeTrace({
+    sessionKey: ctx.params.sessionKey,
+    runId: ctx.params.runId,
+    event: "tool.start",
+    payload: {
+      toolName,
+      toolCallId,
+      meta,
+      args,
+    },
+  });
 
   const shouldEmitToolEvents = ctx.shouldEmitToolResult();
   emitAgentEvent({
@@ -211,8 +266,30 @@ export function handleToolExecutionEnd(
     `embedded run tool end: runId=${ctx.params.runId} tool=${toolName} toolCallId=${toolCallId}`,
   );
 
+  const details = extractToolDetails(sanitizedResult);
+  const outputText = extractToolResultText(sanitizedResult);
+  const tailCandidate =
+    (details.aggregated && details.aggregated.trim()) || (outputText && outputText.trim()) || "";
+  const tail = tailCandidate ? normalizeTail(tailCandidate) : undefined;
+
+  void appendRuntimeTrace({
+    sessionKey: ctx.params.sessionKey,
+    runId: ctx.params.runId,
+    event: "tool.end",
+    payload: {
+      toolName,
+      toolCallId,
+      meta,
+      isError: isToolError,
+      status: details.status,
+      exitCode: details.exitCode,
+      durationMs: details.durationMs,
+      cwd: details.cwd,
+      tail,
+    },
+  });
+
   if (ctx.params.onToolResult && ctx.shouldEmitToolOutput()) {
-    const outputText = extractToolResultText(sanitizedResult);
     if (outputText) {
       ctx.emitToolOutput(toolName, meta, outputText);
     }

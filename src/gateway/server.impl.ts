@@ -73,6 +73,7 @@ import { startGatewayTailscaleExposure } from "./server-tailscale.js";
 import { loadGatewayTlsRuntime } from "./server/tls.js";
 import { createWizardSessionTracker } from "./server-wizard-sessions.js";
 import { attachGatewayWsHandlers } from "./server-ws-runtime.js";
+import { onRunEvent, type RunEventPayload } from "./run-events.js";
 
 export { __resetModelCatalogCacheForTest } from "./server-model-catalog.js";
 
@@ -404,6 +405,20 @@ export async function startGatewayServer(
     }),
   );
 
+  const runEventsUnsub = onRunEvent((evt: RunEventPayload) => {
+    broadcast(
+      "run",
+      {
+        ts: evt.ts,
+        sessionKey: evt.sessionKey,
+        runId: evt.runId,
+        kind: evt.event,
+        payload: evt.payload,
+      },
+      { dropIfSlow: true },
+    );
+  });
+
   const heartbeatUnsub = onHeartbeatEvent((evt) => {
     broadcast("heartbeat", evt, { dropIfSlow: true });
   });
@@ -585,6 +600,7 @@ export async function startGatewayServer(
     healthInterval,
     dedupeCleanup,
     agentUnsub,
+    runEventsUnsub,
     heartbeatUnsub,
     chatRunState,
     clients,

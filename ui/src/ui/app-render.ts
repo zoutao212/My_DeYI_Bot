@@ -41,6 +41,7 @@ import { renderLogs } from "./views/logs";
 import { renderNodes } from "./views/nodes";
 import { renderOverview } from "./views/overview";
 import { renderSessions } from "./views/sessions";
+import { renderRun } from "./views/run";
 import { renderExecApprovalPrompt } from "./views/exec-approval";
 import { renderChatSendApprovalPrompt } from "./views/chat-send-approval";
 import { renderLlmApprovalPrompt } from "./views/llm-approval";
@@ -251,6 +252,15 @@ export function renderApp(state: AppViewState) {
               },
               onConnect: () => state.connect(),
               onRefresh: () => state.loadOverview(),
+            })
+          : nothing}
+
+        ${state.tab === "run"
+          ? renderRun({
+              events: state.runEvents,
+              connected: state.connected,
+              sessionKey: state.sessionKey,
+              onClear: () => state.clearRunEvents(),
             })
           : nothing}
 

@@ -55,6 +55,13 @@ type GatewayHost = {
   assistantAvatar: string | null;
   assistantAgentId: string | null;
   sessionKey: string;
+  runEvents: Array<{
+    ts: number;
+    sessionKey?: string;
+    runId?: string;
+    kind: string;
+    payload?: unknown;
+  }>;
   chatRunId: string | null;
   execApprovalQueue: ExecApprovalRequest[];
   execApprovalError: string | null;
@@ -186,6 +193,29 @@ function handleGatewayEventUnsafe(host: GatewayHost, evt: GatewayEventFrame) {
       host as unknown as Parameters<typeof handleAgentEvent>[0],
       evt.payload as AgentEventPayload | undefined,
     );
+    return;
+  }
+
+  if (evt.event === "run") {
+    const payload = evt.payload as
+      | {
+          ts?: number;
+          sessionKey?: string;
+          runId?: string;
+          kind?: string;
+          payload?: unknown;
+        }
+      | undefined;
+    const sessionKey = payload?.sessionKey?.trim();
+    if (!sessionKey || sessionKey !== host.sessionKey) return;
+    const entry = {
+      ts: typeof payload?.ts === "number" ? payload.ts : Date.now(),
+      sessionKey,
+      runId: payload?.runId,
+      kind: typeof payload?.kind === "string" && payload.kind.trim() ? payload.kind : "run",
+      payload: payload?.payload,
+    };
+    host.runEvents = [entry, ...(host.runEvents ?? [])].slice(0, 800);
     return;
   }
 

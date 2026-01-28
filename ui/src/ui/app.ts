@@ -109,6 +109,13 @@ export class ClawdbotApp extends LitElement {
   @state() hello: GatewayHelloOk | null = null;
   @state() lastError: string | null = null;
   @state() eventLog: EventLogEntry[] = [];
+  @state() runEvents: Array<{
+    ts: number;
+    sessionKey?: string;
+    runId?: string;
+    kind: string;
+    payload?: unknown;
+  }> = [];
   private eventLogBuffer: EventLogEntry[] = [];
   private toolStreamSyncTimer: number | null = null;
   private sidebarCloseTimer: number | null = null;
@@ -371,6 +378,10 @@ export class ClawdbotApp extends LitElement {
     resetChatScrollInternal(
       this as unknown as Parameters<typeof resetChatScrollInternal>[0],
     );
+  }
+
+  clearRunEvents() {
+    this.runEvents = [];
   }
 
   async loadAssistantIdentity() {

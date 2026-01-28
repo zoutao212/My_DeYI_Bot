@@ -2,6 +2,8 @@
 setlocal
 
 set "REPO_DIR=D:\Git_GitHub\clawdbot"
+set CLAWDBOT_CLAUDE_SKIP_PERMISSIONS=1
+set CLAWDBOT_FORCE_BUILD=1
 
 echo [Start-Clawdbot] Repo: "%REPO_DIR%"
 
@@ -52,7 +54,12 @@ if defined GATEWAY_PID (
 
 echo [Start-Clawdbot] Starting Clawdbot Gateway...
 echo [Start-Clawdbot] Opening a new window for gateway logs...
-start "Clawdbot Gateway" /D "%REPO_DIR%" cmd /k "pnpm run clawdbot gateway run --bind loopback --port 18789 --force"
+if /i "%CLAWDBOT_FORCE_BUILD%"=="1" (
+  echo [Start-Clawdbot] CLAWDBOT_FORCE_BUILD=1 enabled. Forcing TypeScript build before starting gateway...
+  start "Clawdbot Gateway" /D "%REPO_DIR%" cmd /k "set CLAWDBOT_FORCE_BUILD=1&& node scripts/run-node.mjs gateway run --bind loopback --port 18789 --force"
+) else (
+  start "Clawdbot Gateway" /D "%REPO_DIR%" cmd /k "pnpm run clawdbot gateway run --bind loopback --port 18789 --force"
+)
 
 echo [Start-Clawdbot] Waiting for gateway health...
 set "OK="

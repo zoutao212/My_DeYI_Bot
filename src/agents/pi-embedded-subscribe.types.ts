@@ -7,6 +7,7 @@ export type ToolResultFormat = "markdown" | "plain";
 
 export type SubscribeEmbeddedPiSessionParams = {
   session: AgentSession;
+  sessionKey?: string;
   runId: string;
   verboseLevel?: VerboseLevel;
   reasoningMode?: ReasoningLevel;

@@ -251,6 +251,59 @@ function normalizeNotifyOutput(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
 
+function isClaudeCommand(command: string): boolean {
+  return /^claude\b/i.test(command.trimStart());
+}
+
+function resolveClaudeYieldWindowMs(params: {
+  command: string;
+  allowBackground: boolean;
+  backgroundRequested: boolean;
+  yieldRequested: boolean;
+  requestedYieldMs?: number;
+  defaultBackgroundMs: number;
+}): number | null {
+  if (!params.allowBackground) return null;
+  if (params.backgroundRequested) return 0;
+  if (params.yieldRequested) {
+    return clampNumber(params.requestedYieldMs ?? params.defaultBackgroundMs, params.defaultBackgroundMs, 10, 120_000);
+  }
+  if (isClaudeCommand(params.command)) {
+    return clampNumber(120_000, params.defaultBackgroundMs, 10, 120_000);
+  }
+  return clampNumber(params.defaultBackgroundMs, params.defaultBackgroundMs, 10, 120_000);
+}
+
+async function injectExecFollowUpMessage(params: {
+  sessionKey?: string;
+  message: string;
+  label: string;
+}) {
+  const sessionKey = params.sessionKey?.trim();
+  if (!sessionKey) return;
+  try {
+    await callGatewayTool(
+      "chat.inject",
+      { timeoutMs: 10_000 },
+      { sessionKey, message: params.message, label: params.label },
+    );
+  } catch {
+    // Best-effort; do not crash the exec tool.
+  }
+}
+
+function formatExecCompletionSummary(params: {
+  sessionId: string;
+  cwd?: string | null;
+  outcome: { exitCode?: number | null; timedOut?: boolean; aggregated?: string | null };
+}): string {
+  const exitLabel = params.outcome.timedOut ? "timeout" : `code ${params.outcome.exitCode ?? "?"}`;
+  const output = normalizeNotifyOutput(tail(params.outcome.aggregated || "", DEFAULT_NOTIFY_TAIL_CHARS));
+  return output
+    ? `Exec completed (${params.sessionId.slice(0, 8)}, ${exitLabel}, cwd=${params.cwd ?? ""}) :: ${output}`
+    : `Exec completed (${params.sessionId.slice(0, 8)}, ${exitLabel}, cwd=${params.cwd ?? ""}).`;
+}
+
 function normalizePathPrepend(entries?: string[]) {
   if (!Array.isArray(entries)) return [];
   const seen = new Set<string>();
@@ -313,6 +366,64 @@ function inferPtyForCommand(params: { command: string; pty?: boolean }) {
   return true;
 }
 
+function maybeRemoveClaudeYesFlag(command: string): string {
+  const trimmed = command.trimStart();
+  if (!/^claude\b/i.test(trimmed)) return command;
+  // Claude Code CLI does not support `-y`; it can cause the tool run to fail with no useful output.
+  return command.replace(/(^|\s)-y(\s|$)/g, "$1$2").replace(/\s{2,}/g, " ").trim();
+}
+
+function maybeBypassClaudePermissions(command: string): string {
+  const trimmed = command.trimStart();
+  if (!/^claude\b/i.test(trimmed)) return command;
+
+  const env = process.env;
+  const enabledRaw = (env.CLAWDBOT_CLAUDE_SKIP_PERMISSIONS ?? "").trim().toLowerCase();
+  const enabled = enabledRaw === "1" || enabledRaw === "true" || enabledRaw === "yes";
+  if (!enabled) return command;
+
+  // If the user already specified a permission-mode or skip-permissions flag, do not override.
+  if (/(^|\s)--dangerously-skip-permissions(\s|$)/.test(trimmed)) return command;
+  if (/(^|\s)--allow-dangerously-skip-permissions(\s|$)/.test(trimmed)) return command;
+  if (/(^|\s)--permission-mode(\s|$)/.test(trimmed)) return command;
+
+  return `${command} --dangerously-skip-permissions`;
+}
+
+function isClaudeSkipPermissionsEnabled(): boolean {
+  const enabledRaw = (process.env.CLAWDBOT_CLAUDE_SKIP_PERMISSIONS ?? "").trim().toLowerCase();
+  return enabledRaw === "1" || enabledRaw === "true" || enabledRaw === "yes";
+}
+
+function shouldAutoAcceptClaudeDisclaimer(command: string): boolean {
+  const trimmed = command.trimStart();
+  if (!/^claude\b/i.test(trimmed)) return false;
+  if (!isClaudeSkipPermissionsEnabled()) return false;
+  // Only auto-accept when we're explicitly in skip-permissions mode.
+  return /(^|\s)--dangerously-skip-permissions(\s|$)/.test(trimmed);
+}
+
+function maybeAutoAcceptClaudeDisclaimer(params: {
+  command: string;
+  write: (data: string) => void;
+  output: string;
+  accepted: boolean;
+}): boolean {
+  if (params.accepted) return true;
+  if (!shouldAutoAcceptClaudeDisclaimer(params.command)) return false;
+
+  const text = params.output;
+  // Claude Code first-run disclaimer in bypass-permissions mode.
+  const hasWarning = /WARNING:\s*Claude Code running in Bypass Permissions mode/i.test(text);
+  const hasChoice = /Yes,\s*I accept/i.test(text);
+  const hasPrompt = /Enter to confirm|>\s*2\./i.test(text);
+  if (!(hasWarning && hasChoice && hasPrompt)) return false;
+
+  // Confirm option 2 and submit.
+  params.write("2\r");
+  return true;
+}
+
 function maybeNotifyOnExit(session: ProcessSession, status: "completed" | "failed") {
   if (!session.backgrounded || !session.notifyOnExit || session.exitNotified) return;
   const sessionKey = session.sessionKey?.trim();
@@ -371,6 +482,7 @@ async function runExecProcess(opts: {
   let child: ChildProcessWithoutNullStreams | null = null;
   let pty: PtyHandle | null = null;
   let stdin: SessionStdin | undefined;
+  let claudeDisclaimerAccepted = false;
 
   if (opts.sandbox) {
     const { child: spawned } = await spawnWithFallback({
@@ -619,6 +731,14 @@ async function runExecProcess(opts: {
           pty.write(cursorResponse);
         }
       }
+      if (!claudeDisclaimerAccepted) {
+        claudeDisclaimerAccepted = maybeAutoAcceptClaudeDisclaimer({
+          command: opts.command,
+          write: (input) => pty.write(input),
+          output: cleaned,
+          accepted: claudeDisclaimerAccepted,
+        });
+      }
       handleStdout(cleaned);
     });
   } else if (child) {
@@ -773,11 +893,14 @@ export function createExecTool(
       if (!allowBackground && (backgroundRequested || yieldRequested)) {
         warnings.push("Warning: background execution is disabled; running synchronously.");
       }
-      const yieldWindow = allowBackground
-        ? backgroundRequested
-          ? 0
-          : clampNumber(params.yieldMs ?? defaultBackgroundMs, defaultBackgroundMs, 10, 120_000)
-        : null;
+      const yieldWindow = resolveClaudeYieldWindowMs({
+        command: params.command,
+        allowBackground,
+        backgroundRequested,
+        yieldRequested,
+        requestedYieldMs: params.yieldMs,
+        defaultBackgroundMs,
+      });
       const elevatedDefaults = defaults?.elevated;
       const elevatedAllowed = Boolean(elevatedDefaults?.enabled && elevatedDefaults.allowed);
       const elevatedDefaultMode =
@@ -1391,7 +1514,8 @@ export function createExecTool(
       const effectiveTimeout =
         typeof params.timeout === "number" ? params.timeout : defaultTimeoutSec;
       const getWarningText = () => (warnings.length ? `${warnings.join("\n")}\n\n` : "");
-      const inferredPty = inferPtyForCommand({ command: params.command, pty: params.pty });
+      const commandText = maybeBypassClaudePermissions(maybeRemoveClaudeYesFlag(params.command));
+      const inferredPty = inferPtyForCommand({ command: commandText, pty: params.pty });
       if (inferredPty) {
         warnings.push(
           "Warning: pty was not set; enabling pty automatically for an interactive CLI command.",
@@ -1399,7 +1523,7 @@ export function createExecTool(
       }
       const usePty = (params.pty === true || inferredPty) && !sandbox;
       const run = await runExecProcess({
-        command: params.command,
+        command: commandText,
         workdir,
         env,
         sandbox,
@@ -1458,6 +1582,23 @@ export function createExecTool(
           if (yielded) return;
           yielded = true;
           markBackgrounded(run.session);
+          if (isClaudeCommand(commandText)) {
+            void (async () => {
+              const outcome = await run.promise;
+              const exitLabel = outcome.timedOut ? "timeout" : `code ${outcome.exitCode ?? "?"}`;
+              const output = normalizeNotifyOutput(
+                tail(outcome.aggregated || "", DEFAULT_NOTIFY_TAIL_CHARS),
+              );
+              const summary = output
+                ? `Exec completed (${run.session.id.slice(0, 8)}, ${exitLabel}, cwd=${run.session.cwd ?? ""}) :: ${output}`
+                : `Exec completed (${run.session.id.slice(0, 8)}, ${exitLabel}, cwd=${run.session.cwd ?? ""}).`;
+              await injectExecFollowUpMessage({
+                sessionKey: notifySessionKey,
+                message: summary,
+                label: "exec",
+              });
+            })();
+          }
           resolveRunning();
         };
 
@@ -1469,6 +1610,23 @@ export function createExecTool(
               if (yielded) return;
               yielded = true;
               markBackgrounded(run.session);
+              if (isClaudeCommand(commandText)) {
+                void (async () => {
+                  const outcome = await run.promise;
+                  const exitLabel = outcome.timedOut ? "timeout" : `code ${outcome.exitCode ?? "?"}`;
+                  const output = normalizeNotifyOutput(
+                    tail(outcome.aggregated || "", DEFAULT_NOTIFY_TAIL_CHARS),
+                  );
+                  const summary = output
+                    ? `Exec completed (${run.session.id.slice(0, 8)}, ${exitLabel}, cwd=${run.session.cwd ?? ""}) :: ${output}`
+                    : `Exec completed (${run.session.id.slice(0, 8)}, ${exitLabel}, cwd=${run.session.cwd ?? ""}).`;
+                  await injectExecFollowUpMessage({
+                    sessionKey: notifySessionKey,
+                    message: summary,
+                    label: "exec",
+                  });
+                })();
+              }
               resolveRunning();
             }, yieldWindow);
           }
@@ -1478,8 +1636,21 @@ export function createExecTool(
           .then((outcome) => {
             if (yieldTimer) clearTimeout(yieldTimer);
             if (yielded || run.session.backgrounded) return;
+
+            if (isClaudeCommand(commandText)) {
+              void injectExecFollowUpMessage({
+                sessionKey: notifySessionKey,
+                message: formatExecCompletionSummary({
+                  sessionId: run.session.id,
+                  cwd: run.session.cwd,
+                  outcome,
+                }),
+                label: "exec",
+              });
+            }
+
             if (outcome.status === "failed") {
-              reject(new Error(outcome.reason ?? "Command failed."));
+              reject(new Error(outcome.reason || "exec failed"));
               return;
             }
             resolve({

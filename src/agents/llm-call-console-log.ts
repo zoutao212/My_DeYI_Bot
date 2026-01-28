@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { parseBooleanValue } from "../utils/boolean.js";
 import { appendRuntimeTrace } from "../gateway/runtime-log.js";
+import { callGatewayTool } from "./tools/gateway.js";
 
 import type { StreamFn } from "@mariozechner/pi-agent-core";
 import type { Api, Model } from "@mariozechner/pi-ai";
@@ -68,6 +69,23 @@ function isAsyncIterable<T = unknown>(value: unknown): value is AsyncIterable<T>
   return typeof rec[Symbol.asyncIterator] === "function";
 }
 
+async function injectLlmProgress(params: {
+  sessionKey?: string;
+  message: string;
+}) {
+  const sessionKey = params.sessionKey?.trim();
+  if (!sessionKey) return;
+  try {
+    await callGatewayTool(
+      "chat.inject",
+      { timeoutMs: 10_000 },
+      { sessionKey, message: params.message, label: "LLM" },
+    );
+  } catch {
+    // Best-effort only.
+  }
+}
+
 export type LlmCallConsoleLogger = {
   enabled: true;
   wrapStreamFn: (streamFn: StreamFn) => StreamFn;
@@ -120,6 +138,11 @@ export function createLlmCallConsoleLogger(params: {
             `→ LLM请求 seq=${callSeq} model=${modelTag} api=${apiTag} runId=${base.runId ?? ""} sessionKey=${base.sessionKey ?? ""} payloadBytes=${payloadBytes} payloadPreview=${truncate(payloadText, 600)}`,
           );
 
+          void injectLlmProgress({
+            sessionKey: base.sessionKey,
+            message: `→ seq=${callSeq} model=${modelTag} api=${apiTag} bytes=${payloadBytes} runId=${base.runId ?? ""}`,
+          });
+
           void appendRuntimeTrace({
             sessionKey: base.sessionKey,
             runId: base.runId,
@@ -146,6 +169,11 @@ export function createLlmCallConsoleLogger(params: {
           `← LLM回复 seq=${callSeq} ok durationMs=${durationMs} model=${modelTag} api=${apiTag} runId=${base.runId ?? ""} sessionKey=${base.sessionKey ?? ""}`,
         );
 
+        void injectLlmProgress({
+          sessionKey: base.sessionKey,
+          message: `← seq=${callSeq} ok durationMs=${durationMs} model=${modelTag} api=${apiTag} runId=${base.runId ?? ""}`,
+        });
+
         void appendRuntimeTrace({
           sessionKey: base.sessionKey,
           runId: base.runId,
@@ -164,6 +192,11 @@ export function createLlmCallConsoleLogger(params: {
         log.warn(
           `← LLM回复 seq=${callSeq} error durationMs=${durationMs} model=${modelTag} api=${apiTag} runId=${base.runId ?? ""} sessionKey=${base.sessionKey ?? ""} err=${truncate(formatError(err), 800)}`,
         );
+
+        void injectLlmProgress({
+          sessionKey: base.sessionKey,
+          message: `← seq=${callSeq} error durationMs=${durationMs} model=${modelTag} api=${apiTag} runId=${base.runId ?? ""} err=${truncate(formatError(err), 180)}`,
+        });
 
         void appendRuntimeTrace({
           sessionKey: base.sessionKey,

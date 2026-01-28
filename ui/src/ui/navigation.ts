@@ -2,6 +2,7 @@ import type { IconName } from "./icons.js";
 
 export const TAB_GROUPS = [
   { label: "Chat", tabs: ["chat"] },
+  { label: "Chat", tabs: ["run"] },
   {
     label: "Control",
     tabs: ["overview", "channels", "instances", "sessions", "cron"],
@@ -19,6 +20,7 @@ export type Tab =
   | "skills"
   | "nodes"
   | "chat"
+  | "run"
   | "config"
   | "debug"
   | "logs";
@@ -32,6 +34,7 @@ const TAB_PATHS: Record<Tab, string> = {
   skills: "/skills",
   nodes: "/nodes",
   chat: "/chat",
+  run: "/run",
   config: "/config",
   debug: "/debug",
   logs: "/logs",
@@ -104,6 +107,8 @@ export function iconForTab(tab: Tab): IconName {
   switch (tab) {
     case "chat":
       return "messageSquare";
+    case "run":
+      return "barChart";
     case "overview":
       return "barChart";
     case "channels":
@@ -148,6 +153,8 @@ export function titleForTab(tab: Tab, lang: "en" | "zh" = "en") {
       return zh ? "节点" : "Nodes";
     case "chat":
       return zh ? "聊天" : "Chat";
+    case "run":
+      return zh ? "运行" : "Run";
     case "config":
       return zh ? "配置" : "Config";
     case "debug":
@@ -178,6 +185,10 @@ export function subtitleForTab(tab: Tab, lang: "en" | "zh" = "en") {
       return zh ? "配对设备、能力与命令暴露。" : "Paired devices, capabilities, and command exposure.";
     case "chat":
       return zh ? "直接与网关对话，便于快速干预。" : "Direct gateway chat session for quick interventions.";
+    case "run":
+      return zh
+        ? "实时运行事件流（LLM/工具/注入/补丁），不依赖最终回复。"
+        : "Live run event stream (LLM/tools/injections/patching), independent of the final reply.";
     case "config":
       return zh ? "安全编辑 ~/.clawdbot/clawdbot.json。" : "Edit ~/.clawdbot/clawdbot.json safely.";
     case "debug":

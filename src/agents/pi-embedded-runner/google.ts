@@ -185,6 +185,7 @@ function ensureGeminiToolThoughtSignatures(messages: AgentMessage[]): {
         type?: unknown;
         id?: unknown;
         name?: unknown;
+        parts?: unknown;
         thoughtSignature?: unknown;
         thought_signature?: unknown;
       };
@@ -209,20 +210,53 @@ function ensureGeminiToolThoughtSignatures(messages: AgentMessage[]): {
       }
       const hasSnake = typeof rec.thought_signature === "string" && rec.thought_signature.trim();
       const hasCamel = typeof rec.thoughtSignature === "string" && rec.thoughtSignature.trim();
-      if (hasSnake || hasCamel) {
+
+      const signature =
+        (hasSnake ? String(rec.thought_signature) : hasCamel ? String(rec.thoughtSignature) : "") ||
+        makeStableThoughtSignatureBase64(id || JSON.stringify(block));
+      const toolName = typeof rec.name === "string" && rec.name.trim() ? rec.name.trim() : "(unknown)";
+
+      const blockRecord = block as unknown as Record<string, unknown>;
+      const nextRecord: Record<string, unknown> = { ...blockRecord };
+      let blockChanged = false;
+
+      if (!(hasSnake || hasCamel)) {
+        nextRecord.thoughtSignature = signature;
+        nextRecord.thought_signature = signature;
+        byTool.set(toolName, (byTool.get(toolName) ?? 0) + 1);
+        added += 1;
+        blockChanged = true;
+      }
+
+      if (Array.isArray(rec.parts) && rec.parts.length > 0) {
+        const nextParts = rec.parts.map((part, idx) => {
+          if (!part || typeof part !== "object") return part;
+          const partRec = part as Record<string, unknown>;
+          const partHasSnake =
+            typeof partRec.thought_signature === "string" && String(partRec.thought_signature).trim();
+          const partHasCamel =
+            typeof partRec.thoughtSignature === "string" && String(partRec.thoughtSignature).trim();
+          if (partHasSnake || partHasCamel) return part;
+          const partSignature = makeStableThoughtSignatureBase64(
+            `${signature}:part:${idx}:${JSON.stringify(partRec)}`,
+          );
+          added += 1;
+          blockChanged = true;
+          return {
+            ...partRec,
+            thoughtSignature: partSignature,
+            thought_signature: partSignature,
+          };
+        });
+        nextRecord.parts = nextParts;
+      }
+
+      if (!blockChanged) {
         nextContent.push(block);
         continue;
       }
-      const signature = makeStableThoughtSignatureBase64(id || JSON.stringify(block));
-      const toolName = typeof rec.name === "string" && rec.name.trim() ? rec.name.trim() : "(unknown)";
-      byTool.set(toolName, (byTool.get(toolName) ?? 0) + 1);
-      added += 1;
-      const patched = {
-        ...(block as unknown as Record<string, unknown>),
-        thoughtSignature: signature,
-        thought_signature: signature,
-      } as unknown as AssistantContentBlock;
-      nextContent.push(patched);
+
+      nextContent.push(nextRecord as unknown as AssistantContentBlock);
       changed = true;
     }
     if (changed || toolCallsChanged) {

@@ -167,6 +167,12 @@ function nextChatSeq(context: { agentRunSeq: Map<string, number> }, runId: strin
   return next;
 }
 
+function extractMessageIdMarker(value: string): string | null {
+  const match = value.match(/\[message_id:\s*([^\]]+)\]/i);
+  const extracted = match?.[1]?.trim();
+  return extracted ? extracted : null;
+}
+
 function broadcastChatFinal(params: {
   context: Pick<GatewayRequestContext, "broadcast" | "nodeSendToSession" | "agentRunSeq">;
   runId: string;
@@ -183,6 +189,381 @@ function broadcastChatFinal(params: {
   };
   params.context.broadcast("chat", payload);
   params.context.nodeSendToSession(params.sessionKey, "chat", payload);
+}
+
+function extractLastToolResultText(messages: Record<string, unknown>[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i] as Record<string, unknown>;
+    const message = msg.message;
+    if (!message || typeof message !== "object") continue;
+    const m = message as Record<string, unknown>;
+    if (m.role !== "toolResult") continue;
+    const content = m.content;
+    if (!Array.isArray(content)) continue;
+    const parts: string[] = [];
+    for (const item of content) {
+      if (!item || typeof item !== "object") continue;
+      const rec = item as Record<string, unknown>;
+      if (rec.type === "text" && typeof rec.text === "string") {
+        const t = rec.text.trim();
+        if (t) parts.push(t);
+      }
+    }
+    const combined = parts.join("\n").trim();
+    if (combined) return combined;
+  }
+  return null;
+}
+
+function stripTerminalControlSequences(value: string): string {
+  // Remove ANSI escape sequences and common PTY control fragments.
+  return value
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
+    .replace(/\[[0-9;?]*[A-Za-z]/g, "")
+    .replace(/\r/g, "")
+    .trim();
+}
+
+function normalizeToolSummaryTail(value: string, limit = 240): string {
+  const stripped = stripTerminalControlSequences(value);
+  if (stripped.length <= limit) return stripped;
+  return stripped.slice(stripped.length - limit);
+}
+
+type ToolSummaryEntry = {
+  toolCallId: string;
+  toolName: string;
+  status?: string;
+  exitCode?: number | null;
+  cwd?: string;
+  tail?: string;
+};
+
+type LlmProgressEntry = {
+  seq: number;
+  direction: "start" | "end";
+  ok?: boolean;
+  durationMs?: number;
+  model?: string;
+  api?: string;
+  bytes?: number;
+  err?: string;
+};
+
+function extractLlmProgressForRun(params: {
+  messages: Record<string, unknown>[];
+  markerId: string;
+}): { entries: LlmProgressEntry[]; connectionErrors: number } {
+  const marker = `[message_id: ${params.markerId}]`;
+  let startIndex = -1;
+  for (let i = params.messages.length - 1; i >= 0; i -= 1) {
+    const entry = params.messages[i];
+    const message = entry?.message;
+    if (!message || typeof message !== "object") continue;
+    const m = message as Record<string, unknown>;
+    if (m.role !== "user") continue;
+    const content = m.content;
+    if (!Array.isArray(content)) continue;
+    const text = content
+      .map((part) => (part && typeof part === "object" ? (part as Record<string, unknown>).text : null))
+      .filter((t): t is string => typeof t === "string")
+      .join("\n");
+    if (text.includes(marker)) {
+      startIndex = i;
+      break;
+    }
+  }
+
+  if (startIndex < 0) {
+    for (let i = params.messages.length - 1; i >= 0; i -= 1) {
+      const entry = params.messages[i];
+      const message = entry?.message;
+      if (!message || typeof message !== "object") continue;
+      const m = message as Record<string, unknown>;
+      if (m.role === "user") {
+        startIndex = i;
+        break;
+      }
+    }
+  }
+
+  if (startIndex < 0) return { entries: [], connectionErrors: 0 };
+
+  const entries: LlmProgressEntry[] = [];
+  let connectionErrors = 0;
+
+  for (let i = startIndex + 1; i < params.messages.length; i += 1) {
+    const entry = params.messages[i];
+    const message = entry?.message;
+    if (!message || typeof message !== "object") continue;
+    const m = message as Record<string, unknown>;
+    if (m.role === "user") break;
+
+    if (m.role === "assistant") {
+      const errorMessage = typeof m.errorMessage === "string" ? m.errorMessage : "";
+      if (errorMessage.includes("Connection error")) connectionErrors += 1;
+
+      const content = m.content;
+      if (!Array.isArray(content)) continue;
+      const text = content
+        .map((part) => (part && typeof part === "object" ? (part as Record<string, unknown>).text : null))
+        .filter((t): t is string => typeof t === "string")
+        .join("\n")
+        .trim();
+      if (!text) continue;
+      if (!text.startsWith("[LLM]")) continue;
+
+      const lines = text.split("\n").map((l) => l.trim());
+      const payloadLine = lines.find((l) => l.startsWith("→") || l.startsWith("←"));
+      if (!payloadLine) continue;
+
+      const isStart = payloadLine.startsWith("→");
+      const seqMatch = payloadLine.match(/seq=(\d+)/);
+      const seq = seqMatch ? Number(seqMatch[1]) : NaN;
+      if (!Number.isFinite(seq)) continue;
+
+      const bytesMatch = payloadLine.match(/bytes=(\d+)/);
+      const durationMatch = payloadLine.match(/durationMs=(\d+)/);
+      const modelMatch = payloadLine.match(/model=([^\s]+)/);
+      const apiMatch = payloadLine.match(/api=([^\s]+)/);
+      const ok = payloadLine.includes(" ok ") || payloadLine.includes(" ok$") || payloadLine.includes(" ok durationMs=");
+      const errMatch = payloadLine.match(/err=([\s\S]+)$/);
+
+      entries.push({
+        seq,
+        direction: isStart ? "start" : "end",
+        ok: isStart ? undefined : ok,
+        durationMs: durationMatch ? Number(durationMatch[1]) : undefined,
+        model: modelMatch ? modelMatch[1] : undefined,
+        api: apiMatch ? apiMatch[1] : undefined,
+        bytes: bytesMatch ? Number(bytesMatch[1]) : undefined,
+        err: errMatch ? errMatch[1].trim() : undefined,
+      });
+    }
+  }
+
+  return { entries, connectionErrors };
+}
+
+function renderRunSummaryText(params: {
+  llm: { entries: LlmProgressEntry[]; connectionErrors: number };
+  tools: ToolSummaryEntry[];
+}): string {
+  const lines: string[] = [];
+
+  const toolLines: string[] = [];
+  for (const t of params.tools) {
+    const exitCodeText =
+      t.exitCode === null || t.exitCode === undefined ? "" : ` exitCode=${t.exitCode}`;
+    const cwdText = t.cwd ? ` cwd=${t.cwd}` : "";
+    const tailText = t.tail ? `\n  tail: ${t.tail}` : "";
+    toolLines.push(`- ${t.toolName}${exitCodeText}${cwdText}${tailText}`);
+  }
+  if (toolLines.length > 0) {
+    lines.push("[工具]");
+    lines.push(...toolLines);
+  }
+
+  const bySeq = new Map<number, { start?: LlmProgressEntry; end?: LlmProgressEntry }>();
+  for (const entry of params.llm.entries) {
+    const rec = bySeq.get(entry.seq) ?? {};
+    if (entry.direction === "start") rec.start = entry;
+    if (entry.direction === "end") rec.end = entry;
+    bySeq.set(entry.seq, rec);
+  }
+  const seqs = Array.from(bySeq.keys()).sort((a, b) => a - b);
+  const llmLines: string[] = [];
+  for (const seq of seqs) {
+    const rec = bySeq.get(seq);
+    if (!rec) continue;
+    const model = rec.start?.model || rec.end?.model;
+    const api = rec.start?.api || rec.end?.api;
+    const bytes = rec.start?.bytes;
+    const duration = rec.end?.durationMs;
+    const okText =
+      rec.end?.ok === undefined ? "" : rec.end.ok ? "ok" : "error";
+    const errText = rec.end?.err ? ` err=${rec.end.err}` : "";
+    const bits = [
+      `seq=${seq}`,
+      okText ? okText : null,
+      duration !== undefined ? `durationMs=${duration}` : null,
+      bytes !== undefined ? `bytes=${bytes}` : null,
+      model ? `model=${model}` : null,
+      api ? `api=${api}` : null,
+    ]
+      .filter((x): x is string => typeof x === "string" && x.length > 0)
+      .join(" ");
+    llmLines.push(`- ${bits}${errText}`.trim());
+  }
+  if (llmLines.length > 0 || params.llm.connectionErrors > 0) {
+    lines.push("[LLM]");
+    if (llmLines.length > 0) lines.push(...llmLines);
+    if (params.llm.connectionErrors > 0) {
+      lines.push(`- Connection error 次数=${params.llm.connectionErrors}`);
+    }
+  }
+
+  return lines.join("\n").trim();
+}
+
+function appendRunSummaryToReply(params: {
+  reply: string;
+  messages: Record<string, unknown>[];
+  markerId: string;
+}): string {
+  const tools = extractToolSummariesForRun({
+    messages: params.messages,
+    markerId: params.markerId,
+  });
+  const llm = extractLlmProgressForRun({
+    messages: params.messages,
+    markerId: params.markerId,
+  });
+  const runSummary = renderRunSummaryText({ tools, llm });
+  if (!runSummary.trim()) return params.reply.trim();
+  const normalizedReply = params.reply.trim();
+  return `${normalizedReply}\n\n[运行摘要]\n${runSummary}`.trim();
+}
+
+function extractToolSummariesForRun(params: {
+  messages: Record<string, unknown>[];
+  markerId: string;
+}): ToolSummaryEntry[] {
+  const marker = `[message_id: ${params.markerId}]`;
+  let startIndex = -1;
+  for (let i = params.messages.length - 1; i >= 0; i -= 1) {
+    const entry = params.messages[i];
+    const message = entry?.message;
+    if (!message || typeof message !== "object") continue;
+    const m = message as Record<string, unknown>;
+    if (m.role !== "user") continue;
+    const content = m.content;
+    if (!Array.isArray(content)) continue;
+    const text = content
+      .map((part) => (part && typeof part === "object" ? (part as Record<string, unknown>).text : null))
+      .filter((t): t is string => typeof t === "string")
+      .join("\n");
+    if (text.includes(marker)) {
+      startIndex = i;
+      break;
+    }
+  }
+
+  if (startIndex < 0) {
+    for (let i = params.messages.length - 1; i >= 0; i -= 1) {
+      const entry = params.messages[i];
+      const message = entry?.message;
+      if (!message || typeof message !== "object") continue;
+      const m = message as Record<string, unknown>;
+      if (m.role === "user") {
+        startIndex = i;
+        break;
+      }
+    }
+  }
+
+  if (startIndex < 0) return [];
+
+  const toolCalls: ToolSummaryEntry[] = [];
+  const byId = new Map<string, ToolSummaryEntry>();
+
+  for (let i = startIndex + 1; i < params.messages.length; i += 1) {
+    const entry = params.messages[i];
+    const message = entry?.message;
+    if (!message || typeof message !== "object") continue;
+    const m = message as Record<string, unknown>;
+
+    if (m.role === "user") break;
+
+    if (m.role === "assistant") {
+      const content = m.content;
+      if (!Array.isArray(content)) continue;
+      for (const part of content) {
+        if (!part || typeof part !== "object") continue;
+        const rec = part as Record<string, unknown>;
+        if (rec.type !== "toolCall") continue;
+        const toolCallId = typeof rec.id === "string" ? rec.id : "";
+        const toolName = typeof rec.name === "string" ? rec.name : "";
+        if (!toolCallId || !toolName) continue;
+        const existing = byId.get(toolCallId);
+        if (existing) continue;
+        const next: ToolSummaryEntry = { toolCallId, toolName };
+        byId.set(toolCallId, next);
+        toolCalls.push(next);
+      }
+      continue;
+    }
+
+    if (m.role === "toolResult") {
+      const toolCallId = typeof m.toolCallId === "string" ? m.toolCallId : "";
+      const toolName = typeof m.toolName === "string" ? m.toolName : "";
+      if (!toolCallId || !toolName) continue;
+      const entryExisting = byId.get(toolCallId) ?? { toolCallId, toolName };
+
+      const details = m.details;
+      if (details && typeof details === "object") {
+        const d = details as Record<string, unknown>;
+        if (typeof d.status === "string") entryExisting.status = d.status;
+        if (typeof d.exitCode === "number") entryExisting.exitCode = d.exitCode;
+        if (d.exitCode === null) entryExisting.exitCode = null;
+        if (typeof d.cwd === "string") entryExisting.cwd = d.cwd;
+        if (typeof d.aggregated === "string" && d.aggregated.trim()) {
+          entryExisting.tail = normalizeToolSummaryTail(d.aggregated);
+        }
+      }
+
+      if (!entryExisting.tail) {
+        const content = m.content;
+        if (Array.isArray(content)) {
+          const text = content
+            .map((part) =>
+              part && typeof part === "object" ? (part as Record<string, unknown>).text : null,
+            )
+            .filter((t): t is string => typeof t === "string")
+            .join("\n")
+            .trim();
+          if (text) entryExisting.tail = normalizeToolSummaryTail(text);
+        }
+      }
+
+      if (!byId.has(toolCallId)) {
+        byId.set(toolCallId, entryExisting);
+        toolCalls.push(entryExisting);
+      } else {
+        byId.set(toolCallId, entryExisting);
+      }
+    }
+  }
+
+  return toolCalls;
+}
+
+function renderToolSummaryText(entries: ToolSummaryEntry[]): string {
+  const lines: string[] = [];
+  for (const entry of entries) {
+    const exitCodeText =
+      entry.exitCode === null || entry.exitCode === undefined ? "" : ` exitCode=${entry.exitCode}`;
+    const cwdText = entry.cwd ? ` cwd=${entry.cwd}` : "";
+    const statusText = entry.status ? ` status=${entry.status}` : "";
+    const tailText = entry.tail ? `\n  tail: ${entry.tail}` : "";
+    lines.push(`- tool=${entry.toolName}${statusText}${exitCodeText}${cwdText}${tailText}`);
+  }
+  return lines.join("\n");
+}
+
+function appendToolSummaryToReply(params: {
+  reply: string;
+  messages: Record<string, unknown>[];
+  markerId: string;
+}): string {
+  const summaries = extractToolSummariesForRun({
+    messages: params.messages,
+    markerId: params.markerId,
+  });
+  if (summaries.length === 0) return params.reply;
+  const summaryText = renderToolSummaryText(summaries);
+  const normalizedReply = params.reply.trim();
+  return `${normalizedReply}\n\n[工具调用摘要]\n${summaryText}`.trim();
 }
 
 function broadcastChatError(params: {
@@ -570,6 +951,11 @@ export const chatHandlers: GatewayRequestHandlers = {
     const now = Date.now();
     const clientRunId = p.idempotencyKey;
 
+    const markerId =
+      extractMessageIdMarker(String(p.message ?? "")) ??
+      extractMessageIdMarker(String(parsedMessage ?? "")) ??
+      clientRunId;
+
     const trimmedMessage = parsedMessage.trim();
     const injectThinking = Boolean(
       p.thinking && trimmedMessage && !trimmedMessage.startsWith("/"),
@@ -839,6 +1225,115 @@ export const chatHandlers: GatewayRequestHandlers = {
             payload: { runId: clientRunId, status: "ok" as const },
           });
 
+          const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(p.sessionKey);
+          const latestSessionId = latestEntry?.sessionId ?? entry?.sessionId;
+          const recentMessages =
+            latestSessionId && latestStorePath
+              ? readSessionMessages(latestSessionId, latestStorePath, latestEntry?.sessionFile)
+              : [];
+
+          const lastToolResultText = extractLastToolResultText(
+            (Array.isArray(recentMessages) ? recentMessages.slice(-80) : []) as Record<string, unknown>[],
+          );
+
+          const rawReply = finalReplyParts
+            .map((part) => part.trim())
+            .filter(Boolean)
+            .join("\n\n")
+            .trim();
+
+          const reply =
+            rawReply && rawReply !== "Connection error."
+              ? rawReply
+              : lastToolResultText && lastToolResultText !== "Connection error."
+                ? lastToolResultText
+                : rawReply;
+
+          const replyWithTools = appendToolSummaryToReply({
+            reply: reply || "(no output)",
+            messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
+            markerId,
+          });
+
+          const safeReplyWithTools =
+            replyWithTools && replyWithTools.includes("Connection error.")
+              ? appendToolSummaryToReply({
+                  reply: lastToolResultText || reply || "(no output)",
+                  messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
+                  markerId,
+                })
+              : replyWithTools;
+
+          const safeReplyWithToolsAndSummary = appendRunSummaryToReply({
+            reply: safeReplyWithTools || "(no output)",
+            messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
+            markerId,
+          });
+
+          const summaries = extractToolSummariesForRun({
+            messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
+            markerId,
+          });
+
+          if (
+            summaries.length > 0 &&
+            rawReply &&
+            rawReply.trim() &&
+            safeReplyWithToolsAndSummary &&
+            safeReplyWithToolsAndSummary !== rawReply &&
+            !rawReply.includes("[工具调用摘要]")
+          ) {
+            const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(p.sessionKey);
+            const sessionIdForAppend = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
+            const appended = appendAssistantTranscriptMessage({
+              message: safeReplyWithToolsAndSummary,
+              sessionId: sessionIdForAppend,
+              storePath: latestStorePath,
+              sessionFile: latestEntry?.sessionFile,
+              createIfMissing: true,
+            });
+            broadcastChatFinal({
+              context,
+              runId: clientRunId,
+              sessionKey: p.sessionKey,
+              message: appended.ok
+                ? appended.message
+                : {
+                    role: "assistant",
+                    content: [{ type: "text", text: safeReplyWithToolsAndSummary }],
+                    timestamp: Date.now(),
+                    stopReason: "injected",
+                    usage: { input: 0, output: 0, totalTokens: 0 },
+                  },
+            });
+          }
+
+          if (safeReplyWithToolsAndSummary && finalReplyParts.length === 0) {
+            const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(p.sessionKey);
+            const sessionIdForAppend = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
+            const appended = appendAssistantTranscriptMessage({
+              message: safeReplyWithToolsAndSummary,
+              sessionId: sessionIdForAppend,
+              storePath: latestStorePath,
+              sessionFile: latestEntry?.sessionFile,
+              createIfMissing: true,
+            });
+            broadcastChatFinal({
+              context,
+              runId: clientRunId,
+              sessionKey: p.sessionKey,
+              message: appended.ok
+                ? appended.message
+                : {
+                    role: "assistant",
+                    content: [{ type: "text", text: safeReplyWithToolsAndSummary }],
+                    timestamp: Date.now(),
+                    stopReason: "injected",
+                    usage: { input: 0, output: 0, totalTokens: 0 },
+                  },
+            });
+          }
+
           const resOkLogPathPromise = writeRuntimeLog({
             kind: "resmsg",
             ts: Date.now(),
@@ -849,11 +1344,7 @@ export const chatHandlers: GatewayRequestHandlers = {
               runId: clientRunId,
               request: runtimeLogRequest,
               modelSelected,
-              reply: finalReplyParts
-                .map((part) => part.trim())
-                .filter(Boolean)
-                .join("\n\n")
-                .trim(),
+              reply: safeReplyWithToolsAndSummary,
             },
           });
           void resOkLogPathPromise.then((logPath) => {
@@ -864,14 +1355,95 @@ export const chatHandlers: GatewayRequestHandlers = {
           });
         })
         .catch((err) => {
-          const error = errorShape(ErrorCodes.UNAVAILABLE, String(err));
+          const errText = String(err);
+          const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(p.sessionKey);
+          const latestSessionId = latestEntry?.sessionId ?? entry?.sessionId;
+          const recentMessages =
+            latestSessionId && latestStorePath
+              ? readSessionMessages(latestSessionId, latestStorePath, latestEntry?.sessionFile)
+              : [];
+          const lastToolResultTextRaw = extractLastToolResultText(
+            (Array.isArray(recentMessages) ? recentMessages.slice(-80) : []) as Record<string, unknown>[],
+          );
+          const lastToolResultText = lastToolResultTextRaw
+            ? stripTerminalControlSequences(lastToolResultTextRaw)
+            : null;
+
+          const toolSummaryText = appendToolSummaryToReply({
+            reply: lastToolResultText ?? "",
+            messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
+            markerId,
+          });
+
+          const fallbackInjectedText = appendRunSummaryToReply({
+            reply: toolSummaryText.trim() ? toolSummaryText : lastToolResultText ?? "Connection error.",
+            messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
+            markerId,
+          });
+
+          if (errText.includes("Connection error.") && fallbackInjectedText.trim()) {
+            context.logGateway.warn(
+              `[chat.send] connection-error fallback injected runId=${clientRunId} markerId=${markerId} hasLastToolResult=${Boolean(lastToolResultText)} toolSummaryChars=${toolSummaryText.length}`,
+            );
+            const sessionIdForAppend = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
+            const appended = appendAssistantTranscriptMessage({
+              message: fallbackInjectedText,
+              sessionId: sessionIdForAppend,
+              storePath: latestStorePath,
+              sessionFile: latestEntry?.sessionFile,
+              createIfMissing: true,
+            });
+            broadcastChatFinal({
+              context,
+              runId: clientRunId,
+              sessionKey: p.sessionKey,
+              message: appended.ok
+                ? appended.message
+                : {
+                    role: "assistant",
+                    content: [{ type: "text", text: fallbackInjectedText }],
+                    timestamp: Date.now(),
+                    stopReason: "injected",
+                    usage: { input: 0, output: 0, totalTokens: 0 },
+                  },
+            });
+
+            const resOkLogPathPromise = writeRuntimeLog({
+              kind: "resmsg",
+              ts: Date.now(),
+              sessionKey: p.sessionKey,
+              runId: clientRunId,
+              payload: {
+                sessionKey: p.sessionKey,
+                runId: clientRunId,
+                request: runtimeLogRequest,
+                modelSelected,
+                reply: fallbackInjectedText,
+              },
+            });
+            void resOkLogPathPromise.then((logPath) => {
+              if (logPath) return;
+              context.logGateway.warn(
+                `[runtimelog] write failed kind=resmsg dir=${getRuntimeLogDir()} sessionKey=${p.sessionKey} runId=${clientRunId}`,
+              );
+            });
+
+            context.dedupe.set(`chat:${clientRunId}`, {
+              ts: Date.now(),
+              ok: true,
+              payload: { runId: clientRunId, status: "ok" as const },
+            });
+            return;
+          }
+
+          const error = errorShape(ErrorCodes.UNAVAILABLE, errText);
           context.dedupe.set(`chat:${clientRunId}`, {
             ts: Date.now(),
             ok: false,
             payload: {
               runId: clientRunId,
               status: "error" as const,
-              summary: String(err),
+              summary: errText,
             },
             error,
           });
@@ -879,7 +1451,7 @@ export const chatHandlers: GatewayRequestHandlers = {
             context,
             runId: clientRunId,
             sessionKey: p.sessionKey,
-            errorMessage: String(err),
+            errorMessage: errText,
           });
 
           const resErrLogPathPromise = writeRuntimeLog({
@@ -892,7 +1464,7 @@ export const chatHandlers: GatewayRequestHandlers = {
               runId: clientRunId,
               request: runtimeLogRequest,
               modelSelected,
-              error: String(err),
+              error: errText,
             },
           });
           void resErrLogPathPromise.then((logPath: string | null) => {

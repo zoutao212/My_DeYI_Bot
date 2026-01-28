@@ -2,6 +2,8 @@
 setlocal
 
 set "REPO_DIR=D:\Git_GitHub\clawdbot"
+set CLAWDBOT_CLAUDE_SKIP_PERMISSIONS=1
+set CLAWDBOT_FORCE_BUILD=1
 
 echo [Start-Clawdbot-WebDev] Repo: "%REPO_DIR%"
 
@@ -42,7 +44,12 @@ call pnpm run clawdbot config unset gateway.auth.token >nul 2>nul
 call pnpm run clawdbot config unset gateway.auth.password >nul 2>nul
 
 echo [Start-Clawdbot-WebDev] Starting Gateway in watch mode...
-start "Clawdbot Gateway Dev" /D "%REPO_DIR%" cmd /k "pnpm gateway:watch run --bind loopback --port 18789 --verbose --ws-log compact"
+if /i "%CLAWDBOT_FORCE_BUILD%"=="1" (
+  echo [Start-Clawdbot-WebDev] CLAWDBOT_FORCE_BUILD=1 enabled. Forcing TypeScript build before starting gateway...
+  start "Clawdbot Gateway Dev" /D "%REPO_DIR%" cmd /k "set CLAWDBOT_FORCE_BUILD=1&& node scripts/run-node.mjs gateway run --bind loopback --port 18789 --force"
+) else (
+  start "Clawdbot Gateway Dev" /D "%REPO_DIR%" cmd /k "pnpm gateway:watch run --bind loopback --port 18789 --verbose --ws-log compact"
+)
 
 echo [Start-Clawdbot-WebDev] Waiting for gateway health...
 set "OK="

@@ -21,6 +21,7 @@ export function createGatewayCloseHandler(params: {
   healthInterval: ReturnType<typeof setInterval>;
   dedupeCleanup: ReturnType<typeof setInterval>;
   agentUnsub: (() => void) | null;
+  runEventsUnsub?: (() => void) | null;
   heartbeatUnsub: (() => void) | null;
   chatRunState: { clear: () => void };
   clients: Set<{ socket: { close: (code: number, reason: string) => void } }>;
@@ -84,6 +85,13 @@ export function createGatewayCloseHandler(params: {
     if (params.agentUnsub) {
       try {
         params.agentUnsub();
+      } catch {
+        /* ignore */
+      }
+    }
+    if (params.runEventsUnsub) {
+      try {
+        params.runEventsUnsub();
       } catch {
         /* ignore */
       }

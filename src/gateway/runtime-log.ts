@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { resolveStateDir } from "../config/paths.js";
+import { emitRunEvent } from "./run-events.js";
 
 function resolveRuntimeLogDir(env: NodeJS.ProcessEnv = process.env): string {
   const override = env.CLAWDBOT_RUNTIMELOG_DIR?.trim();
@@ -83,6 +84,14 @@ export async function appendRuntimeTrace(params: {
       200_000,
     );
     await fs.promises.appendFile(filePath, line + "\n", "utf-8");
+
+    emitRunEvent({
+      ts,
+      sessionKey: params.sessionKey,
+      runId: params.runId,
+      event: params.event,
+      payload: redacted,
+    });
     return filePath;
   } catch (err) {
     try {
