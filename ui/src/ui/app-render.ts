@@ -526,6 +526,8 @@ export function renderApp(state: AppViewState) {
               onOpenSidebar: (content: string) => state.handleOpenSidebar(content),
               onCloseSidebar: () => state.handleCloseSidebar(),
               onSplitRatioChange: (ratio: number) => state.handleSplitRatioChange(ratio),
+              runEvents: state.runEvents,
+              onClearRunEvents: () => state.clearRunEvents(),
               assistantName: state.assistantName,
               assistantAvatar: state.assistantAvatar,
               });

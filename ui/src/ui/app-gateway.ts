@@ -207,7 +207,6 @@ function handleGatewayEventUnsafe(host: GatewayHost, evt: GatewayEventFrame) {
         }
       | undefined;
     const sessionKey = payload?.sessionKey?.trim();
-    if (!sessionKey || sessionKey !== host.sessionKey) return;
     const entry = {
       ts: typeof payload?.ts === "number" ? payload.ts : Date.now(),
       sessionKey,

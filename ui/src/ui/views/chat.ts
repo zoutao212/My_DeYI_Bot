@@ -52,6 +52,14 @@ export type ChatProps = {
   splitRatio?: number;
   assistantName: string;
   assistantAvatar: string | null;
+  runEvents?: Array<{
+    ts: number;
+    sessionKey?: string;
+    runId?: string;
+    kind: string;
+    payload?: unknown;
+  }>;
+  onClearRunEvents?: () => void;
   // Event handlers
   onRefresh: () => void;
   onToggleFocusMode: () => void;
@@ -68,6 +76,80 @@ export type ChatProps = {
 };
 
 const COMPACTION_TOAST_DURATION_MS = 5000;
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function formatTs(ts: number): string {
+  try {
+    return new Date(ts).toLocaleString();
+  } catch {
+    return String(ts);
+  }
+}
+
+function renderRunPanelInChat(props: ChatProps) {
+  const events = Array.isArray(props.runEvents) ? props.runEvents : [];
+  const scoped = events.filter((evt) => (evt.sessionKey ?? "").trim() === props.sessionKey);
+  if (scoped.length === 0) return nothing;
+
+  const byRun = new Map<string, typeof scoped>();
+  for (const evt of scoped) {
+    const id = (evt.runId ?? "").trim() || "(no-runId)";
+    byRun.set(id, [...(byRun.get(id) ?? []), evt]);
+  }
+  const runIds = Array.from(byRun.keys()).sort((a, b) => {
+    const aLast = (byRun.get(a) ?? []).at(0)?.ts ?? 0;
+    const bLast = (byRun.get(b) ?? []).at(0)?.ts ?? 0;
+    return bLast - aLast;
+  });
+
+  return html`
+    <details class="details" style="margin-top: 8px;" open>
+      <summary class="details-summary">
+        <span class="pill">运行事件流</span>
+        <span class="muted" style="margin-left: 8px;">llm/tool/patch（不依赖最终回复）</span>
+      </summary>
+      <div class="details-body">
+        <div class="row" style="justify-content: flex-end; margin-bottom: 8px;">
+          <button class="btn" type="button" ?disabled=${!props.onClearRunEvents} @click=${() => props.onClearRunEvents?.()}>
+            清空
+          </button>
+        </div>
+        ${runIds.map((runId) => {
+          const list = (byRun.get(runId) ?? []).slice().sort((a, b) => b.ts - a.ts);
+          const head = list[0];
+          const title = head ? `${runId}（${formatTs(head.ts)}）` : runId;
+          return html`
+            <details class="details" open>
+              <summary class="details-summary">${title}</summary>
+              <div class="details-body">
+                ${list.map((evt) => {
+                  const ts = formatTs(evt.ts);
+                  const kind = (evt.kind ?? "").trim();
+                  return html`
+                    <details class="details">
+                      <summary class="details-summary">
+                        <span class="pill">${ts}</span>
+                        <span class="pill">${kind}</span>
+                      </summary>
+                      <pre class="codeblock">${safeJson(evt.payload)}</pre>
+                    </details>
+                  `;
+                })}
+              </div>
+            </details>
+          `;
+        })}
+      </div>
+    </details>
+  `;
+}
 
 function renderCompactionIndicator(status: CompactionIndicatorStatus | null | undefined) {
   if (!status) return nothing;
@@ -177,6 +259,8 @@ export function renderChat(props: ChatProps) {
           </button>
         </div>
       </div>
+
+      ${renderRunPanelInChat(props)}
 
       ${props.disabledReason
         ? html`<div class="callout">${props.disabledReason}</div>`
