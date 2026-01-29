@@ -1,4 +1,4 @@
-# 经验教训（索引）
+﻿# 经验教训（索引）
 
 > ⚠️ **注意**：详细内容已拆分到 `.kiro/lessons-learned/` 目录，按需加载。
 
@@ -26,8 +26,11 @@
 | **API 格式切换** | `.kiro/lessons-learned/20_API格式切换验证方法论.md` |
 | **UI 配置问题** | `.kiro/lessons-learned/21_UI配置问题定位方法论.md` |
 | **配置开关实现** | `.kiro/steering/always/gloab_always_workflow.md#第八章` |
+| **Windows exec 命令报错** | `.kiro/lessons-learned/26_Windows_exec工具命令语法规范.md` |
+| **中文文本文件乱码** | `.kiro/lessons-learned/27_中文文本文件编码问题处理.md` |
+| **工具增强的包装模式** | `.kiro/lessons-learned/28_工具增强的包装模式.md` |
 
-**关键词**：修复无效、打补丁、源头修复、重试绕过、数据流追踪、配置验证、schema 验证、静默失败、API 格式切换、字段兼容性、配置开关、功能开关、审批机制、Zod schema、类型定义、UI 配置、localStorage、默认值、干扰性功能、技术细节隐藏
+**关键词**：修复无效、打补丁、源头修复、重试绕过、数据流追踪、配置验证、schema 验证、静默失败、API 格式切换、字段兼容性、配置开关、功能开关、审批机制、Zod schema、类型定义、UI 配置、localStorage、默认值、干扰性功能、技术细节隐藏、Windows、PowerShell、CMD、exec 工具、中文路径、编码问题、命令语法、文本编码、GBK、GB2312、UTF-8、乱码、编码转换、read 工具、工具增强、包装模式、向后兼容、参数扩展、智能回退
 
 ## 使用方法
 
@@ -107,6 +110,6 @@ grepSearch -query "关键词" -includePattern ".kiro/lessons-learned/**/*.md"
 
 ---
 
-**版本：** v20260129_12  
+**版本：** v20260129_15  
 **最后更新：** 2026-01-29  
-**变更：** 新增"UI 配置问题定位方法论"（UI 配置 vs 后端配置的区分和定位流程）
+**变更：** 新增"工具增强的包装模式"（在不破坏现有功能的前提下增强工具的通用方法）

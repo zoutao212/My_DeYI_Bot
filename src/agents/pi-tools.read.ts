@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { createEditTool, createReadTool, createWriteTool } from "@mariozechner/pi-coding-agent";
 
@@ -11,6 +13,53 @@ import { sanitizeToolResultImages } from "./tool-images.js";
 type ToolContentBlock = AgentToolResult<unknown>["content"][number];
 type ImageContentBlock = Extract<ToolContentBlock, { type: "image" }>;
 type TextContentBlock = Extract<ToolContentBlock, { type: "text" }>;
+
+// Encoding detection and conversion utilities
+type SupportedEncoding = "utf-8" | "gbk" | "gb2312" | "big5" | "shift_jis" | "auto";
+
+async function detectTextEncoding(filePath: string): Promise<string> {
+  const encodings = ["utf-8", "gbk", "gb2312", "big5", "shift_jis"];
+  const buffer = await fs.promises.readFile(filePath);
+  
+  for (const encoding of encodings) {
+    try {
+      const decoder = new TextDecoder(encoding, { fatal: true });
+      const text = decoder.decode(buffer);
+      
+      // Check for replacement characters (indicates encoding mismatch)
+      if (!text.includes("\uFFFD")) {
+        return encoding;
+      }
+    } catch {
+      // Encoding failed, try next
+      continue;
+    }
+  }
+  
+  // Default to utf-8 if detection fails
+  return "utf-8";
+}
+
+async function readFileWithEncoding(
+  filePath: string,
+  encoding: SupportedEncoding,
+): Promise<string> {
+  const buffer = await fs.promises.readFile(filePath);
+  
+  // Auto-detect encoding
+  if (encoding === "auto") {
+    const detected = await detectTextEncoding(filePath);
+    encoding = detected as SupportedEncoding;
+  }
+  
+  // Read with specified encoding
+  try {
+    const decoder = new TextDecoder(encoding, { fatal: false });
+    return decoder.decode(buffer);
+  } catch (err) {
+    throw new Error(`Failed to read file with encoding ${encoding}: ${String(err)}`);
+  }
+}
 
 async function sniffMimeFromBase64(base64: string): Promise<string | undefined> {
   const trimmed = base64.trim();
@@ -264,20 +313,92 @@ export function createSandboxedEditTool(root: string) {
 
 export function createClawdbotReadTool(base: AnyAgentTool): AnyAgentTool {
   const patched = patchToolSchemaForClaudeCompatibility(base);
+  
+  // Add encoding parameter to schema
+  const schema =
+    patched.parameters && typeof patched.parameters === "object"
+      ? (patched.parameters as Record<string, unknown>)
+      : {};
+  
+  const properties = schema.properties && typeof schema.properties === "object"
+    ? { ...(schema.properties as Record<string, unknown>) }
+    : {};
+  
+  // Add encoding parameter
+  properties.encoding = {
+    type: "string",
+    description: "Text file encoding (utf-8, gbk, gb2312, big5, shift_jis, auto). Default: auto (auto-detect)",
+    enum: ["utf-8", "gbk", "gb2312", "big5", "shift_jis", "auto"],
+  };
+  
+  const enhancedSchema = {
+    ...schema,
+    properties,
+  };
+  
   return {
     ...patched,
+    parameters: enhancedSchema,
     execute: async (toolCallId, params, signal) => {
       const normalized = normalizeToolParams(params);
       const record =
         normalized ??
         (params && typeof params === "object" ? (params as Record<string, unknown>) : undefined);
       assertRequiredParams(record, CLAUDE_PARAM_GROUPS.read, base.name);
+      
+      const filePath = typeof record?.path === "string" ? String(record.path) : "<unknown>";
+      const encoding = typeof record?.encoding === "string" 
+        ? (record.encoding as SupportedEncoding)
+        : "auto";
+      
+      // Check if file is a text file and encoding is specified
+      const isTextFile = filePath.match(/\.(txt|md|json|xml|html|css|js|ts|py|java|c|cpp|h|hpp|sh|bat|ps1|yaml|yml|toml|ini|cfg|conf|log)$/i);
+      
+      if (isTextFile && encoding !== "utf-8") {
+        try {
+          // Read file with specified encoding
+          const content = await readFileWithEncoding(filePath, encoding);
+          
+          // Return as text result
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Read text file [${encoding}]\n\n${content}`,
+              },
+            ],
+            details: { encoding, filePath },
+          } satisfies AgentToolResult<unknown>;
+        } catch (err) {
+          // Fall back to default read if encoding fails
+          const errorMsg = String(err);
+          const result = (await base.execute(
+            toolCallId,
+            normalized ?? params,
+            signal,
+          )) as AgentToolResult<unknown>;
+          
+          // Add warning about encoding failure
+          const content = Array.isArray(result.content) ? result.content : [];
+          const warningBlock = {
+            type: "text" as const,
+            text: `⚠️ Warning: Failed to read with encoding ${encoding}: ${errorMsg}\nFalling back to default encoding.\n\n`,
+          };
+          
+          return {
+            ...result,
+            content: [warningBlock, ...content],
+          };
+        }
+      }
+      
+      // Default read for non-text files or utf-8
       const result = (await base.execute(
         toolCallId,
         normalized ?? params,
         signal,
       )) as AgentToolResult<unknown>;
-      const filePath = typeof record?.path === "string" ? String(record.path) : "<unknown>";
+      
       const normalizedResult = await normalizeReadImageResult(result, filePath);
       return sanitizeToolResultImages(normalizedResult, `read:${filePath}`);
     },
