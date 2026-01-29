@@ -94,6 +94,8 @@ export function installSessionToolResultGuard(
     // This ensures content is never saved as null to the session
     if (role === "assistant") {
       const msg = message as Extract<AgentMessage, { role: "assistant" }>;
+      const contentType = msg.content === null ? "null" : msg.content === undefined ? "undefined" : Array.isArray(msg.content) ? `array(${msg.content.length})` : typeof msg.content;
+      log.info(`[guard] appendMessage called: role=assistant, content=${contentType}`);
       if (msg.content === null) {
         msg.content = [] as never; // Empty array for assistant messages with only tool_calls
         log.info(`[guard] ✓ Fixed assistant.content: null → [] before saving to session`);

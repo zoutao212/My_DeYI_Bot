@@ -32,7 +32,9 @@ function shouldEnable(params: {
   modelId?: string;
 }): boolean {
   const provider = (params.provider ?? "").trim().toLowerCase();
-  if (provider.includes("vectorengine")) return true;
+  // 对 vectorengine 禁用 thought_signature（无论使用哪个 API）
+  // 原因：供应商的 API 适配层和 Gemini 原生 API 都不支持 thought_signature
+  if (provider.includes("vectorengine")) return false;
   return false;
 }
 

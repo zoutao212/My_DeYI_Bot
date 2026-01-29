@@ -867,6 +867,25 @@ export async function runEmbeddedAttempt(
         }
 
         messagesSnapshot = activeSession.messages.slice();
+        
+        // 🔧 Fix: Normalize assistant messages with null content after LLM response
+        // Pi AI library may save assistant messages with content: null when they only have tool_calls
+        // This must be fixed immediately after prompt() to ensure session file is correct
+        let fixedAfterPrompt = 0;
+        for (let i = 0; i < activeSession.messages.length; i++) {
+          const msg = activeSession.messages[i];
+          if (msg.role === "assistant" && msg.content === null) {
+            msg.content = [] as never; // Empty array for assistant messages with only tool_calls
+            fixedAfterPrompt++;
+            log.info(`[attempt] ✓ Fixed assistant.content: null → [] after prompt (message index: ${i})`);
+          }
+        }
+        if (fixedAfterPrompt > 0) {
+          // Force re-save to persist the fix
+          activeSession.agent.replaceMessages(activeSession.messages);
+          log.info(`[attempt] Re-saved ${fixedAfterPrompt} fixed messages to session`);
+        }
+        
         sessionIdUsed = activeSession.sessionId;
         cacheTrace?.recordStage("session:after", {
           messages: messagesSnapshot,

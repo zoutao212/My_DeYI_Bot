@@ -9,6 +9,7 @@
 | **工具调用失败** | `.kiro/lessons-learned/07_AI工具使用陷阱.md` |
 | **构建后不生效** | `.kiro/lessons-learned/10_构建验证流程.md` |
 | **配置不生效** | `.kiro/lessons-learned/12_配置项验证方法论.md` |
+| **配置验证** | `.kiro/lessons-learned/19_配置项验证方法论.md` |
 | **创建 Power 失败** | `.kiro/lessons-learned/13_Kiro_Power创建规范.md` |
 | **代码与注释不一致** | `.kiro/lessons-learned/14_代码与注释一致性验证.md` |
 | **重试机制设计错误** | `.kiro/lessons-learned/15_重试机制设计最佳实践.md` |
@@ -21,8 +22,10 @@
 | **供应商 API 报错** | `.kiro/lessons-learned/11_供应商API兼容性.md` |
 | **外部 API 报错** | `.kiro/lessons-learned/16_外部API报错调试方法论.md` |
 | **修复无效** | `.kiro/lessons-learned/18_修复无效的根因分析方法论.md` |
+| **配置验证** | `.kiro/lessons-learned/19_配置项验证方法论.md` |
+| **API 格式切换** | `.kiro/lessons-learned/20_API格式切换验证方法论.md` |
 
-**关键词**：修复无效、打补丁、源头修复、重试绕过、数据流追踪
+**关键词**：修复无效、打补丁、源头修复、重试绕过、数据流追踪、配置验证、schema 验证、静默失败、API 格式切换、字段兼容性
 
 ## 使用方法
 
@@ -102,6 +105,6 @@ grepSearch -query "关键词" -includePattern ".kiro/lessons-learned/**/*.md"
 
 ---
 
-**版本：** v20260129_9  
+**版本：** v20260129_11  
 **最后更新：** 2026-01-29  
-**变更：** 新增"修复无效的根因分析方法论"（修复源头，不是症状）
+**变更：** 新增"API 格式切换验证方法论"（切换 API 格式后必须验证字段兼容性）
