@@ -3,6 +3,7 @@ import { createSubsystemLogger } from "../logging/subsystem.js";
 import { parseBooleanValue } from "../utils/boolean.js";
 import { appendRuntimeTrace } from "../gateway/runtime-log.js";
 import { callGatewayTool } from "./tools/gateway.js";
+import { validateAndLogPayload } from "./payload-validator.js";
 
 import type { StreamFn } from "@mariozechner/pi-agent-core";
 import type { Api, Model } from "@mariozechner/pi-ai";
@@ -189,6 +190,35 @@ export function createLlmCallConsoleLogger(params: {
       const nextOnPayload = (payload: unknown) => {
         if (!didLogPayload) {
           didLogPayload = true;
+          
+          // Validate payload format before sending
+          const validation = validateAndLogPayload({
+            payload,
+            provider: String(m.provider ?? base.provider ?? "unknown"),
+            modelApi: apiTag,
+            runId: base.runId,
+            sessionKey: base.sessionKey,
+          });
+
+          // Log validation errors prominently
+          if (!validation.valid) {
+            log.error(
+              `❌ PAYLOAD VALIDATION FAILED seq=${callSeq} model=${modelTag} api=${apiTag} runId=${base.runId ?? ""} errors=${validation.errors.length} warnings=${validation.warnings.length}`,
+            );
+            for (const err of validation.errors) {
+              log.error(`   ❌ ${err}`);
+            }
+          }
+          
+          if (validation.warnings.length > 0) {
+            log.warn(
+              `⚠️  PAYLOAD VALIDATION WARNINGS seq=${callSeq} model=${modelTag} api=${apiTag} runId=${base.runId ?? ""} warnings=${validation.warnings.length}`,
+            );
+            for (const warn of validation.warnings) {
+              log.warn(`   ⚠️  ${warn}`);
+            }
+          }
+
           let payloadText = "";
           try {
             payloadText = safeJsonStringify(payload);
