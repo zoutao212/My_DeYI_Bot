@@ -1,51 +1,53 @@
-# Safe File Editor
-
 ---
 name: "safe-file-editor"
 displayName: "Safe File Editor"
-description: "安全编辑大型文件和配置文件的工具，支持自动备份、Diff 预览、精确替换，避免格式错乱和数据丢失"
+description: "安全编辑大型文件和配置文件的工具使用指南，支持自动备份、Diff 预览、精确替换，避免格式错乱和数据丢失"
 keywords: ["file", "editor", "backup", "diff", "replace", "safe", "configuration"]
 author: "Clawdbot Team"
 ---
 
-## Power Type
-
-**Knowledge Base Power** - 纯文档 + Python 工具，无需 MCP 服务器配置。
+# Safe File Editor
 
 ## 概述
 
-Safe File Editor 是一个专门用于安全编辑大型文件和配置文件的 Python 工具。它提供：
+Safe File Editor 是一个专门用于安全编辑大型文件和配置文件的 Python 工具。本 Power 提供完整的使用指南和最佳实践。
 
+**核心特性**：
 - **自动备份**：每次修改前自动创建时间戳备份
 - **Diff 预览**：修改前可以预览差异
 - **精确替换**：支持按行号、关键字、锚点定位
 - **原子写入**：避免写入中断导致文件损坏
 - **格式保护**：自动检测并保持行尾符（CRLF/LF）
 
-**重要提示**：这是一个 Knowledge Base Power，提供文档和 Python 工具。不需要 MCP 服务器，不需要 mcp.json 文件。
-
-## Available Tools
-
-本 Power 包含以下 Python 工具：
-
-| 工具 | 文件 | 用途 |
-|------|------|------|
-| SafeFileEditor | `python/safe_file_editor.py` | Python API 主类 |
-| quick_replace | `python/quick_replace.py` | CLI 快速替换工具 |
-| precision_editor | `python/precision_editor.py` | 精确编辑器（v4.0） |
-| diff_visualizer | `python/diff_visualizer.py` | Diff 可视化工具 |
-
 ## Available Steering Files
 
-- **editing-config-files.md** - 编辑配置文件的详细工作流指南
+- **editing-config-files.md** - 编辑配置文件的详细工作流指南（5 步流程 + 完整示例）
+
+## 工具位置
+
+Safe File Editor 的 Python 工具位于项目的 Skill 目录：
+
+```
+.kiro/skills/safe_file_editor/
+├── safe_file_editor.py      # Python API 主类
+├── quick_replace.py          # CLI 快速替换工具
+├── precision_editor.py       # 精确编辑器（v4.0）
+└── diff_visualizer.py        # Diff 可视化工具
+```
 
 ## 为什么需要这个工具？
 
 ### 问题场景
 
 1. **IDE 工具限制**：某些文件（如工作区外的配置文件）无法直接编辑
+   - 例如：`C:\Users\zouta\.clawdbot\clawdbot.json`
+   
 2. **格式错乱风险**：直接修改 JSON/YAML 配置文件容易导致格式错误
+   - 缺少逗号、引号不匹配、缩进错误
+   
 3. **大文件编辑**：大型文件（>1000 行）修改容易出错
+   - 难以定位、容易误改
+   
 4. **无法回滚**：修改后发现错误，难以恢复原始内容
 
 ### 解决方案
@@ -62,12 +64,7 @@ Safe File Editor 提供：
 
 ```python
 import sys
-import os
-
-# 获取 Power 目录路径
-power_dir = os.path.join(os.getcwd(), 'powers', 'safe-file-editor', 'python')
-sys.path.insert(0, power_dir)
-
+sys.path.insert(0, '.kiro/skills/safe_file_editor')
 from safe_file_editor import SafeFileEditor
 
 # 创建编辑器实例
@@ -103,27 +100,27 @@ editor.replace_precisely(
 
 ```bash
 # 按行号替换
-python powers/safe-file-editor/python/quick_replace.py by-lines \\
+python .kiro/skills/safe_file_editor/quick_replace.py by-lines \
     file.json 10 15 "new content" --verify-vars "key1,key2" -y
 
 # 按关键字替换
-python powers/safe-file-editor/python/quick_replace.py by-keywords \\
-    file.json "primary_keyword" \\
-    --context "context1,context2" \\
-    --end "end_keyword" \\
-    --code "new content" \\
+python .kiro/skills/safe_file_editor/quick_replace.py by-keywords \
+    file.json "primary_keyword" \
+    --context "context1,context2" \
+    --end "end_keyword" \
+    --code "new content" \
     --verify-vars "key1,key2" -y
 
 # 从文件读取新内容（推荐用于大段内容）
-python powers/safe-file-editor/python/quick_replace.py by-lines \\
+python .kiro/skills/safe_file_editor/quick_replace.py by-lines \
     file.json 10 15 --code-file "new_content.txt" -y
 
 # 提取代码块
-python powers/safe-file-editor/python/quick_replace.py extract-lines \\
+python .kiro/skills/safe_file_editor/quick_replace.py extract-lines \
     file.json 10 15 --out "extracted.txt"
 
 # 删除代码块
-python powers/safe-file-editor/python/quick_replace.py delete-range \\
+python .kiro/skills/safe_file_editor/quick_replace.py delete-range \
     file.json 10 15 -y
 ```
 
@@ -137,12 +134,7 @@ python powers/safe-file-editor/python/quick_replace.py delete-range \\
 
 ```python
 import sys
-import os
-
-# 添加 Power Python 路径
-power_dir = os.path.join(os.getcwd(), 'powers', 'safe-file-editor', 'python')
-sys.path.insert(0, power_dir)
-
+sys.path.insert(0, '.kiro/skills/safe_file_editor')
 from safe_file_editor import SafeFileEditor
 
 # 1. 读取文件，查看行号
@@ -171,13 +163,8 @@ editor.replace_by_line_numbers(
 
 ```python
 import sys
-import os
 import json
-
-# 添加 Power Python 路径
-power_dir = os.path.join(os.getcwd(), 'powers', 'safe-file-editor', 'python')
-sys.path.insert(0, power_dir)
-
+sys.path.insert(0, '.kiro/skills/safe_file_editor')
 from safe_file_editor import SafeFileEditor
 
 # 1. 读取并解析 JSON
@@ -204,12 +191,7 @@ with open('config.json', 'w', encoding='utf-8') as f:
 
 ```python
 import sys
-import os
-
-# 添加 Power Python 路径
-power_dir = os.path.join(os.getcwd(), 'powers', 'safe-file-editor', 'python')
-sys.path.insert(0, power_dir)
-
+sys.path.insert(0, '.kiro/skills/safe_file_editor')
 from safe_file_editor import SafeFileEditor
 
 editor = SafeFileEditor('config.json')
@@ -358,40 +340,32 @@ ls -t *.bak_* | tail -n +6 | xargs rm
 - Python 3.7+
 - 依赖库：无（纯 Python 标准库）
 
-### 安装
+### 工具位置
 
-工具已包含在 Power 中，无需额外安装：
+工具已包含在项目的 Skill 目录中：
 
-```bash
-# 验证安装
-python powers/safe-file-editor/python/quick_replace.py --help
+```
+.kiro/skills/safe_file_editor/
+├── safe_file_editor.py      # Python API 主类
+├── quick_replace.py          # CLI 快速替换工具
+├── precision_editor.py       # 精确编辑器（v4.0）
+├── diff_visualizer.py        # Diff 可视化工具
+└── SKILL.md                  # 完整文档
 ```
 
-### 路径配置
+### 验证安装
 
-在 Python 脚本中使用时，添加 Power 路径：
-
-```python
-import sys
-import os
-
-# 方法 1: 使用相对路径（推荐）
-power_dir = os.path.join(os.getcwd(), 'powers', 'safe-file-editor', 'python')
-sys.path.insert(0, power_dir)
-
-# 方法 2: 使用绝对路径
-sys.path.insert(0, 'D:/Git_GitHub/clawdbot/powers/safe-file-editor/python')
-
-from safe_file_editor import SafeFileEditor
+```bash
+# 验证工具可用
+python .kiro/skills/safe_file_editor/quick_replace.py --help
 ```
 
 ## 参考资料
 
-- **完整文档**：本 POWER.md 文件
-- **工作流指南**：`steering/editing-config-files.md`
-- **源代码**：`python/safe_file_editor.py`
-- **CLI 工具**：`python/quick_replace.py`
-- **原始 Skill**：`.kiro/skills/safe_file_editor/SKILL.md`（参考）
+- **工作流指南**：`steering/editing-config-files.md`（详细的 5 步工作流程）
+- **完整文档**：`.kiro/skills/safe_file_editor/SKILL.md`
+- **源代码**：`.kiro/skills/safe_file_editor/safe_file_editor.py`
+- **CLI 工具**：`.kiro/skills/safe_file_editor/quick_replace.py`
 
 ## 版本历史
 

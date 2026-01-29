@@ -110,12 +110,12 @@ function renderRunPanelInChat(props: ChatProps) {
   });
 
   return html`
-    <details class="details" style="margin-top: 8px;" open>
+    <details class="details debug-panel" style="margin-top: 8px;" open>
       <summary class="details-summary">
-        <span class="pill">运行事件流</span>
-        <span class="muted" style="margin-left: 8px;">llm/tool/patch（不依赖最终回复）</span>
+        <span class="pill">🔍 运行事件流（调试模式）</span>
+        <span class="muted" style="margin-left: 8px;">开发者调试工具</span>
       </summary>
-      <div class="details-body">
+      <div class="details-body" style="background: var(--secondary); padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border);">
         <div class="row" style="justify-content: flex-end; margin-bottom: 8px;">
           <button class="btn" type="button" ?disabled=${!props.onClearRunEvents} @click=${() => props.onClearRunEvents?.()}>
             清空

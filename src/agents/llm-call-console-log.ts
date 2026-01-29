@@ -257,13 +257,38 @@ export function createLlmCallConsoleLogger(params: {
 
       const finishOk = () => {
         const durationMs = Date.now() - startedAt;
+        
+        // 提取关键信息
+        const summary = responseSummary.chunks > 0 ? responseSummary : undefined;
+        let statusInfo = "✅ 成功";
+        let toolsUsed = 0;
+        let stopReason = "";
+        
+        if (summary && summary.samples.length > 0) {
+          const lastSample = summary.samples[summary.samples.length - 1] as any;
+          if (lastSample?.choices?.[0]?.finish_reason) {
+            stopReason = lastSample.choices[0].finish_reason;
+          }
+          // 检查是否使用了工具
+          if (lastSample?.choices?.[0]?.message?.tool_calls) {
+            toolsUsed = lastSample.choices[0].message.tool_calls.length;
+          }
+        }
+        
+        const infoMsg = [
+          statusInfo,
+          `耗时 ${(durationMs / 1000).toFixed(1)}s`,
+          stopReason ? `停止原因: ${stopReason}` : "",
+          toolsUsed > 0 ? `🔧 调用工具 ${toolsUsed} 个` : "",
+        ].filter(Boolean).join(" · ");
+        
         log.info(
           `← LLM回复 seq=${callSeq} ok durationMs=${durationMs} model=${modelTag} api=${apiTag} runId=${base.runId ?? ""} sessionKey=${base.sessionKey ?? ""}`,
         );
 
         void injectLlmProgress({
           sessionKey: base.sessionKey,
-          message: `← seq=${callSeq} ok durationMs=${durationMs} model=${modelTag} api=${apiTag} runId=${base.runId ?? ""}`,
+          message: `[LLM] ${infoMsg}`,
         });
 
         void appendRuntimeTrace({
@@ -276,19 +301,22 @@ export function createLlmCallConsoleLogger(params: {
             durationMs,
             model: modelTag,
             api: apiTag,
-            responseSummary: responseSummary.chunks > 0 ? responseSummary : undefined,
+            responseSummary: summary,
           },
         });
       };
       const finishErr = (err: unknown) => {
         const durationMs = Date.now() - startedAt;
+        const errorMsg = formatError(err);
+        const shortError = truncate(errorMsg, 100);
+        
         log.warn(
-          `← LLM回复 seq=${callSeq} error durationMs=${durationMs} model=${modelTag} api=${apiTag} runId=${base.runId ?? ""} sessionKey=${base.sessionKey ?? ""} err=${truncate(formatError(err), 800)}`,
+          `← LLM回复 seq=${callSeq} error durationMs=${durationMs} model=${modelTag} api=${apiTag} runId=${base.runId ?? ""} sessionKey=${base.sessionKey ?? ""} err=${truncate(errorMsg, 800)}`,
         );
 
         void injectLlmProgress({
           sessionKey: base.sessionKey,
-          message: `← seq=${callSeq} error durationMs=${durationMs} model=${modelTag} api=${apiTag} runId=${base.runId ?? ""} err=${truncate(formatError(err), 180)}`,
+          message: `[LLM] ❌ 失败 · 耗时 ${(durationMs / 1000).toFixed(1)}s · ${shortError}`,
         });
 
         void appendRuntimeTrace({

@@ -144,7 +144,8 @@ export function renderLlmApprovalPrompt(state: AppViewState) {
   const remainingMs = active.expiresAtMs - Date.now();
   const remaining = remainingMs > 0 ? `expires in ${formatRemaining(remainingMs)}` : "expired";
   const queueCount = state.llmApprovalQueue.length;
-  const showFull = Boolean(state.llmApprovalShowFullPayload);
+  // 默认展开显示完整内容
+  const showFull = state.llmApprovalShowFullPayload !== false; // 默认 true
   const displayMode = state.llmApprovalDisplayMode;
   const isZh = state.settings.uiLanguage === "zh";
   const l10n = getUiL10n(state.settings.uiLanguage);

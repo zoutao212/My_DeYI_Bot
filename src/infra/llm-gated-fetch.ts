@@ -149,8 +149,13 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
   if (typeof original !== "function") return;
 
   const ATTEMPT_WINDOW_MS = 5 * 60_000;
-  const MAX_ATTEMPTS_PER_KEY = 2;
+  const MAX_ATTEMPTS_PER_KEY = 1; // 修改为 1 次重试（总共 2 次请求）
+  const RETRY_DELAY_MS = 1000; // 重试前等待 1 秒
   const attempts = new Map<string, { firstAtMs: number; count: number }>();
+  
+  // 添加请求队列，避免并发请求
+  let lastRequestTime = 0;
+  const MIN_REQUEST_INTERVAL_MS = 1000; // 最小请求间隔 1 秒
 
   function computeAttemptKey(payload: LlmApprovalRequestPayload): string {
     const stable = JSON.stringify({
@@ -175,6 +180,15 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
   }
 
   const wrapped: typeof fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    // 添加请求间隔控制，避免并发请求
+    const now = Date.now();
+    const timeSinceLastRequest = now - lastRequestTime;
+    if (timeSinceLastRequest < MIN_REQUEST_INTERVAL_MS) {
+      const waitTime = MIN_REQUEST_INTERVAL_MS - timeSinceLastRequest;
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+    lastRequestTime = Date.now();
+    
     const ctx = getLlmRequestContext();
     if (!ctx) {
       return await original(input, init);
@@ -188,10 +202,18 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
     pruneAttempts();
     const attemptKey = computeAttemptKey(payload);
     const attemptEntry = attempts.get(attemptKey);
-    if (attemptEntry && attemptEntry.count >= MAX_ATTEMPTS_PER_KEY) {
+    
+    // 检查是否超过重试次数
+    if (attemptEntry && attemptEntry.count > MAX_ATTEMPTS_PER_KEY) {
       throw new Error(
-        `LLM_REQUEST_RETRY_LIMIT: exceeded max attempts (${MAX_ATTEMPTS_PER_KEY}) for same request in ${ATTEMPT_WINDOW_MS}ms window`,
+        `LLM_REQUEST_RETRY_LIMIT: 已超过最大重试次数（${MAX_ATTEMPTS_PER_KEY}），请求在 ${ATTEMPT_WINDOW_MS}ms 窗口内被阻断`,
       );
+    }
+    
+    // 如果是重试请求，等待 1 秒
+    if (attemptEntry && attemptEntry.count > 0) {
+      console.warn(`LLM 请求重试中，等待 ${RETRY_DELAY_MS}ms...`);
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
     }
 
     const approvals = loadLlmApprovals();
@@ -212,10 +234,10 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       throw new Error("LLM_REQUEST_DENIED: approval required");
     }
 
-    const now = Date.now();
+    const now2 = Date.now();
     const current = attempts.get(attemptKey);
     if (!current) {
-      attempts.set(attemptKey, { firstAtMs: now, count: 1 });
+      attempts.set(attemptKey, { firstAtMs: now2, count: 1 });
     } else {
       attempts.set(attemptKey, { firstAtMs: current.firstAtMs, count: current.count + 1 });
     }

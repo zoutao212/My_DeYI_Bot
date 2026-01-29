@@ -1395,6 +1395,33 @@
    Exec Approval Modal
    =========================================== */
 
+/* 运行事件流调试面板样式 */
+.debug-panel {
+  position: relative;
+  z-index: 10;
+  margin-bottom: 12px;
+}
+
+.debug-panel .details-summary {
+  background: var(--secondary);
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: all var(--duration-fast) ease;
+}
+
+.debug-panel .details-summary:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+.debug-panel[open] .details-summary {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  border-bottom-color: transparent;
+}
+
 .exec-approval-overlay {
   position: fixed;
   inset: 0;
@@ -1404,7 +1431,7 @@
   align-items: center;
   justify-content: center;
   padding: 24px;
-  z-index: 200;
+  z-index: 300; /* 提高层级，避免与运行事件流重叠 */
 }
 
 .exec-approval-card {
