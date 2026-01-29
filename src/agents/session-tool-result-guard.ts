@@ -1,8 +1,11 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { SessionManager } from "@mariozechner/pi-coding-agent";
 
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { makeMissingToolResult } from "./session-transcript-repair.js";
 import { emitSessionTranscriptUpdate } from "../sessions/transcript-events.js";
+
+const log = createSubsystemLogger("agent/guard");
 
 type ToolCall = { id: string; name?: string };
 
@@ -86,6 +89,16 @@ export function installSessionToolResultGuard(
 
   const guardedAppend = (message: AgentMessage) => {
     const role = (message as { role?: unknown }).role;
+
+    // 🔧 Fix: Normalize assistant messages with null content (OpenAI API requirement)
+    // This ensures content is never saved as null to the session
+    if (role === "assistant") {
+      const msg = message as Extract<AgentMessage, { role: "assistant" }>;
+      if (msg.content === null) {
+        msg.content = [] as never; // Empty array for assistant messages with only tool_calls
+        log.info(`[guard] ✓ Fixed assistant.content: null → [] before saving to session`);
+      }
+    }
 
     if (role === "toolResult") {
       const id = extractToolResultId(message as Extract<AgentMessage, { role: "toolResult" }>);

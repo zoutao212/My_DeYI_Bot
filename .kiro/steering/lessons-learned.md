@@ -10,11 +10,19 @@
 | **构建后不生效** | `.kiro/lessons-learned/10_构建验证流程.md` |
 | **配置不生效** | `.kiro/lessons-learned/12_配置项验证方法论.md` |
 | **创建 Power 失败** | `.kiro/lessons-learned/13_Kiro_Power创建规范.md` |
+| **代码与注释不一致** | `.kiro/lessons-learned/14_代码与注释一致性验证.md` |
+| **重试机制设计错误** | `.kiro/lessons-learned/15_重试机制设计最佳实践.md` |
+| **外部 API 报错调试** | `.kiro/lessons-learned/16_外部API报错调试方法论.md` |
+| **分析后不修复** | `.kiro/lessons-learned/17_分析到修复的完整闭环.md` |
 | **检索不到结果** | `.kiro/lessons-learned/01_记忆检索系统.md` |
 | **数据库设计** | `.kiro/lessons-learned/02_数据库设计.md` |
 | **批处理脚本问题** | `.kiro/lessons-learned/03_脚本和路径.md` |
 | **前端不更新** | `.kiro/lessons-learned/08_前端调试.md` |
 | **供应商 API 报错** | `.kiro/lessons-learned/11_供应商API兼容性.md` |
+| **外部 API 报错** | `.kiro/lessons-learned/16_外部API报错调试方法论.md` |
+| **修复无效** | `.kiro/lessons-learned/18_修复无效的根因分析方法论.md` |
+
+**关键词**：修复无效、打补丁、源头修复、重试绕过、数据流追踪
 
 ## 使用方法
 
@@ -33,6 +41,28 @@ grepSearch -query "关键词" -includePattern ".kiro/lessons-learned/**/*.md"
 激活 `lessons-learned` Power，使用关键词搜索和按需加载。
 
 ## 最重要的经验（必读）
+
+### 0. 分析后必须立即修复 ⚠️ **最重要！**
+
+**问题**：找到了根本原因，但停留在分析阶段，没有修复代码
+
+**错误做法**：
+- 写了详细的分析报告
+- 创建了对比文档
+- 但没有修复代码
+
+**正确做法**：
+1. 分析问题 → 找到根因
+2. **立即修复代码**（不要停留在分析）
+3. 构建验证
+4. 创建修复文档
+
+**教训**：
+- 分析是手段，修复才是目的
+- 用户期望的是"解决问题"，不是"分析问题"
+- 找到问题后，立即动手修复
+
+**详见**：`.kiro/lessons-learned/17_分析到修复的完整闭环.md`
 
 ### 1. 工具调用必须验证 ⚠️
 
@@ -72,6 +102,6 @@ grepSearch -query "关键词" -includePattern ".kiro/lessons-learned/**/*.md"
 
 ---
 
-**版本：** v20260129_5  
+**版本：** v20260129_9  
 **最后更新：** 2026-01-29  
-**变更：** 拆分为多个文件，只保留索引
+**变更：** 新增"修复无效的根因分析方法论"（修复源头，不是症状）

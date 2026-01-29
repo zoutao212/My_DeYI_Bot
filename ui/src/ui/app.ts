@@ -187,7 +187,7 @@ export class ClawdbotApp extends LitElement {
   @state() llmApprovalQueue: import("./controllers/llm-approval").LlmApprovalRequest[] = [];
   @state() llmApprovalBusy = false;
   @state() llmApprovalError: string | null = null;
-  @state() llmApprovalShowFullPayload = false;
+  @state() llmApprovalShowFullPayload = true; // 默认展开显示完整内容
   @state() llmApprovalDisplayMode: "pretty" | "raw" = "pretty";
 
   @state() configLoading = false;

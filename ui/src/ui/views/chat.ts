@@ -94,73 +94,8 @@ function formatTs(ts: number): string {
 }
 
 function renderRunPanelInChat(props: ChatProps) {
-  const events = Array.isArray(props.runEvents) ? props.runEvents : [];
-  const scoped = events.filter((evt) => (evt.sessionKey ?? "").trim() === props.sessionKey);
-  if (scoped.length === 0) return nothing;
-
-  const byRun = new Map<string, typeof scoped>();
-  for (const evt of scoped) {
-    const id = (evt.runId ?? "").trim() || "(no-runId)";
-    byRun.set(id, [...(byRun.get(id) ?? []), evt]);
-  }
-  const runIds = Array.from(byRun.keys()).sort((a, b) => {
-    const aLast = (byRun.get(a) ?? []).at(0)?.ts ?? 0;
-    const bLast = (byRun.get(b) ?? []).at(0)?.ts ?? 0;
-    return bLast - aLast;
-  });
-
-  return html`
-    <details class="details debug-panel" style="margin-top: 8px;" open>
-      <summary class="details-summary">
-        <span class="pill">🔍 运行事件流（调试模式）</span>
-        <span class="muted" style="margin-left: 8px;">开发者调试工具</span>
-      </summary>
-      <div class="details-body" style="background: var(--secondary); padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border);">
-        <div class="row" style="justify-content: flex-end; margin-bottom: 8px;">
-          <button class="btn" type="button" ?disabled=${!props.onClearRunEvents} @click=${() => props.onClearRunEvents?.()}>
-            清空
-          </button>
-        </div>
-        <div style="max-height: 320px; overflow: auto;">
-        ${runIds.map((runId) => {
-          const list = (byRun.get(runId) ?? []).slice().sort((a, b) => b.ts - a.ts);
-          const head = list[0];
-          const title = head ? `${runId}（${formatTs(head.ts)}）` : runId;
-          return html`
-            <details class="details" open>
-              <summary class="details-summary">${title}</summary>
-              <div class="details-body">
-                ${list.map((evt) => {
-                  const ts = formatTs(evt.ts);
-                  const kind = (evt.kind ?? "").trim();
-                  return html`
-                    <details class="details">
-                      <summary class="details-summary">
-                        <span
-                          class="mono"
-                          style="font-size: 12px; opacity: 0.85; display: inline-block; width: 160px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
-                        >
-                          ${ts}
-                        </span>
-                        <span
-                          class="mono"
-                          style="font-size: 12px; display: inline-block; max-width: calc(100% - 180px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
-                        >
-                          ${kind}
-                        </span>
-                      </summary>
-                      <pre class="codeblock" style="max-height: 260px; overflow: auto;">${safeJson(evt.payload)}</pre>
-                    </details>
-                  `;
-                })}
-              </div>
-            </details>
-          `;
-        })}
-        </div>
-      </div>
-    </details>
-  `;
+  // 运行事件流已隐藏，详细日志写入 runtimelog 目录
+  return nothing;
 }
 
 function renderCompactionIndicator(status: CompactionIndicatorStatus | null | undefined) {

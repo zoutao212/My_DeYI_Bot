@@ -33,12 +33,18 @@ export function stripEnvelope(text: string): string {
   return text.slice(match[0].length);
 }
 
+const MAX_TEXT_LENGTH = 2000; // 最大显示长度
+
 export function extractText(message: unknown): string | null {
   const m = message as Record<string, unknown>;
   const role = typeof m.role === "string" ? m.role : "";
   const content = m.content;
   if (typeof content === "string") {
     const processed = role === "assistant" ? stripThinkingTags(content) : stripEnvelope(content);
+    // 限制长度，避免显示完整文件内容
+    if (processed.length > MAX_TEXT_LENGTH) {
+      return processed.slice(0, MAX_TEXT_LENGTH) + "\n\n... (内容过长，已截断)";
+    }
     return processed;
   }
   if (Array.isArray(content)) {
@@ -52,11 +58,19 @@ export function extractText(message: unknown): string | null {
     if (parts.length > 0) {
       const joined = parts.join("\n");
       const processed = role === "assistant" ? stripThinkingTags(joined) : stripEnvelope(joined);
+      // 限制长度，避免显示完整文件内容
+      if (processed.length > MAX_TEXT_LENGTH) {
+        return processed.slice(0, MAX_TEXT_LENGTH) + "\n\n... (内容过长，已截断)";
+      }
       return processed;
     }
   }
   if (typeof m.text === "string") {
     const processed = role === "assistant" ? stripThinkingTags(m.text) : stripEnvelope(m.text);
+    // 限制长度，避免显示完整文件内容
+    if (processed.length > MAX_TEXT_LENGTH) {
+      return processed.slice(0, MAX_TEXT_LENGTH) + "\n\n... (内容过长，已截断)";
+    }
     return processed;
   }
   return null;

@@ -546,6 +546,28 @@ export async function sanitizeSessionHistory(params: {
   policy?: TranscriptPolicy;
 }): Promise<AgentMessage[]> {
   // Keep docs/reference/transcript-hygiene.md in sync with any logic changes here.
+  
+  // 🔧 Fix: Normalize assistant messages with null content (OpenAI API requirement)
+  // This must happen BEFORE any other processing to ensure the fix is persisted
+  let fixedCount = 0;
+  for (let i = 0; i < params.messages.length; i++) {
+    const msg = params.messages[i];
+    if (msg.role === "assistant") {
+      const contentType = msg.content === null ? "null" : Array.isArray(msg.content) ? `array(${msg.content.length})` : typeof msg.content;
+      log.info(`[sanitize] message[${i}]: role=assistant, content=${contentType}`);
+      if (msg.content === null) {
+        msg.content = [] as never; // Empty array for assistant messages with only tool_calls
+        fixedCount++;
+        log.info(`✓ Fixed assistant.content: null → [] (message index: ${i}, sessionId: ${params.sessionId})`);
+      } else if (Array.isArray(msg.content) && msg.content.length === 0) {
+        log.info(`[sanitize] message[${i}]: content is already empty array (good!)`);
+      }
+    }
+  }
+  if (fixedCount === 0) {
+    log.info(`[sanitize] No null content found in ${params.messages.length} messages (sessionId: ${params.sessionId})`);
+  }
+  
   const policy =
     params.policy ??
     resolveTranscriptPolicy({

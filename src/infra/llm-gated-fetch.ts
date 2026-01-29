@@ -149,9 +149,9 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
   if (typeof original !== "function") return;
 
   const ATTEMPT_WINDOW_MS = 5 * 60_000;
-  const MAX_ATTEMPTS_PER_KEY = 1; // 修改为 1 次重试（总共 2 次请求）
+  const MAX_ATTEMPTS_PER_KEY = 1; // 最多 1 次重试（总共 2 次请求：1 次原始 + 1 次重试）
   const RETRY_DELAY_MS = 1000; // 重试前等待 1 秒
-  const attempts = new Map<string, { firstAtMs: number; count: number }>();
+  const attempts = new Map<string, { firstAtMs: number; failureCount: number }>();
   
   // 添加请求队列，避免并发请求
   let lastRequestTime = 0;
@@ -203,16 +203,16 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
     const attemptKey = computeAttemptKey(payload);
     const attemptEntry = attempts.get(attemptKey);
     
-    // 检查是否超过重试次数
-    if (attemptEntry && attemptEntry.count > MAX_ATTEMPTS_PER_KEY) {
+    // 检查是否超过重试次数（只计算失败次数）
+    if (attemptEntry && attemptEntry.failureCount > MAX_ATTEMPTS_PER_KEY) {
       throw new Error(
-        `LLM_REQUEST_RETRY_LIMIT: 已超过最大重试次数（${MAX_ATTEMPTS_PER_KEY}），请求在 ${ATTEMPT_WINDOW_MS}ms 窗口内被阻断`,
+        `LLM_REQUEST_RETRY_LIMIT: 已超过最大重试次数（${MAX_ATTEMPTS_PER_KEY}），请求被阻断`,
       );
     }
     
     // 如果是重试请求，等待 1 秒
-    if (attemptEntry && attemptEntry.count > 0) {
-      console.warn(`LLM 请求重试中，等待 ${RETRY_DELAY_MS}ms...`);
+    if (attemptEntry && attemptEntry.failureCount > 0) {
+      console.warn(`LLM 请求重试中（第 ${attemptEntry.failureCount} 次失败后重试），等待 ${RETRY_DELAY_MS}ms...`);
       await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
     }
 
@@ -222,26 +222,81 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       const res = await params.requestApproval({ request: payload, timeoutMs: 120_000 });
       const decision = res.decision;
       if (decision === "allow-once" || decision === "allow-always") {
-        const now = Date.now();
-        const current = attempts.get(attemptKey);
-        if (!current) {
-          attempts.set(attemptKey, { firstAtMs: now, count: 1 });
-        } else {
-          attempts.set(attemptKey, { firstAtMs: current.firstAtMs, count: current.count + 1 });
-        }
-        return await original(input, init);
+        // 审批通过，执行请求
+        return await executeRequestWithRetry(attemptKey, input, init);
       }
       throw new Error("LLM_REQUEST_DENIED: approval required");
     }
 
-    const now2 = Date.now();
-    const current = attempts.get(attemptKey);
-    if (!current) {
-      attempts.set(attemptKey, { firstAtMs: now2, count: 1 });
-    } else {
-      attempts.set(attemptKey, { firstAtMs: current.firstAtMs, count: current.count + 1 });
+    // 无需审批，直接执行请求
+    return await executeRequestWithRetry(attemptKey, input, init);
+  };
+
+  // 执行请求并处理重试逻辑
+  async function executeRequestWithRetry(
+    attemptKey: string,
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> {
+    // 修复 payload 中的 content: null 问题（在发送前修复）
+    if (init?.body && typeof init.body === "string") {
+      try {
+        const bodyJson = JSON.parse(init.body);
+        if (bodyJson && typeof bodyJson === "object" && Array.isArray(bodyJson.messages)) {
+          let fixed = false;
+          for (let i = 0; i < bodyJson.messages.length; i++) {
+            const msg = bodyJson.messages[i];
+            if (msg && msg.role === "assistant" && msg.content === null) {
+              msg.content = "";
+              fixed = true;
+              console.warn(`[llm-gated-fetch] 修复 content: null → "" (message[${i}])`);
+            }
+          }
+          if (fixed) {
+            // 重新序列化修复后的 body
+            init = { ...init, body: JSON.stringify(bodyJson) };
+          }
+        }
+      } catch (error) {
+        // 解析失败，忽略（不是 JSON body）
+      }
     }
-    return await original(input, init);
+    
+    try {
+      const response = await original(input, init);
+      
+      // 请求成功（HTTP 状态码 2xx），清除失败计数
+      if (response.ok) {
+        attempts.delete(attemptKey);
+      } else {
+        // 请求失败（HTTP 状态码非 2xx），增加失败计数
+        const now = Date.now();
+        const current = attempts.get(attemptKey);
+        if (!current) {
+          attempts.set(attemptKey, { firstAtMs: now, failureCount: 1 });
+        } else {
+          attempts.set(attemptKey, { 
+            firstAtMs: current.firstAtMs, 
+            failureCount: current.failureCount + 1 
+          });
+        }
+      }
+      
+      return response;
+    } catch (error) {
+      // 请求异常（网络错误等），增加失败计数
+      const now = Date.now();
+      const current = attempts.get(attemptKey);
+      if (!current) {
+        attempts.set(attemptKey, { firstAtMs: now, failureCount: 1 });
+      } else {
+        attempts.set(attemptKey, { 
+          firstAtMs: current.firstAtMs, 
+          failureCount: current.failureCount + 1 
+        });
+      }
+      throw error;
+    }
   };
 
   globalThis.fetch = wrapped;

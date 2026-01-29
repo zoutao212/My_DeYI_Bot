@@ -347,6 +347,29 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
           missingPaths: [],
         };
         walkAndPatch({ value: payload, path: "$", report });
+        
+        // Safety check: Verify no assistant messages with null content remain
+        // (should have been fixed in sanitizeSessionHistory)
+        if (payload && typeof payload === "object" && "messages" in payload) {
+          const messages = (payload as Record<string, unknown>).messages;
+          if (Array.isArray(messages)) {
+            for (let i = 0; i < messages.length; i++) {
+              const msg = messages[i];
+              if (msg && typeof msg === "object") {
+                const msgRec = msg as Record<string, unknown>;
+                const role = typeof msgRec.role === "string" ? msgRec.role.trim().toLowerCase() : "";
+                if (role === "assistant" && msgRec.content === null) {
+                  log.error(`❌ BUG: assistant.content is still null after sanitization (message index: ${i})`);
+                  // Emergency fix to prevent API failure
+                  const hadToolCalls = Boolean(msgRec.tool_calls || msgRec.toolCalls);
+                  msgRec.content = "";
+                  log.info(`[payload] Fixed content: null → "" (index: ${i}, hasToolCalls: ${hadToolCalls})`);
+                }
+              }
+            }
+          }
+        }
+        
         const summary = {
           ...base,
           modelApi: (model as Model<Api>)?.api,

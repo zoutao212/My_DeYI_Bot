@@ -134,7 +134,8 @@ function tryPrettyOpenAiPayload(raw: string, isZh: boolean): string | null {
 }
 
 function collapseBlankLines(text: string): string {
-  return text.replace(/\n{3,}/g, "\n\n");
+  // 最多保留 2 个连续空行，避免过度压缩
+  return text.replace(/\n{4,}/g, "\n\n\n");
 }
 
 export function renderLlmApprovalPrompt(state: AppViewState) {
@@ -144,9 +145,9 @@ export function renderLlmApprovalPrompt(state: AppViewState) {
   const remainingMs = active.expiresAtMs - Date.now();
   const remaining = remainingMs > 0 ? `expires in ${formatRemaining(remainingMs)}` : "expired";
   const queueCount = state.llmApprovalQueue.length;
-  // 默认展开显示完整内容
+  // 默认展开显示完整内容，美化格式
   const showFull = state.llmApprovalShowFullPayload !== false; // 默认 true
-  const displayMode = state.llmApprovalDisplayMode;
+  const displayMode = state.llmApprovalDisplayMode ?? "pretty"; // 默认 pretty
   const isZh = state.settings.uiLanguage === "zh";
   const l10n = getUiL10n(state.settings.uiLanguage);
 
