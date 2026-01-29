@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "socket": {
+    "path": "C:\\Users\\zouta\\.clawdbot\\exec-approvals.sock",
+    "token": "Nw0cfqINjvXhPJdq2V7Z1z3mzvGdbkj4"
+  },
+  "defaults": {},
+  "agents": {}
+}

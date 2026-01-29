@@ -1,0 +1,142 @@
+{
+  "providers": {
+    "minimax": {
+      "baseUrl": "https://api.minimax.io/anthropic",
+      "api": "anthropic-messages",
+      "models": [
+        {
+          "id": "MiniMax-M2.1",
+          "name": "MiniMax M2.1",
+          "reasoning": false,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 15,
+            "output": 60,
+            "cacheRead": 2,
+            "cacheWrite": 10
+          },
+          "contextWindow": 200000,
+          "maxTokens": 8192
+        },
+        {
+          "id": "MiniMax-VL-01",
+          "name": "MiniMax VL 01",
+          "reasoning": false,
+          "input": [
+            "text",
+            "image"
+          ],
+          "cost": {
+            "input": 15,
+            "output": 60,
+            "cacheRead": 2,
+            "cacheWrite": 10
+          },
+          "contextWindow": 200000,
+          "maxTokens": 8192
+        }
+      ],
+      "apiKey": "MINIMAX_API_KEY"
+    },
+    "moonshot": {
+      "baseUrl": "https://api.moonshot.ai/v1",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "kimi-k2-0905-preview",
+          "name": "Kimi K2 0905 Preview",
+          "reasoning": false,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 256000,
+          "maxTokens": 8192
+        }
+      ],
+      "apiKey": "MOONSHOT_API_KEY"
+    },
+    "vectorengine": {
+      "baseUrl": "https://api.vectorengine.ai/v1beta",
+      "apiKey": "sk-tXQ16QQ2vWLuWa2bFHOdmbI6YE7yNAQxqFmsC52AgvmBQ0KW",
+      "auth": "api-key",
+      "api": "google-generative-ai",
+      "models": [
+        {
+          "id": "gemini-3-flash-preview",
+          "name": "gemini-3-flash-preview",
+          "api": "google-generative-ai",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 2000000,
+          "maxTokens": 8192
+        }
+      ]
+    },
+    "xiaoxinapi": {
+      "baseUrl": "https://ai.xiaoxinapi.com/v1beta",
+      "apiKey": "sk-qfn4FkAfS39LNHrJwrENoryk56noJIO8JU73a3udXrIw0QGF",
+      "auth": "api-key",
+      "api": "google-generative-ai",
+      "models": [
+        {
+          "id": "[business]gemini-3-pro-preview",
+          "name": "[business]gemini-3-pro-preview",
+          "api": "google-generative-ai",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 2000000,
+          "maxTokens": 8192
+        }
+      ]
+    },
+    "arpaneticu": {
+      "baseUrl": "http://arpanet.icu:3000/v1beta",
+      "apiKey": "sk-KldJUXPSYY7Wd6fKSNH8Ttz2PmasxzfvLjJhxO5FgmD63LUI",
+      "auth": "api-key",
+      "api": "google-generative-ai",
+      "models": [
+        {
+          "id": "gemini-3-flash-preview",
+          "name": "gemini-3-flash-preview",
+          "api": "google-generative-ai",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 2000000,
+          "maxTokens": 8192
+        }
+      ]
+    }
+  }
+}

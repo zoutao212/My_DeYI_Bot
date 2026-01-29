@@ -1,0 +1,173 @@
+﻿{
+    "meta":  {
+                 "lastTouchedVersion":  "2026.1.25",
+                 "lastTouchedAt":  "2026-01-29T11:55:36.820Z"
+             },
+    "wizard":  {
+                   "lastRunAt":  "2026-01-26T01:33:56.196Z",
+                   "lastRunVersion":  "2026.1.25",
+                   "lastRunCommand":  "onboard",
+                   "lastRunMode":  "local"
+               },
+    "models":  {
+                   "activeProviderId":  "vectorengine",
+                   "activeModelId":  "gemini-3-flash-preview",
+                   "providers":  {
+                                     "xiaoxinapi":  {
+                                                        "baseUrl":  "https://ai.xiaoxinapi.com/v1beta",
+                                                        "apiKey":  "sk-qfn4FkAfS39LNHrJwrENoryk56noJIO8JU73a3udXrIw0QGF",
+                                                        "auth":  "api-key",
+                                                        "api":  "google-generative-ai",
+                                                        "models":  [
+                                                                       {
+                                                                           "id":  "[business]gemini-3-pro-preview",
+                                                                           "name":  "[business]gemini-3-pro-preview",
+                                                                           "api":  "google-generative-ai",
+                                                                           "reasoning":  true,
+                                                                           "input":  [
+                                                                                         "text"
+                                                                                     ],
+                                                                           "cost":  {
+                                                                                        "input":  0,
+                                                                                        "output":  0,
+                                                                                        "cacheRead":  0,
+                                                                                        "cacheWrite":  0
+                                                                                    },
+                                                                           "contextWindow":  2000000,
+                                                                           "maxTokens":  8192
+                                                                       }
+                                                                   ]
+                                                    },
+                                     "vectorengine":  {
+                                                          "baseUrl":  "https://api.vectorengine.ai/v1beta",
+                                                          "apiKey":  "sk-tXQ16QQ2vWLuWa2bFHOdmbI6YE7yNAQxqFmsC52AgvmBQ0KW",
+                                                          "auth":  "api-key",
+                                                          "api":  "google-generative-ai",
+                                                          "models":  [
+                                                                         {
+                                                                             "id":  "gemini-3-flash-preview",
+                                                                             "name":  "gemini-3-flash-preview",
+                                                                             "api":  "google-generative-ai",
+                                                                             "reasoning":  true,
+                                                                             "input":  [
+                                                                                           "text"
+                                                                                       ],
+                                                                             "cost":  {
+                                                                                          "input":  0,
+                                                                                          "output":  0,
+                                                                                          "cacheRead":  0,
+                                                                                          "cacheWrite":  0
+                                                                                      },
+                                                                             "contextWindow":  2000000,
+                                                                             "maxTokens":  8192
+                                                                         }
+                                                                     ]
+                                                      },
+                                     "arpaneticu":  {
+                                                        "baseUrl":  "http://arpanet.icu:3000/v1beta",
+                                                        "apiKey":  "sk-KldJUXPSYY7Wd6fKSNH8Ttz2PmasxzfvLjJhxO5FgmD63LUI",
+                                                        "auth":  "api-key",
+                                                        "api":  "google-generative-ai",
+                                                        "models":  [
+                                                                       {
+                                                                           "id":  "gemini-3-flash-preview",
+                                                                           "name":  "gemini-3-flash-preview",
+                                                                           "api":  "google-generative-ai",
+                                                                           "reasoning":  true,
+                                                                           "input":  [
+                                                                                         "text"
+                                                                                     ],
+                                                                           "cost":  {
+                                                                                        "input":  0,
+                                                                                        "output":  0,
+                                                                                        "cacheRead":  0,
+                                                                                        "cacheWrite":  0
+                                                                                    },
+                                                                           "contextWindow":  2000000,
+                                                                           "maxTokens":  8192
+                                                                       }
+                                                                   ]
+                                                    }
+                                 }
+               },
+    "agents":  {
+                   "defaults":  {
+                                    "model":  {
+                                                  "primary":  "vectorengine/gemini-3-flash-preview"
+                                              },
+                                    "models":  {
+                                                   "vectorengine/gemini-3-flash-preview":  {
+
+                                                                                           }
+                                               },
+                                    "workspace":  "C:\\Users\\zouta\\clawd",
+                                    "compaction":  {
+                                                       "mode":  "safeguard"
+                                                   },
+                                    "maxConcurrent":  4,
+                                    "subagents":  {
+                                                      "maxConcurrent":  8
+                                                  }
+                                }
+               },
+    "messages":  {
+                     "ackReactionScope":  "group-mentions"
+                 },
+    "commands":  {
+                     "native":  "auto",
+                     "nativeSkills":  "auto"
+                 },
+    "approvals":  {
+                      "llm":  {
+                                  "enabled":  false
+                              }
+                  },
+    "channels":  {
+                     "telegram":  {
+                                      "enabled":  true,
+                                      "dmPolicy":  "pairing",
+                                      "botToken":  "8571339967:AAFlTRagfRu7JIVukScg2wvrJQoGWylxUjs",
+                                      "groups":  {
+                                                     "*":  {
+                                                               "requireMention":  true
+                                                           }
+                                                 },
+                                      "groupPolicy":  "allowlist",
+                                      "streamMode":  "partial",
+                                      "mediaMaxMb":  20,
+                                      "actions":  {
+                                                      "reactions":  true
+                                                  },
+                                      "allowFrom":  [
+                                                        611659968
+                                                    ]
+                                  }
+                 },
+    "gateway":  {
+                    "port":  18789,
+                    "mode":  "local",
+                    "bind":  "loopback",
+                    "auth":  {
+
+                             },
+                    "tailscale":  {
+                                      "mode":  "off",
+                                      "resetOnExit":  false
+                                  }
+                },
+    "skills":  {
+                   "install":  {
+                                   "nodeManager":  "npm"
+                               }
+               },
+    "plugins":  {
+                    "entries":  {
+                                    "google-antigravity-auth":  {
+                                                                    "enabled":  true
+                                                                },
+                                    "telegram":  {
+                                                     "enabled":  true
+                                                 }
+                                }
+                }
+}
