@@ -30,6 +30,10 @@ export function renderRun(params: {
   sessionKey: string;
   onClear?: () => void;
 }) {
+  // 默认隐藏运行面板，避免干扰用户体验
+  // 如果需要查看运行事件，可以在 Debug 标签页查看
+  return nothing;
+  
   const events = Array.isArray(params.events) ? params.events : [];
 
   const byRun = new Map<string, RunEventFrame[]>();

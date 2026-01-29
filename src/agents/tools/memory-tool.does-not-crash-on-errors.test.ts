@@ -37,11 +37,13 @@ describe("memory tools", () => {
     if (!tool) throw new Error("tool missing");
 
     const result = await tool.execute("call_1", { query: "hello" });
-    expect(result.details).toEqual({
+    // 现在会降级到关键词搜索，而不是直接返回 disabled
+    expect(result.details).toMatchObject({
       results: [],
-      disabled: true,
-      error: "openai embeddings failed: 429 insufficient_quota",
+      provider: "keyword",
+      fallback: true,
     });
+    expect(result.details).toHaveProperty("warning");
   });
 
   it("does not throw when memory_get fails", async () => {

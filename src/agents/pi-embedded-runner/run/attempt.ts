@@ -55,6 +55,7 @@ import {
 import { DEFAULT_BOOTSTRAP_FILENAME } from "../../workspace.js";
 import { buildSystemPromptReport } from "../../system-prompt-report.js";
 import { resolveDefaultModelForAgent } from "../../model-selection.js";
+import { generateSessionSummary, formatSessionSummary } from "../../session-summary.js";
 
 import { isAbortError } from "../abort.js";
 import { buildEmbeddedExtensionPaths } from "../extensions.js";
@@ -584,6 +585,49 @@ export async function runEmbeddedAttempt(
         cacheTrace?.recordStage("session:limited", { messages: limited });
         if (limited.length > 0) {
           activeSession.agent.replaceMessages(limited);
+        }
+
+        // 🆕 Generate session summary and inject into system prompt
+        // This provides task context to help AI remember the goal across long conversations
+        const sessionSummary = generateSessionSummary(limited);
+        const sessionSummaryText = sessionSummary ? formatSessionSummary(sessionSummary) : undefined;
+
+        if (sessionSummaryText && sessionSummary) {
+          // Rebuild system prompt with session summary
+          const updatedSystemPrompt = buildEmbeddedSystemPrompt({
+            workspaceDir: effectiveWorkspace,
+            defaultThinkLevel: params.thinkLevel,
+            reasoningLevel: params.reasoningLevel ?? "off",
+            extraSystemPrompt: params.extraSystemPrompt,
+            ownerNumbers: params.ownerNumbers,
+            reasoningTagHint,
+            heartbeatPrompt: isDefaultAgent
+              ? resolveHeartbeatPrompt(params.config?.agents?.defaults?.heartbeat?.prompt)
+              : undefined,
+            skillsPrompt,
+            docsPath: docsPath ?? undefined,
+            ttsHint,
+            workspaceNotes,
+            reactionGuidance,
+            promptMode,
+            promptLanguage,
+            runtimeInfo,
+            messageToolHints,
+            sandboxInfo,
+            tools,
+            modelAliasLines: buildModelAliasLines(params.config),
+            userTimezone,
+            userTime,
+            userTimeFormat,
+            contextFiles,
+            sessionSummary: sessionSummaryText, // 🆕 Inject session summary
+          });
+
+          // Update agent's system prompt
+          activeSession.agent.setSystemPrompt(updatedSystemPrompt);
+          log.debug(
+            `[session-summary] Injected session summary: taskGoal="${sessionSummary.taskGoal.slice(0, 50)}..." turns=${sessionSummary.totalTurns} actions=${sessionSummary.keyActions.length}`,
+          );
         }
       } catch (err) {
         sessionManager.flushPendingToolResults?.();

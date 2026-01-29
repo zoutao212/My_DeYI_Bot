@@ -438,6 +438,22 @@ export async function startGatewayServer(
 
   installLlmFetchGate({
     requestApproval: async ({ request, timeoutMs }) => {
+      // 检查配置
+      const llmApprovalConfig = cfgAtStart.approvals?.llm;
+      const enabled = llmApprovalConfig?.enabled ?? false;
+      const autoApprove = llmApprovalConfig?.autoApprove ?? false;
+      
+      // 如果未启用审批，直接允许
+      if (!enabled) {
+        return { decision: "allow-once" };
+      }
+      
+      // 如果启用了自动批准，直接允许
+      if (autoApprove) {
+        return { decision: "allow-always" };
+      }
+      
+      // 否则，请求用户审批
       const timeout = typeof timeoutMs === "number" ? timeoutMs : 120_000;
       const record = llmApprovalManager.createOrGet(request, timeout, null);
       const decisionPromise = llmApprovalManager.waitForDecision(record, timeout);

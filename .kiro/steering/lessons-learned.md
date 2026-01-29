@@ -24,8 +24,10 @@
 | **修复无效** | `.kiro/lessons-learned/18_修复无效的根因分析方法论.md` |
 | **配置验证** | `.kiro/lessons-learned/19_配置项验证方法论.md` |
 | **API 格式切换** | `.kiro/lessons-learned/20_API格式切换验证方法论.md` |
+| **UI 配置问题** | `.kiro/lessons-learned/21_UI配置问题定位方法论.md` |
+| **配置开关实现** | `.kiro/steering/always/gloab_always_workflow.md#第八章` |
 
-**关键词**：修复无效、打补丁、源头修复、重试绕过、数据流追踪、配置验证、schema 验证、静默失败、API 格式切换、字段兼容性
+**关键词**：修复无效、打补丁、源头修复、重试绕过、数据流追踪、配置验证、schema 验证、静默失败、API 格式切换、字段兼容性、配置开关、功能开关、审批机制、Zod schema、类型定义、UI 配置、localStorage、默认值、干扰性功能、技术细节隐藏
 
 ## 使用方法
 
@@ -105,6 +107,6 @@ grepSearch -query "关键词" -includePattern ".kiro/lessons-learned/**/*.md"
 
 ---
 
-**版本：** v20260129_11  
+**版本：** v20260129_12  
 **最后更新：** 2026-01-29  
-**变更：** 新增"API 格式切换验证方法论"（切换 API 格式后必须验证字段兼容性）
+**变更：** 新增"UI 配置问题定位方法论"（UI 配置 vs 后端配置的区分和定位流程）

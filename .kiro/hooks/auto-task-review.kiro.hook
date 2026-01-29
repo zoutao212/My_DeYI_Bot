@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "name": "自动完成任务",
+  "description": "任务完成后自动回顾本次对话，识别可继续完成的任务",
+  "version": "1",
+  "when": {
+    "type": "agentStop"
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "回顾本次对话，检查是否有任务目标尚未完成。如果发现未完成的任务，请继续完成它们。"
+  }
+}

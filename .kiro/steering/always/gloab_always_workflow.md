@@ -288,3 +288,202 @@ $newContent = $content -replace 'old', 'new'
 - 版本注释：`<!-- VERSION: 2026-01-02-v3 -->`
 - 标题变化：`<title>xxx v3</title>`
 - 这样可以快速判断修改是否生效
+
+
+---
+
+## 第八章：配置驱动的功能开关实现流程 ⚠️ 重要
+
+### 8.1 触发场景
+
+当需要添加一个可配置的功能开关时（例如：审批机制、功能特性开关、调试模式等）。
+
+**常见场景：**
+- 添加新的审批机制（exec 审批、LLM 审批等）
+- 添加新的功能特性开关（实验性功能、调试模式等）
+- 添加新的可配置行为（超时时间、重试次数等）
+
+### 8.2 标准流程
+
+#### 步骤 1：添加配置 Schema
+
+**文件：** `src/config/zod-schema.*.ts`（根据配置类型选择对应文件）
+
+**操作：**
+1. 使用 Zod 定义配置 schema
+2. 添加注释说明每个字段的含义和默认值
+3. 使用 `.optional()` 标记可选字段
+4. 使用 `.strict()` 确保类型安全
+
+**示例：**
+```typescript
+const LlmApprovalSchema = z
+  .object({
+    /** 是否启用 LLM 审批。默认 false（不审批，自动允许）。 */
+    enabled: z.boolean().optional(),
+    /** 是否自动批准所有请求。默认 false。 */
+    autoApprove: z.boolean().optional(),
+  })
+  .strict()
+  .optional();
+
+export const ApprovalsSchema = z
+  .object({
+    exec: ExecApprovalForwardingSchema,
+    llm: LlmApprovalSchema,
+  })
+  .strict()
+  .optional();
+```
+
+#### 步骤 2：更新类型定义
+
+**文件：** `src/config/types.*.ts`（与 schema 文件对应）
+
+**操作：**
+1. 定义 TypeScript 类型
+2. 添加 JSDoc 注释说明每个字段
+3. 确保类型与 schema 一致
+
+**示例：**
+```typescript
+export type LlmApprovalConfig = {
+  /** 是否启用 LLM 审批。默认 false（不审批，自动允许）。 */
+  enabled?: boolean;
+  /** 是否自动批准所有请求。默认 false。 */
+  autoApprove?: boolean;
+};
+
+export type ApprovalsConfig = {
+  exec?: ExecApprovalForwardingConfig;
+  llm?: LlmApprovalConfig;
+};
+```
+
+#### 步骤 3：实现逻辑
+
+**文件：** 使用配置的位置（例如：`src/gateway/server.impl.ts`）
+
+**操作：**
+1. 读取配置：`const config = cfgAtStart.xxx?.yyy;`
+2. 提取字段并设置默认值：`const enabled = config?.enabled ?? false;`
+3. 实现逻辑：根据配置值执行不同的分支
+4. 确保优先级清晰：先检查主开关，再检查子选项
+
+**示例：**
+```typescript
+const llmApprovalConfig = cfgAtStart.approvals?.llm;
+const enabled = llmApprovalConfig?.enabled ?? false;
+const autoApprove = llmApprovalConfig?.autoApprove ?? false;
+
+// 优先级：enabled > autoApprove
+if (!enabled) {
+  return { decision: "allow-once" };
+}
+
+if (autoApprove) {
+  return { decision: "allow-always" };
+}
+
+// 否则，请求用户审批
+// ...
+```
+
+#### 步骤 4：构建验证
+
+**操作：**
+1. 运行构建：`pnpm build`
+2. 验证构建成功（无错误）
+3. 验证 `dist/` 目录中的文件包含修改
+
+**验证命令：**
+```powershell
+# 构建
+pnpm build
+
+# 验证 dist 文件
+Select-String -Path "dist/xxx/yyy.js" -Pattern "关键字" -Context 2,2 -Encoding UTF8
+```
+
+#### 步骤 5：创建配置示例和文档
+
+**操作：**
+1. 创建配置示例文件（JSON 格式）
+2. 编写配置说明文档
+3. 说明每个配置选项的含义和使用场景
+4. 提供完整的使用步骤
+
+**示例：**
+```json
+{
+  "approvals": {
+    "llm": {
+      "enabled": false  // 关闭审批（推荐）
+    }
+  }
+}
+```
+
+### 8.3 质量门槛
+
+每个步骤完成后必须验证：
+
+- ✅ **Schema 定义完整**：所有字段都有注释和默认值
+- ✅ **类型定义一致**：类型与 schema 完全匹配
+- ✅ **逻辑实现正确**：配置值正确读取，优先级清晰
+- ✅ **构建验证通过**：`pnpm build` 成功，dist 文件包含修改
+- ✅ **文档完整**：配置示例、使用说明、场景说明都齐全
+
+### 8.4 常见错误
+
+1. **忘记更新类型定义** - 导致类型不匹配
+2. **默认值不合理** - 导致配置不符合预期
+3. **优先级不清晰** - 导致配置行为混乱
+4. **忘记验证 dist 文件** - 导致修改未生效
+5. **缺少配置文档** - 导致用户不知道如何使用
+
+### 8.5 配置优先级设计原则
+
+**核心原则：** 主开关优先于子选项
+
+**示例：**
+```typescript
+// ✅ 正确：先检查主开关
+if (!enabled) {
+  return defaultBehavior;
+}
+
+if (autoApprove) {
+  return autoApproveBehavior;
+}
+
+return manualApproveBehavior;
+```
+
+```typescript
+// ❌ 错误：优先级混乱
+if (autoApprove) {
+  return autoApproveBehavior;
+}
+
+if (!enabled) {
+  return defaultBehavior;
+}
+
+return manualApproveBehavior;
+```
+
+### 8.6 默认值设计原则
+
+**核心原则：** 默认值应该是最安全、最常用的选项
+
+**示例：**
+- 审批机制：默认关闭（`enabled: false`）- 不干扰用户
+- 调试模式：默认关闭（`debug: false`）- 避免性能影响
+- 超时时间：默认合理值（`timeout: 30000`）- 平衡性能和可靠性
+
+---
+
+**版本：** v20260129_2  
+**最后更新：** 2026-01-29  
+**变更：** 新增"配置驱动的功能开关实现流程"

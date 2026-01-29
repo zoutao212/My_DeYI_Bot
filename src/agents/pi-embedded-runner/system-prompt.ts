@@ -46,6 +46,8 @@ export function buildEmbeddedSystemPrompt(params: {
   userTimeFormat?: ResolvedTimeFormat;
   contextFiles?: EmbeddedContextFile[];
   promptLanguage?: "en" | "zh";
+  /** Session summary to inject into system prompt (provides task context). */
+  sessionSummary?: string;
 }): string {
   return buildAgentSystemPrompt({
     workspaceDir: params.workspaceDir,
@@ -72,6 +74,7 @@ export function buildEmbeddedSystemPrompt(params: {
     userTime: params.userTime,
     userTimeFormat: params.userTimeFormat,
     contextFiles: params.contextFiles,
+    sessionSummary: params.sessionSummary,
   });
 }
 

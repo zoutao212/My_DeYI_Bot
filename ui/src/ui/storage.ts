@@ -41,7 +41,7 @@ export function loadSettings(): UiSettings {
     theme: "system",
     chatFocusMode: false,
     chatShowThinking: true,
-    chatRequireSendApproval: true,
+    chatRequireSendApproval: false, // 默认关闭发送审批，避免干扰用户体验
     splitRatio: 0.6,
     navCollapsed: false,
     navGroupsCollapsed: {},

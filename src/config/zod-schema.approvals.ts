@@ -20,9 +20,20 @@ const ExecApprovalForwardingSchema = z
   .strict()
   .optional();
 
+const LlmApprovalSchema = z
+  .object({
+    /** 是否启用 LLM 审批。默认 false（不审批，自动允许）。 */
+    enabled: z.boolean().optional(),
+    /** 是否自动批准所有请求。默认 false。 */
+    autoApprove: z.boolean().optional(),
+  })
+  .strict()
+  .optional();
+
 export const ApprovalsSchema = z
   .object({
     exec: ExecApprovalForwardingSchema,
+    llm: LlmApprovalSchema,
   })
   .strict()
   .optional();

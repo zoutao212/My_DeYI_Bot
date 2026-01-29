@@ -24,6 +24,14 @@ export type ExecApprovalForwardingConfig = {
   targets?: ExecApprovalForwardTarget[];
 };
 
+export type LlmApprovalConfig = {
+  /** 是否启用 LLM 审批。默认 false（不审批，自动允许）。 */
+  enabled?: boolean;
+  /** 是否自动批准所有请求。默认 false。 */
+  autoApprove?: boolean;
+};
+
 export type ApprovalsConfig = {
   exec?: ExecApprovalForwardingConfig;
+  llm?: LlmApprovalConfig;
 };

@@ -1,11 +1,13 @@
 import { Type } from "@sinclair/typebox";
+import * as path from "node:path";
 
 import type { ClawdbotConfig } from "../../config/config.js";
 import { getMemorySearchManager } from "../../memory/index.js";
-import { resolveSessionAgentId } from "../agent-scope.js";
+import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "../agent-scope.js";
 import { resolveMemorySearchConfig } from "../memory-search.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readNumberParam, readStringParam } from "./common.js";
+import { keywordSearch } from "./memory-keyword-search.js";
 
 const MemorySearchSchema = Type.Object({
   query: Type.String(),
@@ -40,29 +42,57 @@ export function createMemorySearchTool(options: {
       const query = readStringParam(params, "query", { required: true });
       const maxResults = readNumberParam(params, "maxResults");
       const minScore = readNumberParam(params, "minScore");
+      
+      // Step 1: Try embedding search first
       const { manager, error } = await getMemorySearchManager({
         cfg,
         agentId,
       });
-      if (!manager) {
-        return jsonResult({ results: [], disabled: true, error });
+      
+      if (manager) {
+        try {
+          const results = await manager.search(query, {
+            maxResults,
+            minScore,
+            sessionKey: options.agentSessionKey,
+          });
+          const status = manager.status();
+          return jsonResult({
+            results,
+            provider: status.provider,
+            model: status.model,
+            fallback: status.fallback,
+          });
+        } catch (err) {
+          console.warn("Embedding search failed, falling back to keyword search:", err);
+        }
       }
+      
+      // Step 2: Fallback to keyword search
       try {
-        const results = await manager.search(query, {
-          maxResults,
-          minScore,
-          sessionKey: options.agentSessionKey,
+        const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
+        const memoryDir = path.join(workspaceDir, "memory");
+        const keywordResults = await keywordSearch({
+          query,
+          memoryDir,
+          maxResults: maxResults ?? 10,
         });
-        const status = manager.status();
+        
         return jsonResult({
-          results,
-          provider: status.provider,
-          model: status.model,
-          fallback: status.fallback,
+          results: keywordResults,
+          provider: "keyword",
+          fallback: true,
+          warning: error 
+            ? `Embedding search unavailable (${error}), using keyword search`
+            : "Using keyword search as fallback",
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        return jsonResult({ results: [], disabled: true, error: message });
+        return jsonResult({ 
+          results: [], 
+          disabled: true, 
+          error: `Both embedding and keyword search failed: ${message}` 
+        });
       }
     },
   };
