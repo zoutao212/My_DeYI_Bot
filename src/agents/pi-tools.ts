@@ -122,6 +122,8 @@ export function createClawdbotCodingTools(options?: {
   modelProvider?: string;
   /** Model id for the current provider (used for model-specific tool gating). */
   modelId?: string;
+  /** Underlying model API (used for provider/model-specific transport quirks). */
+  modelApi?: string | null;
   /**
    * Auth mode for the current provider. We only need this for Anthropic OAuth
    * tool-name blocking quirks.
@@ -386,9 +388,21 @@ export function createClawdbotCodingTools(options?: {
   const subagentFiltered = subagentPolicyExpanded
     ? filterToolsByPolicy(sandboxed, subagentPolicyExpanded)
     : sandboxed;
+
+  const modelProviderKey = (options?.modelProvider ?? "").trim().toLowerCase();
+  const modelApiText = typeof options?.modelApi === "string" ? options.modelApi.trim().toLowerCase() : "";
+  const shouldMinimizeForVectorengine =
+    modelProviderKey.includes("vectorengine") && modelApiText === "openai-completions";
+  const minimized = shouldMinimizeForVectorengine
+    ? subagentFiltered.filter((tool) => {
+        const name = normalizeToolName(tool.name);
+        return name === "exec" || name === "process" || name === "read" || name === "edit" || name === "write";
+      })
+    : subagentFiltered;
+
   // Always normalize tool JSON Schemas before handing them to pi-agent/pi-ai.
   // Without this, some providers (notably OpenAI) will reject root-level union schemas.
-  const normalized = subagentFiltered.map(normalizeToolParameters);
+  const normalized = minimized.map(normalizeToolParameters);
   const withAbort = options?.abortSignal
     ? normalized.map((tool) => wrapToolWithAbortSignal(tool, options.abortSignal))
     : normalized;

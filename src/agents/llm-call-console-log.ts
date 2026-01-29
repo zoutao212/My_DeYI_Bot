@@ -36,6 +36,48 @@ function safeJsonStringify(value: unknown): string {
   });
 }
 
+function safeJsonClone(value: unknown, maxChars: number): unknown {
+  try {
+    return JSON.parse(truncate(safeJsonStringify(value), maxChars));
+  } catch {
+    return { value: truncate(String(value), maxChars) };
+  }
+}
+
+function pickOpenAiCompletionsResponseEvidence(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  const rec = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  if ("id" in rec) out.id = rec.id;
+  if ("object" in rec) out.object = rec.object;
+  if ("created" in rec) out.created = rec.created;
+  if ("model" in rec) out.model = rec.model;
+  if ("error" in rec) out.error = rec.error;
+
+  const choices = rec.choices;
+  if (Array.isArray(choices)) {
+    out.choices = choices.slice(0, 6).map((choice) => {
+      if (!choice || typeof choice !== "object") return choice;
+      const c = choice as Record<string, unknown>;
+      const picked: Record<string, unknown> = {};
+      if ("index" in c) picked.index = c.index;
+      if ("finish_reason" in c) picked.finish_reason = c.finish_reason;
+      if ("finishReason" in c) picked.finishReason = c.finishReason;
+      if ("message" in c) picked.message = c.message;
+      if ("delta" in c) picked.delta = c.delta;
+      if ("text" in c) picked.text = c.text;
+      return picked;
+    });
+  }
+
+  return Object.keys(out).length > 0 ? out : value;
+}
+
+type ResponseSummary = {
+  chunks: number;
+  samples: unknown[];
+};
+
 function formatError(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === "string") return err;
@@ -124,6 +166,26 @@ export function createLlmCallConsoleLogger(params: {
       const apiTag = formatApiTag((m as { api?: unknown })?.api, String(base.modelApi ?? "unknown"));
 
       let didLogPayload = false;
+
+      const responseSummary: ResponseSummary = { chunks: 0, samples: [] };
+      const recordResponseChunk = (chunk: unknown) => {
+        responseSummary.chunks += 1;
+        const evidence = pickOpenAiCompletionsResponseEvidence(chunk);
+        const sample = safeJsonClone(evidence, 4000);
+
+        // Keep first 4 samples, then keep last 2 samples.
+        if (responseSummary.samples.length < 4) {
+          responseSummary.samples.push(sample);
+          return;
+        }
+        if (responseSummary.samples.length < 6) {
+          responseSummary.samples.push(sample);
+          return;
+        }
+        responseSummary.samples[4] = responseSummary.samples[5];
+        responseSummary.samples[5] = sample;
+      };
+
       const nextOnPayload = (payload: unknown) => {
         if (!didLogPayload) {
           didLogPayload = true;
@@ -184,6 +246,7 @@ export function createLlmCallConsoleLogger(params: {
             durationMs,
             model: modelTag,
             api: apiTag,
+            responseSummary: responseSummary.chunks > 0 ? responseSummary : undefined,
           },
         });
       };
@@ -209,6 +272,7 @@ export function createLlmCallConsoleLogger(params: {
             model: modelTag,
             api: apiTag,
             err,
+            responseSummary: responseSummary.chunks > 0 ? responseSummary : undefined,
           },
         });
       };
@@ -224,6 +288,9 @@ export function createLlmCallConsoleLogger(params: {
                   async next() {
                     try {
                       const res = await it.next();
+                      if (!res.done) {
+                        recordResponseChunk(res.value);
+                      }
                       if (res.done) finishOk();
                       return res;
                     } catch (err) {
@@ -236,6 +303,9 @@ export function createLlmCallConsoleLogger(params: {
                       const fn = (it as unknown as { return?: (v?: unknown) => Promise<IteratorResult<unknown>> })
                         .return;
                       const res = typeof fn === "function" ? await fn.call(it, value) : undefined;
+                      if (res && !res.done) {
+                        recordResponseChunk(res.value);
+                      }
                       finishOk();
                       return res ?? { done: true, value };
                     } catch (err) {
@@ -248,6 +318,9 @@ export function createLlmCallConsoleLogger(params: {
                       const fn = (it as unknown as { throw?: (e?: unknown) => Promise<IteratorResult<unknown>> })
                         .throw;
                       const res = typeof fn === "function" ? await fn.call(it, err) : undefined;
+                      if (res && !res.done) {
+                        recordResponseChunk(res.value);
+                      }
                       finishErr(err);
                       return res ?? { done: true, value: undefined };
                     } catch (e) {
@@ -269,6 +342,7 @@ export function createLlmCallConsoleLogger(params: {
       if (isPromiseLike(result)) {
         return (result as PromiseLike<unknown>).then(
           (val) => {
+            recordResponseChunk(val);
             finishOk();
             return val;
           },

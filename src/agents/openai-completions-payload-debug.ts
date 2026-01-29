@@ -57,6 +57,8 @@ function shouldEnable(params: {
   provider?: string;
   modelApi?: string | null;
 }): boolean {
+  const enabled = String(params.env?.CLAWDBOT_OPENAI_COMPLETIONS_PAYLOAD_DEBUG ?? "").trim();
+  if (!enabled) return false;
   const provider = (params.provider ?? "").trim().toLowerCase();
   if (!provider.includes("vectorengine")) return false;
   if ((params.modelApi ?? "").trim().toLowerCase() !== "openai-completions") return false;
@@ -88,7 +90,9 @@ function ensureThoughtSignatureOnRecord(params: {
   record: Record<string, unknown>;
   path: string;
   report: { added: DebugEntry[] };
+  patch: boolean;
 }): void {
+  if (!params.patch) return;
   const hasSnake =
     typeof params.record.thought_signature === "string" && params.record.thought_signature.trim();
   const hasCamel =
@@ -119,12 +123,18 @@ function walkAndPatch(params: {
   value: unknown;
   path: string;
   report: { added: DebugEntry[] };
+  patch: boolean;
 }): void {
   const value = params.value;
   if (!value) return;
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i += 1) {
-      walkAndPatch({ value: value[i], path: `${params.path}[${i}]`, report: params.report });
+      walkAndPatch({
+        value: value[i],
+        path: `${params.path}[${i}]`,
+        report: params.report,
+        patch: params.patch,
+      });
     }
     return;
   }
@@ -134,11 +144,21 @@ function walkAndPatch(params: {
 
   const type = rec.type;
   if (isToolLikeType(type)) {
-    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
+    ensureThoughtSignatureOnRecord({
+      record: rec,
+      path: params.path,
+      report: params.report,
+      patch: params.patch,
+    });
   }
 
   if (Array.isArray(rec.tool_calls)) {
-    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
+    ensureThoughtSignatureOnRecord({
+      record: rec,
+      path: params.path,
+      report: params.report,
+      patch: params.patch,
+    });
     for (let i = 0; i < rec.tool_calls.length; i += 1) {
       const entry = rec.tool_calls[i];
       if (entry && typeof entry === "object") {
@@ -146,6 +166,7 @@ function walkAndPatch(params: {
           record: entry as Record<string, unknown>,
           path: `${params.path}.tool_calls[${i}]`,
           report: params.report,
+          patch: params.patch,
         });
 
         const fnObj = (entry as Record<string, unknown>).function;
@@ -154,13 +175,19 @@ function walkAndPatch(params: {
             record: fnObj as Record<string, unknown>,
             path: `${params.path}.tool_calls[${i}].function`,
             report: params.report,
+            patch: params.patch,
           });
         }
       }
     }
   }
   if (Array.isArray(rec.toolCalls)) {
-    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
+    ensureThoughtSignatureOnRecord({
+      record: rec,
+      path: params.path,
+      report: params.report,
+      patch: params.patch,
+    });
     for (let i = 0; i < rec.toolCalls.length; i += 1) {
       const entry = rec.toolCalls[i];
       if (entry && typeof entry === "object") {
@@ -168,6 +195,7 @@ function walkAndPatch(params: {
           record: entry as Record<string, unknown>,
           path: `${params.path}.toolCalls[${i}]`,
           report: params.report,
+          patch: params.patch,
         });
 
         const fnObj = (entry as Record<string, unknown>).function;
@@ -176,6 +204,7 @@ function walkAndPatch(params: {
             record: fnObj as Record<string, unknown>,
             path: `${params.path}.toolCalls[${i}].function`,
             report: params.report,
+            patch: params.patch,
           });
         }
       }
@@ -189,6 +218,7 @@ function walkAndPatch(params: {
         record: entry as Record<string, unknown>,
         path: `${params.path}.tools[${i}]`,
         report: params.report,
+        patch: params.patch,
       });
       const fnObj = (entry as Record<string, unknown>).function;
       if (fnObj && typeof fnObj === "object") {
@@ -196,30 +226,48 @@ function walkAndPatch(params: {
           record: fnObj as Record<string, unknown>,
           path: `${params.path}.tools[${i}].function`,
           report: params.report,
+          patch: params.patch,
         });
       }
     }
   }
   if (rec.function_call && typeof rec.function_call === "object") {
-    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
+    ensureThoughtSignatureOnRecord({
+      record: rec,
+      path: params.path,
+      report: params.report,
+      patch: params.patch,
+    });
     ensureThoughtSignatureOnRecord({
       record: rec.function_call as Record<string, unknown>,
       path: `${params.path}.function_call`,
       report: params.report,
+      patch: params.patch,
     });
   }
   if (rec.functionCall && typeof rec.functionCall === "object") {
-    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
+    ensureThoughtSignatureOnRecord({
+      record: rec,
+      path: params.path,
+      report: params.report,
+      patch: params.patch,
+    });
     ensureThoughtSignatureOnRecord({
       record: rec.functionCall as Record<string, unknown>,
       path: `${params.path}.functionCall`,
       report: params.report,
+      patch: params.patch,
     });
   }
 
   for (const [k, v] of Object.entries(rec)) {
     if (k === "thought_signature" || k === "thoughtSignature") continue;
-    walkAndPatch({ value: v, path: `${params.path}.${k}`, report: params.report });
+    walkAndPatch({
+      value: v,
+      path: `${params.path}.${k}`,
+      report: params.report,
+      patch: params.patch,
+    });
   }
 }
 
@@ -241,6 +289,9 @@ export function createOpenAiCompletionsPayloadDebugger(params: {
     return null;
   }
 
+  const patchThoughtSignature =
+    String(params.env?.CLAWDBOT_OPENAI_COMPLETIONS_PATCH_THOUGHT_SIGNATURE ?? "").trim() === "1";
+
   const base = {
     runId: params.runId,
     sessionId: params.sessionId,
@@ -257,7 +308,7 @@ export function createOpenAiCompletionsPayloadDebugger(params: {
       }
       const nextOnPayload = (payload: unknown) => {
         const report = { added: [] as DebugEntry[] };
-        walkAndPatch({ value: payload, path: "$", report });
+        walkAndPatch({ value: payload, path: "$", report, patch: patchThoughtSignature });
 
         if (report.added.length > 0) {
           const payloadText = truncate(safeJsonStringify(payload), 60_000);
@@ -289,7 +340,7 @@ export function createOpenAiCompletionsPayloadDebugger(params: {
 
 export function _test_only_walkAndPatch(value: unknown): { added: DebugEntry[] } {
   const report = { added: [] as DebugEntry[] };
-  walkAndPatch({ value, path: "$", report });
+  walkAndPatch({ value, path: "$", report, patch: false });
   return report;
 }
 
@@ -323,12 +374,12 @@ export function _test_only_truncate(text: string, limit: number): string {
 
 export function _test_only_ensureRecord(rec: Record<string, unknown>): { added: DebugEntry[] } {
   const report = { added: [] as DebugEntry[] };
-  ensureThoughtSignatureOnRecord({ record: rec, path: "$", report });
+  ensureThoughtSignatureOnRecord({ record: rec, path: "$", report, patch: false });
   return report;
 }
 
 export function _test_only_walkMessages(messages: AgentMessage[]): { added: DebugEntry[] } {
   const report = { added: [] as DebugEntry[] };
-  walkAndPatch({ value: { messages }, path: "$", report });
+  walkAndPatch({ value: { messages }, path: "$", report, patch: false });
   return report;
 }

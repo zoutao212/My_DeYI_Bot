@@ -263,9 +263,32 @@ function broadcastChatFinal(params: {
   params.context.nodeSendToSession(params.sessionKey, "chat", payload);
 }
 
-function extractLastToolResultText(messages: Record<string, unknown>[]): string | null {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const m = extractTranscriptMessage(messages[i]);
+function extractLastToolResultText(params: {
+  messages: Record<string, unknown>[];
+  markerId: string;
+}): string | null {
+  let startIndex = -1;
+  for (let i = params.messages.length - 1; i >= 0; i -= 1) {
+    const entry = params.messages[i];
+    const m = extractTranscriptMessage(entry);
+    if (!m) continue;
+    if (m.role !== "user") continue;
+    const content = m.content;
+    if (!Array.isArray(content)) continue;
+    const text = content
+      .map((part) => (part && typeof part === "object" ? (part as Record<string, unknown>).text : null))
+      .filter((t): t is string => typeof t === "string")
+      .join("\n");
+    if (matchesRunMarker(text, params.markerId)) {
+      startIndex = i;
+      break;
+    }
+  }
+
+  if (startIndex < 0) return null;
+
+  for (let i = params.messages.length - 1; i > startIndex; i -= 1) {
+    const m = extractTranscriptMessage(params.messages[i]);
     if (!m) continue;
     if (m.role !== "toolResult") continue;
     const content = m.content;
@@ -772,6 +795,9 @@ export const chatHandlers: GatewayRequestHandlers = {
       })();
       const tools = (() => {
         try {
+          const modelApi = provider.trim().toLowerCase().includes("vectorengine")
+            ? "openai-completions"
+            : undefined;
           return createClawdbotCodingTools({
             config: cfg,
             workspaceDir: effectiveWorkspaceDir,
@@ -783,6 +809,7 @@ export const chatHandlers: GatewayRequestHandlers = {
             spawnedBy: entry?.spawnedBy ?? undefined,
             modelProvider: provider,
             modelId: model,
+            modelApi,
           });
         } catch {
           return [];
@@ -1307,9 +1334,12 @@ export const chatHandlers: GatewayRequestHandlers = {
           const traceFallbackSummary =
             traceEvents.length > 0 ? buildFallbackRunSummaryFromTrace(traceEvents) : "";
 
-          const lastToolResultText = extractLastToolResultText(
-            (Array.isArray(recentMessages) ? recentMessages.slice(-80) : []) as Record<string, unknown>[],
-          );
+          const lastToolResultText = extractLastToolResultText({
+            messages: (Array.isArray(recentMessages)
+              ? recentMessages.slice(-80)
+              : []) as Record<string, unknown>[],
+            markerId,
+          });
 
           const rawReply = finalReplyParts
             .map((part) => part.trim())
@@ -1505,26 +1535,33 @@ export const chatHandlers: GatewayRequestHandlers = {
           const errText = String(err);
           const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(p.sessionKey);
           const latestSessionId = latestEntry?.sessionId ?? entry?.sessionId;
-          const recentMessages =
+          const recentMessagesErr =
             latestSessionId && latestStorePath
               ? readSessionMessages(latestSessionId, latestStorePath, latestEntry?.sessionFile)
               : [];
-          const lastToolResultTextRaw = extractLastToolResultText(
-            (Array.isArray(recentMessages) ? recentMessages.slice(-80) : []) as Record<string, unknown>[],
-          );
+          const lastToolResultTextRaw = extractLastToolResultText({
+            messages: (Array.isArray(recentMessagesErr)
+              ? recentMessagesErr.slice(-80)
+              : []) as Record<string, unknown>[],
+            markerId,
+          });
           const lastToolResultText = lastToolResultTextRaw
             ? stripTerminalControlSequences(lastToolResultTextRaw)
             : null;
 
           const toolSummaryText = appendToolSummaryToReply({
             reply: lastToolResultText ?? "",
-            messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
+            messages: (Array.isArray(recentMessagesErr)
+              ? recentMessagesErr
+              : []) as Record<string, unknown>[],
             markerId,
           });
 
           const fallbackInjectedText = appendRunSummaryToReply({
             reply: toolSummaryText.trim() ? toolSummaryText : lastToolResultText ?? "Connection error.",
-            messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
+            messages: (Array.isArray(recentMessagesErr)
+              ? recentMessagesErr
+              : []) as Record<string, unknown>[],
             markerId,
           });
 
@@ -1675,12 +1712,18 @@ export const chatHandlers: GatewayRequestHandlers = {
       : path.join(path.dirname(storePath), `${sessionId}.jsonl`);
 
     if (!fs.existsSync(transcriptPath)) {
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, "transcript file not found"),
-      );
-      return;
+      const ensured = ensureTranscriptFile({ transcriptPath, sessionId });
+      if (!ensured.ok) {
+        respond(
+          false,
+          undefined,
+          errorShape(
+            ErrorCodes.UNAVAILABLE,
+            `failed to create transcript file: ${ensured.error ?? "unknown error"}`,
+          ),
+        );
+        return;
+      }
     }
 
     // Build transcript entry

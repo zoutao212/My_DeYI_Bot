@@ -32,11 +32,7 @@ function shouldEnable(params: {
   modelId?: string;
 }): boolean {
   const provider = (params.provider ?? "").trim().toLowerCase();
-  const modelId = (params.modelId ?? "").trim().toLowerCase();
-  const modelApi = (params.modelApi ?? "").trim().toLowerCase();
   if (provider.includes("vectorengine")) return true;
-  if (modelId.includes("gemini")) return true;
-  if (modelApi.includes("gemini")) return true;
   return false;
 }
 
@@ -109,6 +105,13 @@ function walkAndPatch(params: {
   if (typeof value !== "object") return;
 
   const rec = value as Record<string, unknown>;
+
+  const role = typeof rec.role === "string" ? rec.role.trim().toLowerCase() : "";
+  const isToolResultMessage = role === "tool" || typeof rec.tool_call_id === "string";
+  if (isToolResultMessage) {
+    noteCandidate({ record: rec, path: params.path, report: params.report });
+    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
+  }
 
   const type = rec.type;
   const typeText = typeof type === "string" ? type.trim().toLowerCase() : "";

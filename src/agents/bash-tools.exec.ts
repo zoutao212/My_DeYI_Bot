@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 
@@ -56,6 +58,73 @@ import { listNodes, resolveNodeIdFromList } from "./tools/nodes-utils.js";
 import { getShellConfig, sanitizeBinaryOutput } from "./shell-utils.js";
 import { buildCursorPositionResponse, stripDsrRequests } from "./pty-dsr.js";
 import { parseAgentSessionKey, resolveAgentIdFromSessionKey } from "../routing/session-key.js";
+
+function findGitRoot(startDir: string | undefined): string | null {
+  if (!startDir) return null;
+  let current = path.resolve(startDir);
+  for (let i = 0; i < 12; i += 1) {
+    const gitPath = path.join(current, ".git");
+    try {
+      const stat = fs.statSync(gitPath);
+      if (stat.isDirectory() || stat.isFile()) return current;
+    } catch {
+      // ignore missing .git at this level
+    }
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return null;
+}
+
+function shouldAutoApproveClaudeWrite(): boolean {
+  const raw = process.env.CLAWDBOT_CLAUDE_AUTO_APPROVE_WRITE?.trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
+function resolveRepoRootFromRuntimeFile(): string | undefined {
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const candidate = path.resolve(here, "..", "..");
+    const stat = fs.statSync(candidate);
+    if (stat.isDirectory()) return candidate;
+  } catch {
+    // ignore
+  }
+  return undefined;
+}
+
+function maybeAutoApproveClaudePrompt(params: {
+  commandText: string;
+  session: ProcessSession;
+}): { didApprove: boolean; note?: string } {
+  if (!isClaudeCommand(params.commandText)) return { didApprove: false };
+  if (!shouldAutoApproveClaudeWrite()) return { didApprove: false };
+  if (!params.session.stdin) return { didApprove: false };
+  const tailText = (params.session.tail ?? "").toLowerCase();
+  const matchesPrompt =
+    tailText.includes("等待你授予写入权限") ||
+    tailText.includes("grant") ||
+    tailText.includes("permission") ||
+    tailText.includes("allow") ||
+    tailText.includes("[y/n]") ||
+    tailText.includes("(y/n)") ||
+    tailText.includes("(y/n/") ||
+    tailText.includes("press y") ||
+    tailText.includes("enter") ||
+    tailText.includes("confirm");
+  if (!matchesPrompt) return { didApprove: false };
+
+  try {
+    params.session.stdin.write("y\n");
+    return {
+      didApprove: true,
+      note: "检测到 Claude 交互式权限提示，已自动提交 'y' 确认（可通过环境变量 CLAWDBOT_CLAUDE_AUTO_APPROVE_WRITE 关闭/开启）。",
+    };
+  } catch {
+    return { didApprove: false };
+  }
+}
 
 const DEFAULT_MAX_OUTPUT = clampNumber(
   readEnvInt("PI_BASH_MAX_OUTPUT_CHARS"),
@@ -134,6 +203,7 @@ export type ExecToolDefaults = {
   messageProvider?: string;
   notifyOnExit?: boolean;
   cwd?: string;
+  repoRoot?: string;
 };
 
 export type { BashSandboxConfig } from "./bash-tools.shared.js";
@@ -1048,7 +1118,17 @@ export function createExecTool(
       }
 
       const sandbox = host === "sandbox" ? defaults?.sandbox : undefined;
-      const rawWorkdir = params.workdir?.trim() || defaults?.cwd || process.cwd();
+
+      const inferredRepoRoot =
+        defaults?.repoRoot ??
+        findGitRoot(defaults?.cwd) ??
+        findGitRoot(process.cwd()) ??
+        resolveRepoRootFromRuntimeFile() ??
+        undefined;
+      const shouldForceRepoRoot = !params.workdir && isClaudeCommand(params.command) && inferredRepoRoot;
+      const rawWorkdir = shouldForceRepoRoot
+        ? inferredRepoRoot
+        : params.workdir?.trim() || defaults?.cwd || process.cwd();
       let workdir = rawWorkdir;
       let containerWorkdir = sandbox?.containerWorkdir;
       if (sandbox) {
@@ -1630,7 +1710,8 @@ export function createExecTool(
                   `Command still running (session ${run.session.id}, pid ${
                     run.session.pid ?? "n/a"
                   }). ` +
-                  "Use process (list/poll/log/write/kill/clear/remove) for follow-up.",
+                  "Use process (list/poll/log/write/kill/clear/remove) for follow-up." +
+                  `\n\n[cwd] ${run.session.cwd ?? ""}\n\n[tail]\n${run.session.tail || "(no output yet)"}`,
               },
             ],
             details: {
@@ -1648,6 +1729,32 @@ export function createExecTool(
           if (yielded) return;
           yielded = true;
           markBackgrounded(run.session);
+
+          if (isClaudeCommand(commandText)) {
+            void (async () => {
+              const tailText = run.session.tail || "(no output yet)";
+              await injectExecFollowUpMessage({
+                sessionKey: notifySessionKey,
+                message:
+                  `Exec 已转入后台（session=${run.session.id}, pid=${run.session.pid ?? "n/a"}, cwd=${run.session.cwd ?? ""}）\n\n` +
+                  `[tail]\n${tailText}`,
+                label: "exec",
+              });
+
+              const autoApproved = maybeAutoApproveClaudePrompt({
+                commandText,
+                session: run.session,
+              });
+              if (autoApproved.didApprove && autoApproved.note) {
+                await injectExecFollowUpMessage({
+                  sessionKey: notifySessionKey,
+                  message: autoApproved.note,
+                  label: "exec",
+                });
+              }
+            })();
+          }
+
           if (isClaudeCommand(commandText)) {
             void (async () => {
               const outcome = await run.promise;
@@ -1676,6 +1783,32 @@ export function createExecTool(
               if (yielded) return;
               yielded = true;
               markBackgrounded(run.session);
+
+              if (isClaudeCommand(commandText)) {
+                void (async () => {
+                  const tailText = run.session.tail || "(no output yet)";
+                  await injectExecFollowUpMessage({
+                    sessionKey: notifySessionKey,
+                    message:
+                      `Exec 已转入后台（session=${run.session.id}, pid=${run.session.pid ?? "n/a"}, cwd=${run.session.cwd ?? ""}）\n\n` +
+                      `[tail]\n${tailText}`,
+                    label: "exec",
+                  });
+
+                  const autoApproved = maybeAutoApproveClaudePrompt({
+                    commandText,
+                    session: run.session,
+                  });
+                  if (autoApproved.didApprove && autoApproved.note) {
+                    await injectExecFollowUpMessage({
+                      sessionKey: notifySessionKey,
+                      message: autoApproved.note,
+                      label: "exec",
+                    });
+                  }
+                })();
+              }
+
               if (isClaudeCommand(commandText)) {
                 void (async () => {
                   const outcome = await run.promise;
