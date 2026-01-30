@@ -137,6 +137,31 @@
           "maxTokens": 8192
         }
       ]
+    },
+    "yinli": {
+      "baseUrl": "https://yinli.one/v1beta",
+      "apiKey": "sk-wuIGi2admr3nrsajUJkWFRsvpgw2DJKNNh32oEgQosQrlVMW",
+      "auth": "api-key",
+      "api": "google-generative-ai",
+      "models": [
+        {
+          "id": "gemini-3-flash-preview",
+          "name": "gemini-3-flash-preview",
+          "api": "google-generative-ai",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 2000000,
+          "maxTokens": 8192
+        }
+      ]
     }
   }
 }

@@ -10,7 +10,7 @@
                    "lastRunMode":  "local"
                },
     "models":  {
-                   "activeProviderId":  "vectorengine",
+                   "activeProviderId":  "yinli",
                    "activeModelId":  "gemini-3-flash-preview",
                    "providers":  {
                                      "xiaoxinapi":  {
@@ -63,6 +63,31 @@
                                                                          }
                                                                      ]
                                                       },
+									                  "yinli":  {
+                                                          "baseUrl":  "https://yinli.one/v1beta",
+                                                          "apiKey":  "sk-wuIGi2admr3nrsajUJkWFRsvpgw2DJKNNh32oEgQosQrlVMW",
+                                                          "auth":  "api-key",
+                                                          "api":  "google-generative-ai",
+                                                          "models":  [
+                                                                         {
+                                                                             "id":  "gemini-3-flash-preview",
+                                                                             "name":  "gemini-3-flash-preview",
+                                                                             "api":  "google-generative-ai",
+                                                                             "reasoning":  true,
+                                                                             "input":  [
+                                                                                           "text"
+                                                                                       ],
+                                                                             "cost":  {
+                                                                                          "input":  0,
+                                                                                          "output":  0,
+                                                                                          "cacheRead":  0,
+                                                                                          "cacheWrite":  0
+                                                                                      },
+                                                                             "contextWindow":  2000000,
+                                                                             "maxTokens":  8192
+                                                                         }
+                                                                     ]
+                                                      },
                                      "arpaneticu":  {
                                                         "baseUrl":  "http://arpanet.icu:3000/v1beta",
                                                         "apiKey":  "sk-KldJUXPSYY7Wd6fKSNH8Ttz2PmasxzfvLjJhxO5FgmD63LUI",
@@ -93,10 +118,10 @@
     "agents":  {
                    "defaults":  {
                                     "model":  {
-                                                  "primary":  "vectorengine/gemini-3-flash-preview"
+                                                  "primary":  "yinli/gemini-3-flash-preview"
                                               },
                                     "models":  {
-                                                   "vectorengine/gemini-3-flash-preview":  {
+                                                   "yinli/gemini-3-flash-preview":  {
 
                                                                                            }
                                                },
@@ -151,8 +176,10 @@
                                                       "reactions":  true
                                                   },
                                       "allowFrom":  [
-                                                        611659968
-                                                    ]
+                                                        611659968,
+                                                        7333025707
+                                                    ],
+                                      "dmHistoryLimit":  0
                                   }
                  },
     "gateway":  {
