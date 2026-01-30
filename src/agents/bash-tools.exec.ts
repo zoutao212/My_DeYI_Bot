@@ -839,16 +839,49 @@ async function runExecProcess(opts: {
     });
   };
 
-  const handleStdout = (data: string) => {
-    const str = sanitizeBinaryOutput(data.toString());
+  const decodeOutput = (data: Buffer | string): string => {
+    // If already a string, return as-is
+    if (typeof data === "string") {
+      return data;
+    }
+    
+    // On Windows, try to decode as GBK first (Windows console default)
+    if (process.platform === "win32") {
+      try {
+        const decoder = new TextDecoder("gbk", { fatal: false });
+        const text = decoder.decode(data);
+        
+        // Check if decoding was successful (no replacement characters)
+        if (!text.includes("\uFFFD") || text.length === 0) {
+          return text;
+        }
+      } catch {
+        // Fall through to UTF-8
+      }
+    }
+    
+    // Fall back to UTF-8 (or if not Windows)
+    try {
+      const decoder = new TextDecoder("utf-8", { fatal: false });
+      return decoder.decode(data);
+    } catch {
+      // Last resort: toString()
+      return data.toString();
+    }
+  };
+
+  const handleStdout = (data: string | Buffer) => {
+    const decoded = decodeOutput(data);
+    const str = sanitizeBinaryOutput(decoded);
     for (const chunk of chunkString(str)) {
       appendOutput(session, "stdout", chunk);
       emitUpdate();
     }
   };
 
-  const handleStderr = (data: string) => {
-    const str = sanitizeBinaryOutput(data.toString());
+  const handleStderr = (data: string | Buffer) => {
+    const decoded = decodeOutput(data);
+    const str = sanitizeBinaryOutput(decoded);
     for (const chunk of chunkString(str)) {
       appendOutput(session, "stderr", chunk);
       emitUpdate();
