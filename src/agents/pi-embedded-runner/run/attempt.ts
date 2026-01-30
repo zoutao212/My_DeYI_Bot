@@ -416,6 +416,47 @@ export async function runEmbeddedAttempt(
         allowSyntheticToolResults: transcriptPolicy.allowSyntheticToolResults,
       });
       trackSessionManagerAccess(params.sessionFile);
+      
+      // 🔍 DEBUG: Check how many messages sessionManager loaded
+      const smContext = sessionManager.buildSessionContext();
+      log.info(`[attempt] SessionManager loaded ${smContext.messages.length} messages from file (sessionId: ${params.sessionId})`);
+      if (smContext.messages.length > 0) {
+        const roles = smContext.messages.map(m => m.role).join(' → ');
+        log.info(`[attempt] Message roles: ${roles}`);
+      }
+      
+      // 🔍 DEBUG: Check SessionManager internal state
+      const sm = sessionManager as any;
+      if (sm.fileEntries) {
+        const messageEntries = sm.fileEntries.filter((e: any) => e.type === "message");
+        log.info(`[attempt] SessionManager fileEntries: total=${sm.fileEntries.length}, messages=${messageEntries.length}`);
+        if (messageEntries.length > 0) {
+          const entryRoles = messageEntries.slice(0, 10).map((e: any) => e.message?.role || "unknown");
+          log.info(`[attempt] First 10 message entry roles: ${entryRoles.join(' → ')}`);
+        }
+        
+        // 🔧 FIX: Override buildSessionContext to return recent messages from fileEntries
+        const allMessages = messageEntries.map((e: any) => e.message);
+        const historyLimit = 20; // Keep last 20 messages
+        const recentMessages = allMessages.slice(-historyLimit);
+        
+        log.info(`[attempt] Overriding buildSessionContext: using ${recentMessages.length} recent messages (total: ${allMessages.length})`);
+        
+        // Save original method
+        const originalBuildContext = sm.buildSessionContext?.bind(sm);
+        
+        // Override buildSessionContext to return recent messages
+        sm.buildSessionContext = () => {
+          const roles = recentMessages.map((m: any) => m.role).join(' → ');
+          log.info(`[attempt] buildSessionContext override: returning ${recentMessages.length} messages (${roles})`);
+          return {
+            messages: recentMessages,
+          };
+        };
+        
+        // Store original method for potential restoration
+        (sm as any)._originalBuildContext = originalBuildContext;
+      }
 
       await prepareSessionManagerForRun({
         sessionManager,
@@ -474,6 +515,13 @@ export async function runEmbeddedAttempt(
         throw new Error("Embedded agent session missing");
       }
       const activeSession = session;
+      
+      // 🔍 DEBUG: Check how many messages createAgentSession returned
+      log.info(`[attempt] createAgentSession returned ${activeSession.messages.length} messages (sessionId: ${params.sessionId})`);
+      if (activeSession.messages.length > 0) {
+        const roles = activeSession.messages.map(m => m.role).join(' → ');
+        log.info(`[attempt] Active session message roles: ${roles}`);
+      }
       const cacheTrace = createCacheTrace({
         cfg: params.config,
         env: process.env,

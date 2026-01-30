@@ -101,7 +101,9 @@ export function createNodesTool(options?: {
     label: "Nodes",
     name: "nodes",
     description:
-      "Discover and control paired nodes (status/describe/pairing/notify/camera/screen/location/run).",
+      "Discover and control paired nodes (physical devices like phones/tablets). " +
+      "Actions: status/describe/pairing/notify/camera/screen/location/run. " +
+      "NOTE: For channel user pairing (Telegram/Discord), use exec tool with 'pnpm clawdbot pairing approve <channel> <code>' instead.",
     parameters: NodesToolSchema,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
@@ -127,11 +129,24 @@ export function createNodesTool(options?: {
             const requestId = readStringParam(params, "requestId", {
               required: true,
             });
-            return jsonResult(
-              await callGatewayTool("node.pair.approve", gatewayOpts, {
-                requestId,
-              }),
-            );
+            try {
+              return jsonResult(
+                await callGatewayTool("node.pair.approve", gatewayOpts, {
+                  requestId,
+                }),
+              );
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              if (message.includes("unknown requestId")) {
+                throw new Error(
+                  `Unknown node pairing request: ${requestId}. ` +
+                    `If you're trying to approve a channel user (Telegram/Discord), ` +
+                    `use: exec({ command: "pnpm clawdbot pairing list <channel>" }) ` +
+                    `and exec({ command: "pnpm clawdbot pairing approve <channel> <code>" })`,
+                );
+              }
+              throw err;
+            }
           }
           case "reject": {
             const requestId = readStringParam(params, "requestId", {

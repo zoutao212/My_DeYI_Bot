@@ -7,6 +7,7 @@
 | 问题类型 | 文件 |
 |---------|------|
 | **工具调用失败** | `.kiro/lessons-learned/07_AI工具使用陷阱.md` |
+| **工具调用歧义** | `.kiro/lessons-learned/33_AI工具调用歧义问题处理方法论.md` |
 | **构建后不生效** | `.kiro/lessons-learned/10_构建验证流程.md` |
 | **配置不生效** | `.kiro/lessons-learned/12_配置项验证方法论.md` |
 | **配置验证** | `.kiro/lessons-learned/19_配置项验证方法论.md` |
@@ -25,6 +26,7 @@
 | **配置验证** | `.kiro/lessons-learned/19_配置项验证方法论.md` |
 | **API 格式切换** | `.kiro/lessons-learned/20_API格式切换验证方法论.md` |
 | **UI 配置问题** | `.kiro/lessons-learned/21_UI配置问题定位方法论.md` |
+| **数据流调试** | `.kiro/lessons-learned/32_数据流断点调试方法论.md` |
 | **配置开关实现** | `.kiro/steering/always/gloab_always_workflow.md#第八章` |
 | **Windows exec 命令报错** | `.kiro/lessons-learned/26_Windows_exec工具命令语法规范.md` |
 | **中文文本文件乱码** | `.kiro/lessons-learned/27_中文文本文件编码问题处理.md` |
@@ -32,8 +34,9 @@
 | **Buffer 解码编码问题** | `.kiro/lessons-learned/29_Buffer解码编码问题处理.md` |
 | **AI 工具调用行为修正** | `.kiro/lessons-learned/30_AI工具调用行为修正方法论.md` |
 | **全局拦截器副作用** | `.kiro/lessons-learned/31_全局拦截器副作用问题.md` |
+| **数据流断点调试** | `.kiro/lessons-learned/32_数据流断点调试方法论.md` |
 
-**关键词**：修复无效、打补丁、源头修复、重试绕过、数据流追踪、配置验证、schema 验证、静默失败、API 格式切换、字段兼容性、配置开关、功能开关、审批机制、Zod schema、类型定义、UI 配置、localStorage、默认值、干扰性功能、技术细节隐藏、Windows、PowerShell、CMD、exec 工具、中文路径、编码问题、命令语法、文本编码、GBK、GB2312、UTF-8、乱码、编码转换、read 工具、工具增强、包装模式、向后兼容、参数扩展、智能回退、Buffer 解码、TextDecoder、替换字符、平台差异、AI 行为修正、工具调用、平台适配、系统提示词、工具描述、命令验证、全局拦截器、fetch、副作用、上下文检查、性能优化
+**关键词**：修复无效、打补丁、源头修复、重试绕过、数据流追踪、配置验证、schema 验证、静默失败、API 格式切换、字段兼容性、配置开关、功能开关、审批机制、Zod schema、类型定义、UI 配置、localStorage、默认值、干扰性功能、技术细节隐藏、Windows、PowerShell、CMD、exec 工具、中文路径、编码问题、命令语法、文本编码、GBK、GB2312、UTF-8、乱码、编码转换、read 工具、工具增强、包装模式、向后兼容、参数扩展、智能回退、Buffer 解码、TextDecoder、替换字符、平台差异、AI 行为修正、工具调用、平台适配、系统提示词、工具描述、命令验证、全局拦截器、fetch、副作用、上下文检查、性能优化、数据流调试、断点调试、日志追踪、数据丢失、环节定位、工具调用歧义、API 混淆、配对机制、节点配对、频道配对、无限循环、错误提示、工具设计
 
 ## 使用方法
 
@@ -113,13 +116,13 @@ grepSearch -query "关键词" -includePattern ".kiro/lessons-learned/**/*.md"
 
 ---
 
-**版本：** v20260130_1  
+**版本：** v20260130_2  
 **最后更新：** 2026-01-30  
-**变更：** 新增"AI 工具调用行为修正方法论"（当 AI 自主调用工具时使用错误命令/参数的系统层面修正方法）
+**变更：** 新增"AI 工具调用歧义问题处理方法论"（当 AI 混淆相似概念导致调用错误 API 时的系统层面修正方法）
 
 
 ---
 
-**版本更新：** v20260130_2  
+**版本：** v20260130_3  
 **最后更新：** 2026-01-30  
-**新增：** "全局拦截器副作用问题"（全局拦截器设计原则、上下文优先检查、避免副作用的方法论）
+**变更：** 新增"数据流断点调试方法论"（追踪数据在处理流程中的变化，定位数据丢失环节）

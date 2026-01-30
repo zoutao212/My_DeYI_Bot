@@ -442,6 +442,65 @@ for ($i = 0; $i -lt [Math]::Max($p1.messages.Count, $p2.messages.Count); $i++) {
 
 ---
 
+### 案例 3：敏感词拦截导致空响应 ⚠️ **新增案例**
+
+**问题**：系统突然无法响应，日志显示 `content=array(0)`（空数组）
+
+**现象**：
+```
+05:35:39 [agent/guard] [guard] appendMessage called: role=assistant, content=array(0)
+```
+
+**调试过程**：
+
+1. **检查 trace 日志**：
+   ```powershell
+   Get-Content "C:\Users\zouta\.clawdbot\runtimelog\trace__*.jsonl" -Encoding UTF8 -Tail 50
+   ```
+   - 发现：LLM 请求成功（`ok durationMs=1481`）
+   - 但响应中包含错误：
+     ```json
+     {
+       "error": {
+         "message": "sensitive words detected (request id: ...)",
+         "type": "new_api_error",
+         "code": "local:sensitive_words"
+       }
+     }
+     ```
+
+2. **分析根本原因**：
+   - 用户发送的消息包含敏感词（色情内容）
+   - new_api（中转 API）检测到敏感词，拒绝请求
+   - Gemini API 返回错误，content 为空数组
+   - 系统保存了空 content 的 assistant 消息
+   - 导致后续对话无法继续
+
+3. **验证是否是系统 Bug**：
+   - ❌ 不是系统 Bug
+   - ✅ 是 new_api 的内容审核机制
+   - ✅ 是用户发送的内容违反了中转 API 的规则
+
+**根本原因**：
+- 中转 API（new_api）有内容审核机制
+- 用户消息包含敏感词，被拦截
+- API 返回错误，content 为空
+- 这不是系统 Bug，是内容审核的正常行为
+
+**解决方案**：
+1. **切换到官方 API**（推荐）- 没有敏感词过滤
+2. **使用其他中转 API** - 找一个没有内容审核的
+3. **避免发送敏感内容** - 如果必须使用 new_api
+4. **清理当前会话** - 会话已被污染，需要重新开始
+
+**教训**：
+- ⚠️ **中转 API 可能有内容审核机制**
+- 敏感词拦截会导致空响应
+- 需要区分"系统 Bug"和"内容审核"
+- 官方 API 通常没有额外的内容审核
+
+---
+
 ## 预防措施
 
 ### 1. 添加详细日志
@@ -531,6 +590,7 @@ async function checkApiHealth() {
 
 ---
 
-**版本：** v20260129_2  
-**最后更新：** 2026-01-29  
-**来源：** thought_signature 警告调试实战（包含 payload 对比案例）
+**版本：** v20260130_3  
+**最后更新：** 2026-01-30  
+**来源：** thought_signature 警告调试实战（包含 payload 对比案例 + 敏感词拦截案例）  
+**关键词**：外部 API、报错调试、payload 对比、连接错误、格式错误、敏感词拦截、内容审核、中转 API

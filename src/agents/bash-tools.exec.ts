@@ -1058,6 +1058,33 @@ export function createExecTool(
         throw new Error("Provide a command to start.");
       }
 
+      // Validate command syntax on Windows (PowerShell)
+      if (process.platform === "win32") {
+        const cmd = params.command.trimStart();
+        
+        // Check for invalid syntax patterns
+        const invalidPatterns = [
+          { pattern: /^=\s+/, message: "Invalid syntax: command starts with '=' (missing variable name)" },
+          { pattern: /^\s*-match\s+/, message: "Invalid syntax: '-match' operator requires left operand" },
+          { pattern: /^\s*-eq\s+/, message: "Invalid syntax: '-eq' operator requires left operand" },
+          { pattern: /^\s*-ne\s+/, message: "Invalid syntax: '-ne' operator requires left operand" },
+          { pattern: /^\s*-like\s+/, message: "Invalid syntax: '-like' operator requires left operand" },
+        ];
+        
+        for (const { pattern, message } of invalidPatterns) {
+          if (pattern.test(cmd)) {
+            throw new Error(
+              `${message}\n\n` +
+              `Command: ${cmd.slice(0, 100)}${cmd.length > 100 ? "..." : ""}\n\n` +
+              `Hint: Use PowerShell commands correctly:\n` +
+              `- Variable assignment: $var = Get-Content ...\n` +
+              `- Comparison: $var -match "pattern"\n` +
+              `- File search: Select-String -Path "file" -Pattern "pattern"`
+            );
+          }
+        }
+      }
+
       const maxOutput = DEFAULT_MAX_OUTPUT;
       const pendingMaxOutput = DEFAULT_PENDING_MAX_OUTPUT;
       const warnings: string[] = [];
