@@ -107,7 +107,19 @@
                                     "maxConcurrent":  4,
                                     "subagents":  {
                                                       "maxConcurrent":  8
-                                                  }
+                                                  },
+                                    "memorySearch":  {
+                                                         "provider":  "openai",
+                                                         "model":  "text-embedding-jina-embeddings-v3",
+                                                         "remote":  {
+                                                                        "baseUrl":  "http://127.0.0.1:12345/v1",
+                                                                        "batch":  {
+                                                                                      "enabled":  false
+                                                                                  },
+                                                                        "apiKey":  ""
+                                                                    },
+                                                         "enabled":  true
+                                                     }
                                 }
                },
     "messages":  {
