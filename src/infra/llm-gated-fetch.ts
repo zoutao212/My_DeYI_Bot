@@ -180,6 +180,13 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
   }
 
   const wrapped: typeof fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const ctx = getLlmRequestContext();
+    
+    // 如果没有 LLM 请求上下文，直接调用原始 fetch（不拦截 Embeddings 等非 LLM 请求）
+    if (!ctx) {
+      return await original(input, init);
+    }
+    
     // 添加请求间隔控制，避免并发请求
     const now = Date.now();
     const timeSinceLastRequest = now - lastRequestTime;
@@ -188,11 +195,6 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       await new Promise(resolve => setTimeout(resolve, waitTime));
     }
     lastRequestTime = Date.now();
-    
-    const ctx = getLlmRequestContext();
-    if (!ctx) {
-      return await original(input, init);
-    }
 
     const payload = await buildApprovalPayload({ input, init });
     if (!payload) {

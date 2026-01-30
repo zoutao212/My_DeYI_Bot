@@ -1026,11 +1026,17 @@ export function createExecTool(
     defaults?.agentId ??
     (parsedAgentSession ? resolveAgentIdFromSessionKey(defaults?.sessionKey) : undefined);
 
+  const platformHint =
+    process.platform === "win32"
+      ? " On Windows, use PowerShell commands (Select-String, Get-ChildItem, Get-Content), not Linux commands (grep, find, cat)."
+      : "";
+
   return {
     name: "exec",
     label: "exec",
     description:
-      "Execute shell commands with background continuation. Use yieldMs/background to continue later via process tool. Use pty=true for TTY-required commands (terminal UIs, coding agents).",
+      "Execute shell commands with background continuation. Use yieldMs/background to continue later via process tool. Use pty=true for TTY-required commands (terminal UIs, coding agents)." +
+      platformHint,
     parameters: execSchema,
     execute: async (_toolCallId, args, signal, onUpdate) => {
       const params = args as {

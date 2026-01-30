@@ -367,6 +367,31 @@ export function buildAgentSystemPrompt(params: {
     return l10n.identityLine;
   }
 
+  // Platform-specific command guidance for Windows
+  const platformGuidance =
+    runtimeInfo?.os === "win32" || process.platform === "win32"
+      ? [
+          "",
+          promptLanguage === "zh" ? "## 平台命令规范（Windows）" : "## Platform Commands (Windows)",
+          promptLanguage === "zh"
+            ? "你运行在 Windows 环境下，必须使用 PowerShell 命令："
+            : "You are running on Windows. Use PowerShell commands:",
+          promptLanguage === "zh"
+            ? "- 文件搜索：`Select-String -Path . -Pattern \"关键词\" -Recurse -Encoding UTF8`"
+            : "- File search: `Select-String -Path . -Pattern \"pattern\" -Recurse -Encoding UTF8`",
+          promptLanguage === "zh"
+            ? "- 列出文件：`Get-ChildItem -Recurse`"
+            : "- List files: `Get-ChildItem -Recurse`",
+          promptLanguage === "zh"
+            ? "- 读取文件：`Get-Content \"file.txt\" -Encoding UTF8`"
+            : "- Read file: `Get-Content \"file.txt\" -Encoding UTF8`",
+          promptLanguage === "zh"
+            ? "- **禁止使用 Linux 命令**：`grep`、`find`、`cat`、`ls` 等在 Windows 上不可用"
+            : "- **DO NOT use Linux commands**: `grep`, `find`, `cat`, `ls` are not available on Windows",
+          "",
+        ]
+      : [];
+
   const lines = [
     l10n.identityLine,
     "",
@@ -381,6 +406,7 @@ export function buildAgentSystemPrompt(params: {
             formatTemplate(line, { execTool: execToolName, processTool: processToolName }),
           ),
         ].join("\n"),
+    ...platformGuidance,
     l10n.toolsMdNote,
     l10n.subagentNote,
     "",
