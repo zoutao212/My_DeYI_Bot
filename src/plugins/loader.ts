@@ -436,7 +436,7 @@ export function loadClawdbotPlugins(options: PluginLoadOptions = {}): PluginRegi
   }
 
   // 🆕 注册内置插件（动态管道）
-  // 注意：使用延迟加载，避免循环依赖
+  // 注意：必须同步注册，确保在 initializeGlobalHookRunner 之前完成
   try {
     const pipelineRecord = createPluginRecord({
       id: "clawdbot-pipeline",
@@ -454,15 +454,14 @@ export function loadClawdbotPlugins(options: PluginLoadOptions = {}): PluginRegi
       pluginConfig: undefined,
     });
     
-    // 延迟导入并注册
-    import("../agents/pipeline/register.js")
-      .then(({ registerPipelinePlugin }) => {
-        registerPipelinePlugin(pipelineApi);
-        logger.info("[plugins] Registered built-in plugin: clawdbot-pipeline");
-      })
-      .catch((err) => {
-        logger.warn(`[plugins] Failed to register built-in pipeline plugin: ${String(err)}`);
-      });
+    // 🔧 FIX: 同步导入并注册（避免异步导致 Plugin 未注册）
+    // 使用 jiti 同步加载模块
+    const pipelineModule = jiti("../agents/pipeline/register.js") as {
+      registerPipelinePlugin: (api: ReturnType<typeof createApi>) => void;
+    };
+    
+    pipelineModule.registerPipelinePlugin(pipelineApi);
+    logger.info("[plugins] Registered built-in plugin: clawdbot-pipeline");
     
     registry.plugins.push(pipelineRecord);
   } catch (err) {
