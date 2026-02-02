@@ -109,6 +109,15 @@ export function renderChatSendApprovalPrompt(state: AppViewState) {
           ${extraSystemPrompt
             ? html`<div class="exec-approval-command mono">${extraSystemPrompt}</div>`
             : nothing}
+
+          ${clientToolsCount > 0
+            ? html`
+                <div class="exec-approval-section-title">Tool Definitions (${clientToolsCount})</div>
+                <div class="exec-approval-command mono" style="max-height: 400px; overflow-y: auto;">
+                  ${JSON.stringify(clientTools, null, 2)}
+                </div>
+              `
+            : nothing}
         </div>
 
         <div class="exec-approval-actions">

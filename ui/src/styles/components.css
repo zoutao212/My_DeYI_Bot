@@ -1492,6 +1492,14 @@
   font-size: 13px;
 }
 
+.exec-approval-section-title {
+  margin-top: 16px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
 .exec-approval-command--scroll {
   max-height: min(52dvh, 520px);
   overflow: auto;

@@ -766,6 +766,7 @@ export const chatHandlers: GatewayRequestHandlers = {
     let systemPrompt: string | null = null;
     let characterName: string | undefined;
     let prependContext: string | undefined;
+    let tools: unknown[] = [];
     
     try {
       const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
@@ -823,7 +824,7 @@ export const chatHandlers: GatewayRequestHandlers = {
           return { prompt: "", skills: [], resolvedSkills: [] };
         }
       })();
-      const tools = (() => {
+      tools = (() => {
         try {
           const modelApi = provider.trim().toLowerCase().includes("vectorengine")
             ? "openai-completions"
@@ -845,8 +846,8 @@ export const chatHandlers: GatewayRequestHandlers = {
           return [];
         }
       })();
-      const toolSummaries = buildToolSummaryMap(tools);
-      const toolNames = tools.map((t) => t.name);
+      const toolSummaries = buildToolSummaryMap(tools as any);
+      const toolNames = (tools as any[]).map((t) => t.name);
       const defaultModelRef = resolveDefaultModelForAgent({ cfg, agentId });
       const defaultModelLabel = `${defaultModelRef.provider}/${defaultModelRef.model}`;
       const { runtimeInfo, userTimezone, userTime, userTimeFormat } = buildSystemPromptParams({
@@ -936,8 +937,15 @@ export const chatHandlers: GatewayRequestHandlers = {
       modelRef: `${provider}/${model}`,
       thinkingLevel,
       extraSystemPrompt: systemPrompt,
-      clientToolsStatus: "not_applicable",
-      clientTools: null,
+      clientToolsStatus: tools.length > 0 ? "available" : "not_applicable",
+      clientTools:
+        tools.length > 0
+          ? tools.map((t: any) => ({
+              name: t.name,
+              description: t.description,
+              parameters: t.parameters,
+            }))
+          : null,
       attachments: normalizedAttachments,
       // 🆕 添加 Pipeline Hook 返回的信息
       characterName,

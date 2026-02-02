@@ -139,7 +139,77 @@ grepSearch -query "CLAUDE_PARAM_GROUPS" -includePattern "**/*.ts"
 
 ---
 
-### 步骤 5：验证修复
+### 步骤 5：检查系统提示词中的示例 ⚠️ **新增**
+
+**为什么要检查？**
+
+即使 schema 正确，系统提示词中的**误导性示例**也会让 LLM 返回文本模拟。
+
+**检查方法**
+
+```powershell
+# 提取系统提示词
+$payload = Get-Content "payload_debug.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+$systemPrompt = $payload.systemInstruction.parts[0].text
+
+# 保存系统提示词
+$systemPrompt | Out-File "system_prompt.txt" -Encoding UTF8
+
+# 搜索工具相关的示例
+Select-String -Path "system_prompt.txt" -Pattern "write.*\{.*\}" -Context 2,2
+```
+
+**检查清单**：
+- [ ] 是否有展示 JSON 格式的调用示例？
+- [ ] 示例是否与 API 的 function calling 机制一致？
+- [ ] 是否有"错误的做法"作为示例？
+
+**常见错误示例**：
+
+```
+❌ 错误：展示 JSON 格式
+write({ path: "test.txt", content: "hello" })
+
+❌ 错误：展示文本模拟
+`write_file(file_path='...', content='...')`
+
+✅ 正确：只说明参数，不展示调用格式
+write(path, content): path=文件路径，content=完整内容
+```
+
+**为什么会误导？**
+
+1. **LLM 会模仿示例**
+   - 示例是 LLM 学习的重要来源
+   - LLM 倾向于模仿示例而不是遵循文字说明
+
+2. **JSON 格式不是 function calling**
+   - Gemini API 的 function calling 是通过 API 机制
+   - 不是通过返回 JSON 文本
+   - 示例展示 JSON 格式会让 LLM 返回文本
+
+3. **与警告矛盾**
+   - 系统提示词中通常有警告："不要在回复文本中模仿工具调用格式"
+   - 但示例却展示了"模仿工具调用格式"
+   - LLM 会优先模仿示例
+
+**修复方法**：
+
+```typescript
+// ❌ 错误：有误导性示例
+toolParamsQuickRef: `## 核心工具参数速查
+- **write(path, content)**:path=文件路径，content=完整内容。示例:write({ path: "test.txt", content: "hello" })
+`
+
+// ✅ 正确：只说明参数
+toolParamsQuickRef: `## 核心工具参数速查
+- **write(path, content)**:path=文件路径，content=完整内容
+`
+```
+
+---
+
+### 步骤 6：验证修复
 
 **创建验证脚本**
 
@@ -253,6 +323,49 @@ if (idx !== -1) {
   // 运行时验证只是额外的安全检查
 }
 ```
+
+---
+
+### 模式 4：系统提示词示例误导 ⚠️ **新增**
+
+**症状**：
+- Schema 正确（`required` 包含所有必需参数）
+- LLM 说要调用工具："Let's construct the tool call"
+- 但实际上返回文本模拟
+- 没有真正的 `functionCall`
+
+**原因**：
+- 系统提示词中有误导性的示例
+- 示例展示了 JSON 格式的调用
+- LLM 模仿示例而不是使用 function calling 机制
+
+**示例**：
+
+```
+系统提示词中的错误示例：
+write({ path: "test.txt", content: "hello" })
+
+LLM 的行为：
+返回文本："我会使用 write({ path: "test.txt", content: "hello" })"
+而不是真正的 functionCall
+```
+
+**修复**：
+- 移除系统提示词中的误导性示例
+- 只保留参数说明，不展示调用格式
+- 让 LLM 依赖 API 的 function calling 机制
+
+**验证**：
+```powershell
+# 检查系统提示词中的示例
+$systemPrompt = $payload.systemInstruction.parts[0].text
+$systemPrompt | Select-String -Pattern "write.*\{.*\}"
+```
+
+**关键教训**：
+- 系统提示词中的示例必须准确
+- 不要展示"错误的做法"，即使是作为说明
+- LLM 会优先模仿示例而不是遵循文字说明
 
 ---
 
@@ -399,24 +512,31 @@ if (required.includes("path") && required.includes("content")) {
    - 运行时验证不能弥补 schema 的错误
    - Schema 必须准确反映 LLM 应该提供的参数
 
-2. **不要假设问题在哪里**
+2. **系统提示词中的示例必须准确** ⚠️ **新增**
+   - 示例是 LLM 学习的重要来源
+   - 错误的示例会直接误导 LLM 的行为
+   - LLM 会优先模仿示例而不是遵循文字说明
+   - 不要展示"错误的做法"，即使是作为说明
+
+3. **不要假设问题在哪里**
    - 不要只看错误信息
    - 不要假设是系统提示词过长
-   - 用数据说话：提取完整 payload，检查 schema
+   - 用数据说话：提取完整 payload，检查 schema 和系统提示词
 
-3. **别名字段的正确处理**
+4. **别名字段的正确处理**
    - 添加别名字段到 `properties`
    - 保留原字段在 `required` 中
    - 运行时规范化参数
 
-4. **LLM 在不确定时会选择安全行为**
+5. **LLM 在不确定时会选择安全行为**
    - Schema 不清晰 → LLM 返回文本
    - Schema 清晰 → LLM 调用工具
    - 清晰的 schema 可以提高工具调用成功率
 
-5. **调试要系统化**
+6. **调试要系统化**
    - 提取完整 payload
    - 检查 tools schema
+   - **检查系统提示词中的示例** ⚠️ **新增**
    - 对比原始和修改后的工具
    - 创建测试脚本验证
    - 追踪代码修改逻辑
@@ -431,6 +551,6 @@ if (required.includes("path") && required.includes("content")) {
 
 ---
 
-**版本**：v20260202_1  
+**版本**：v20260202_2  
 **最后更新**：2026-02-02  
-**变更**：初始版本，总结工具 Schema 调试方法论
+**变更**：新增"系统提示词示例误导"问题模式和调试步骤
