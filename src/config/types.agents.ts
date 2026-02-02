@@ -25,6 +25,8 @@ export type AgentConfig = {
   agentDir?: string;
   model?: AgentModelConfig;
   memorySearch?: MemorySearchConfig;
+  /** Memory service configuration for this agent. */
+  memory?: MemoryServiceConfig;
   /** Human-like delay between block replies for this agent. */
   humanDelay?: HumanDelayConfig;
   /** Optional per-agent heartbeat overrides. */
@@ -65,6 +67,17 @@ export type AgentConfig = {
 export type AgentsConfig = {
   defaults?: AgentDefaultsConfig;
   list?: AgentConfig[];
+  /** 动态管道配置 */
+  dynamicPipeline?: {
+    /** 是否启用动态管道。默认 false。 */
+    enabled?: boolean;
+    /** 角色配置目录。默认 "clawd/characters"。 */
+    charactersDir?: string;
+    /** 默认角色。默认 undefined（不使用角色）。 */
+    defaultCharacter?: string;
+    /** 系统人格。默认 undefined（使用默认人格）。 */
+    systemPersona?: string;
+  };
 };
 
 export type AgentBinding = {
@@ -75,5 +88,33 @@ export type AgentBinding = {
     peer?: { kind: "dm" | "group" | "channel"; id: string };
     guildId?: string;
     teamId?: string;
+  };
+};
+
+/**
+ * 记忆服务配置
+ */
+export type MemoryServiceConfig = {
+  /** 检索配置 */
+  retrieval?: {
+    /** 最大结果数。默认 5 */
+    maxResults?: number;
+    /** 最小相关性分数 (0-1)。默认 0.7 */
+    minScore?: number;
+    /** 检索来源。默认 ["memory", "sessions"] */
+    sources?: ("memory" | "sessions")[];
+    /** 检索超时（毫秒）。默认 5000 */
+    timeoutMs?: number;
+  };
+  /** 归档配置 */
+  archival?: {
+    /** 归档策略。默认 "on-demand" */
+    strategy?: "always" | "on-demand" | "threshold";
+    /** 归档路径。默认 "memory/sessions" */
+    path?: string;
+    /** 归档格式。默认 "markdown" */
+    format?: "markdown" | "json";
+    /** 归档频率（轮数）。默认 10 */
+    frequency?: number;
   };
 };

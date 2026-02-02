@@ -502,3 +502,41 @@ export const ProviderCommandsSchema = z
   })
   .strict()
   .optional();
+
+/**
+ * 记忆服务配置 Schema
+ * 用于 agent 级别的记忆检索和归档配置
+ */
+export const MemoryServiceSchema = z
+  .object({
+    /** 检索配置 */
+    retrieval: z
+      .object({
+        /** 最大结果数。默认 5 */
+        maxResults: z.number().int().positive().optional(),
+        /** 最小相关性分数 (0-1)。默认 0.7 */
+        minScore: z.number().min(0).max(1).optional(),
+        /** 检索来源。默认 ["memory", "sessions"] */
+        sources: z.array(z.enum(["memory", "sessions"])).optional(),
+        /** 检索超时（毫秒）。默认 5000 */
+        timeoutMs: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    /** 归档配置 */
+    archival: z
+      .object({
+        /** 归档策略。默认 "on-demand" */
+        strategy: z.enum(["always", "on-demand", "threshold"]).optional(),
+        /** 归档路径。默认 "memory/sessions" */
+        path: z.string().optional(),
+        /** 归档格式。默认 "markdown" */
+        format: z.enum(["markdown", "json"]).optional(),
+        /** 归档频率（轮数）。默认 10 */
+        frequency: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .optional();

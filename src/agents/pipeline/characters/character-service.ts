@@ -1,0 +1,596 @@
+/**
+ * 角色服务
+ * 智能加载、初始化、更新角色配置
+ */
+
+import { readFile, writeFile, mkdir, readdir, stat, copyFile } from "node:fs/promises";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createSubsystemLogger } from "../../../logging/subsystem.js";
+import type { CharacterRecognitionConfig } from "../types.js";
+
+const log = createSubsystemLogger("pipeline:character");
+
+// ==============================================================================
+// 类型定义
+// ==============================================================================
+
+export interface FullCharacterConfig {
+  // 基本信息
+  name: string;
+  displayName: string;
+  version: string;
+  type: "system-persona" | "virtual-character";
+  enabled: boolean;
+
+  // 识别配置
+  recognition: {
+    names: string[];
+    triggers: string[];
+    contexts: string[];
+  };
+
+  // 功能配置
+  features: Record<string, boolean>;
+
+  // 系统提示词配置
+  systemPrompt: {
+    role: string;
+    personality: string[];
+    addressUser: string;
+    addressSelf: string;
+  };
+
+  // 记忆配置
+  memory: {
+    coreMemoriesFile: string;
+    sessionArchiveDir: string;
+    maxRetrievalResults: number;
+  };
+
+  // 提示词配置
+  prompts: {
+    systemPromptTemplate: string;
+  };
+
+  // 知识库配置
+  knowledge: {
+    files: string[];
+  };
+
+  // 提醒配置（仅系统人格）
+  reminders?: {
+    enabled: boolean;
+    checkInterval: number;
+    advanceNotice: number;
+  };
+
+  // 关系配置（仅虚拟角色）
+  relationship?: {
+    enabled: boolean;
+    initialIntimacy: number;
+    trackEmotions: boolean;
+  };
+}
+
+export interface CharacterProfile {
+  background: string;
+  personality: string;
+  capabilities: string;
+  interactionStyle: string;
+  rawContent: string;
+}
+
+export interface CharacterKnowledge {
+  files: Record<string, string>;
+  combinedContent: string;
+}
+
+export interface CharacterMemories {
+  coreMemories: string;
+  recentSessions: string[];
+}
+
+export interface LoadedCharacter {
+  config: FullCharacterConfig;
+  profile: CharacterProfile;
+  knowledge: CharacterKnowledge;
+  memories: CharacterMemories;
+  systemPromptTemplate: string;
+  formattedSystemPrompt: string;
+  isSystemPersona: boolean;
+  characterDir: string;
+}
+
+// ==============================================================================
+// 角色服务类
+// ==============================================================================
+
+export class CharacterService {
+  private charactersDir: string;
+  private templatesDir: string;
+  private loadedCharacters = new Map<string, LoadedCharacter>();
+
+  constructor(
+    private readonly basePath: string = process.cwd(),
+    private readonly clawdDir: string = "clawd",
+  ) {
+    this.charactersDir = join(basePath, clawdDir, "characters");
+    // 模板目录在代码中
+    const currentDir = dirname(fileURLToPath(import.meta.url));
+    this.templatesDir = join(currentDir, "templates");
+  }
+
+  /**
+   * 加载完整的角色配置
+   */
+  async loadCharacter(characterId: string): Promise<LoadedCharacter | null> {
+    // 检查缓存
+    if (this.loadedCharacters.has(characterId)) {
+      return this.loadedCharacters.get(characterId)!;
+    }
+
+    const characterDir = join(this.charactersDir, characterId);
+
+    // 检查角色目录是否存在，不存在则尝试初始化
+    if (!(await this.directoryExists(characterDir))) {
+      const initialized = await this.initializeCharacter(characterId);
+      if (!initialized) {
+        log.warn(`[CharacterService] Character ${characterId} not found and could not be initialized`);
+        return null;
+      }
+    }
+
+    try {
+      // 1. 加载配置
+      const config = await this.loadConfig(characterDir);
+      if (!config) {
+        log.warn(`[CharacterService] Failed to load config for ${characterId}`);
+        return null;
+      }
+
+      // 2. 加载角色档案
+      const profile = await this.loadProfile(characterDir);
+
+      // 3. 加载知识库
+      const knowledge = await this.loadKnowledge(characterDir, config.knowledge.files);
+
+      // 4. 加载记忆
+      const memories = await this.loadMemories(characterDir, config.memory);
+
+      // 5. 加载系统提示词模板
+      const systemPromptTemplate = await this.loadSystemPromptTemplate(characterDir, config.prompts);
+
+      // 6. 生成格式化的系统提示词
+      const formattedSystemPrompt = this.formatSystemPrompt(systemPromptTemplate, {
+        config,
+        profile,
+        knowledge,
+        memories,
+      });
+
+      const loaded: LoadedCharacter = {
+        config,
+        profile,
+        knowledge,
+        memories,
+        systemPromptTemplate,
+        formattedSystemPrompt,
+        isSystemPersona: config.type === "system-persona",
+        characterDir,
+      };
+
+      // 缓存
+      this.loadedCharacters.set(characterId, loaded);
+
+      log.info(`[CharacterService] Loaded character: ${characterId} (${config.displayName})`);
+      return loaded;
+    } catch (error) {
+      log.error(`[CharacterService] Failed to load character ${characterId}: ${error}`);
+      return null;
+    }
+  }
+
+  /**
+   * 获取所有角色的识别配置（用于意图分析）
+   */
+  async getAllRecognitionConfigs(): Promise<CharacterRecognitionConfig[]> {
+    const configs: CharacterRecognitionConfig[] = [];
+
+    try {
+      const entries = await readdir(this.charactersDir).catch(() => []);
+      
+      for (const entry of entries) {
+        const characterDir = join(this.charactersDir, entry);
+        if (!(await this.directoryExists(characterDir))) continue;
+
+        const config = await this.loadConfig(characterDir);
+        
+        // 验证配置完整性
+        if (!config || !config.enabled) continue;
+        if (!config.recognition || !config.recognition.names) {
+          log.warn(`[CharacterService] Skipping ${entry}: missing recognition config`);
+          continue;
+        }
+
+        configs.push({
+          id: config.name,
+          displayName: config.displayName,
+          isSystemPersona: config.type === "system-persona",
+          recognition: {
+            names: config.recognition.names || [],
+            triggers: config.recognition.triggers || [],
+            contexts: config.recognition.contexts || [],
+          },
+        });
+      }
+    } catch (error) {
+      log.warn(`[CharacterService] Failed to load recognition configs: ${error}`);
+    }
+
+    log.info(`[CharacterService] Loaded ${configs.length} character recognition configs`);
+    return configs;
+  }
+
+  /**
+   * 初始化角色目录（从模板）
+   */
+  async initializeCharacter(characterId: string): Promise<boolean> {
+    const templatePrefix = `${characterId}-`;
+    const characterDir = join(this.charactersDir, characterId);
+
+    try {
+      // 检查是否有对应的模板
+      const templateFiles = await readdir(this.templatesDir).catch(() => []);
+      const relevantTemplates = templateFiles.filter((f) => f.startsWith(templatePrefix));
+
+      if (relevantTemplates.length === 0) {
+        log.warn(`[CharacterService] No templates found for character: ${characterId}`);
+        return false;
+      }
+
+      // 创建角色目录结构
+      await mkdir(characterDir, { recursive: true });
+      await mkdir(join(characterDir, "memory"), { recursive: true });
+      await mkdir(join(characterDir, "memory", "sessions"), { recursive: true });
+      await mkdir(join(characterDir, "prompts"), { recursive: true });
+      await mkdir(join(characterDir, "knowledge"), { recursive: true });
+
+      // 复制模板文件
+      for (const templateFile of relevantTemplates) {
+        const templatePath = join(this.templatesDir, templateFile);
+        const targetFileName = templateFile.replace(templatePrefix, "").replace(".json", ".json");
+
+        let targetPath: string;
+        if (templateFile.endsWith("-config.json")) {
+          targetPath = join(characterDir, "config.json");
+        } else if (templateFile.endsWith("-profile.md")) {
+          targetPath = join(characterDir, "profile.md");
+        } else if (templateFile.endsWith("-system-prompt.md")) {
+          targetPath = join(characterDir, "prompts", "system.md");
+        } else if (templateFile.endsWith("-core-memories.md")) {
+          targetPath = join(characterDir, "memory", "core-memories.md");
+        } else if (templateFile.endsWith("-capabilities.md")) {
+          targetPath = join(characterDir, "knowledge", "capabilities.md");
+        } else if (templateFile.endsWith("-guidelines.md")) {
+          targetPath = join(characterDir, "knowledge", "guidelines.md");
+        } else {
+          // 其他知识库文件
+          const fileName = templateFile.replace(templatePrefix, "");
+          targetPath = join(characterDir, "knowledge", fileName);
+        }
+
+        await copyFile(templatePath, targetPath);
+        log.debug(`[CharacterService] Copied template: ${templateFile} -> ${targetPath}`);
+      }
+
+      log.info(`[CharacterService] Initialized character directory: ${characterId}`);
+      return true;
+    } catch (error) {
+      log.error(`[CharacterService] Failed to initialize character ${characterId}: ${error}`);
+      return false;
+    }
+  }
+
+  /**
+   * 更新角色核心记忆
+   */
+  async updateCoreMemories(characterId: string, content: string, append: boolean = true): Promise<boolean> {
+    try {
+      const characterDir = join(this.charactersDir, characterId);
+      const memoriesPath = join(characterDir, "memory", "core-memories.md");
+
+      if (append) {
+        const existing = await readFile(memoriesPath, "utf-8").catch(() => "");
+        const timestamp = new Date().toLocaleString("zh-CN");
+        const newContent = `${existing}\n\n## ${timestamp}\n\n${content}`;
+        await writeFile(memoriesPath, newContent, "utf-8");
+      } else {
+        await writeFile(memoriesPath, content, "utf-8");
+      }
+
+      // 清除缓存
+      this.loadedCharacters.delete(characterId);
+
+      log.info(`[CharacterService] Updated core memories for ${characterId}`);
+      return true;
+    } catch (error) {
+      log.error(`[CharacterService] Failed to update core memories for ${characterId}: ${error}`);
+      return false;
+    }
+  }
+
+  /**
+   * 归档会话到角色记忆
+   */
+  async archiveSession(
+    characterId: string,
+    sessionId: string,
+    summary: string,
+    metadata?: Record<string, unknown>,
+  ): Promise<boolean> {
+    try {
+      const characterDir = join(this.charactersDir, characterId);
+      const sessionsDir = join(characterDir, "memory", "sessions");
+      await mkdir(sessionsDir, { recursive: true });
+
+      const timestamp = new Date().toISOString().split("T")[0];
+      const sessionFile = join(sessionsDir, `${timestamp}_${sessionId}.md`);
+
+      const content = [
+        `# 会话归档`,
+        ``,
+        `- **会话ID**: ${sessionId}`,
+        `- **时间**: ${new Date().toLocaleString("zh-CN")}`,
+        metadata ? `- **元数据**: ${JSON.stringify(metadata)}` : "",
+        ``,
+        `## 会话总结`,
+        ``,
+        summary,
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      await writeFile(sessionFile, content, "utf-8");
+
+      // 清除缓存
+      this.loadedCharacters.delete(characterId);
+
+      log.info(`[CharacterService] Archived session ${sessionId} for ${characterId}`);
+      return true;
+    } catch (error) {
+      log.error(`[CharacterService] Failed to archive session for ${characterId}: ${error}`);
+      return false;
+    }
+  }
+
+  /**
+   * 获取角色目录路径
+   */
+  getCharacterDir(characterId: string): string {
+    return join(this.charactersDir, characterId);
+  }
+
+  /**
+   * 检查角色是否存在
+   */
+  async characterExists(characterId: string): Promise<boolean> {
+    const characterDir = join(this.charactersDir, characterId);
+    return this.directoryExists(characterDir);
+  }
+
+  /**
+   * 清除缓存
+   */
+  clearCache(characterId?: string): void {
+    if (characterId) {
+      this.loadedCharacters.delete(characterId);
+    } else {
+      this.loadedCharacters.clear();
+    }
+  }
+
+  // ==============================================================================
+  // 私有方法
+  // ==============================================================================
+
+  private async loadConfig(characterDir: string): Promise<FullCharacterConfig | null> {
+    try {
+      const configPath = join(characterDir, "config.json");
+      const content = await readFile(configPath, "utf-8");
+      return JSON.parse(content) as FullCharacterConfig;
+    } catch {
+      return null;
+    }
+  }
+
+  private async loadProfile(characterDir: string): Promise<CharacterProfile> {
+    try {
+      const profilePath = join(characterDir, "profile.md");
+      const content = await readFile(profilePath, "utf-8");
+      const sections = this.parseMarkdownSections(content);
+
+      return {
+        background: sections["背景故事"] || sections["Background"] || "",
+        personality: sections["性格特点"] || sections["Personality"] || "",
+        capabilities: sections["核心能力"] || sections["Capabilities"] || "",
+        interactionStyle: sections["互动风格"] || sections["Interaction Style"] || "",
+        rawContent: content,
+      };
+    } catch {
+      return {
+        background: "",
+        personality: "",
+        capabilities: "",
+        interactionStyle: "",
+        rawContent: "",
+      };
+    }
+  }
+
+  private async loadKnowledge(characterDir: string, files: string[]): Promise<CharacterKnowledge> {
+    const knowledge: CharacterKnowledge = {
+      files: {},
+      combinedContent: "",
+    };
+
+    const knowledgeDir = join(characterDir, "knowledge");
+
+    for (const file of files) {
+      try {
+        const filePath = join(knowledgeDir, file);
+        const content = await readFile(filePath, "utf-8");
+        knowledge.files[file] = content;
+      } catch {
+        // 文件不存在，跳过
+      }
+    }
+
+    knowledge.combinedContent = Object.values(knowledge.files).join("\n\n---\n\n");
+    return knowledge;
+  }
+
+  private async loadMemories(
+    characterDir: string,
+    memoryConfig: FullCharacterConfig["memory"],
+  ): Promise<CharacterMemories> {
+    const memories: CharacterMemories = {
+      coreMemories: "",
+      recentSessions: [],
+    };
+
+    try {
+      // 加载核心记忆
+      const coreMemoriesPath = join(characterDir, "memory", memoryConfig.coreMemoriesFile);
+      memories.coreMemories = await readFile(coreMemoriesPath, "utf-8").catch(() => "");
+
+      // 加载最近的会话归档
+      const sessionsDir = join(characterDir, "memory", memoryConfig.sessionArchiveDir);
+      const sessionFiles = await readdir(sessionsDir).catch(() => []);
+
+      // 按文件名排序（最新的在前）
+      const sortedFiles = sessionFiles
+        .filter((f) => f.endsWith(".md"))
+        .sort()
+        .reverse()
+        .slice(0, 5); // 只取最近5个
+
+      for (const file of sortedFiles) {
+        try {
+          const content = await readFile(join(sessionsDir, file), "utf-8");
+          memories.recentSessions.push(content);
+        } catch {
+          // 跳过
+        }
+      }
+    } catch {
+      // 忽略错误
+    }
+
+    return memories;
+  }
+
+  private async loadSystemPromptTemplate(
+    characterDir: string,
+    promptsConfig: FullCharacterConfig["prompts"],
+  ): Promise<string> {
+    try {
+      const templatePath = join(characterDir, "prompts", promptsConfig.systemPromptTemplate);
+      return await readFile(templatePath, "utf-8");
+    } catch {
+      return "";
+    }
+  }
+
+  private formatSystemPrompt(
+    template: string,
+    context: {
+      config: FullCharacterConfig;
+      profile: CharacterProfile;
+      knowledge: CharacterKnowledge;
+      memories: CharacterMemories;
+    },
+  ): string {
+    const { config, profile, knowledge, memories } = context;
+
+    let result = template;
+
+    // 替换变量
+    const replacements: Record<string, string> = {
+      "{userName}": "用户",
+      "{addressUser}": config.systemPrompt.addressUser,
+      "{addressSelf}": config.systemPrompt.addressSelf,
+      "{personality}": config.systemPrompt.personality.join("、"),
+      "{capabilities}": profile.capabilities || "待定义",
+      "{characterProfile}": profile.rawContent,
+      "{currentDate}": new Date().toLocaleDateString("zh-CN"),
+      "{coreMemories}": memories.coreMemories || "暂无核心记忆",
+      "{relevantMemories}": memories.recentSessions.join("\n\n") || "暂无相关记忆",
+      "{relationshipStatus}": "初始状态",
+    };
+
+    for (const [key, value] of Object.entries(replacements)) {
+      result = result.replaceAll(key, value);
+    }
+
+    // 如果有知识库内容，追加到末尾
+    if (knowledge.combinedContent) {
+      result += `\n\n## 知识库\n\n${knowledge.combinedContent}`;
+    }
+
+    return result;
+  }
+
+  private parseMarkdownSections(content: string): Record<string, string> {
+    const sections: Record<string, string> = {};
+    const lines = content.split("\n");
+
+    let currentSection = "";
+    let currentContent: string[] = [];
+
+    for (const line of lines) {
+      if (line.startsWith("## ")) {
+        if (currentSection) {
+          sections[currentSection] = currentContent.join("\n").trim();
+        }
+        currentSection = line.replace("## ", "").trim();
+        currentContent = [];
+      } else if (currentSection) {
+        currentContent.push(line);
+      }
+    }
+
+    if (currentSection) {
+      sections[currentSection] = currentContent.join("\n").trim();
+    }
+
+    return sections;
+  }
+
+  private async directoryExists(path: string): Promise<boolean> {
+    try {
+      const stats = await stat(path);
+      return stats.isDirectory();
+    } catch {
+      return false;
+    }
+  }
+}
+
+// ==============================================================================
+// 工厂函数
+// ==============================================================================
+
+let defaultService: CharacterService | null = null;
+
+export function getCharacterService(basePath?: string, clawdDir?: string): CharacterService {
+  if (!defaultService || basePath || clawdDir) {
+    defaultService = new CharacterService(basePath, clawdDir);
+  }
+  return defaultService;
+}
+
+export function createCharacterService(basePath?: string, clawdDir?: string): CharacterService {
+  return new CharacterService(basePath, clawdDir);
+}
+

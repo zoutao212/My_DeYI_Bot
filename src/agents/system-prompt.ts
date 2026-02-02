@@ -226,6 +226,8 @@ export function buildAgentSystemPrompt(params: {
   promptLanguage?: PromptLanguage;
   /** Session summary to inject into system prompt (provides task context). */
   sessionSummary?: string;
+  /** Task board to inject into system prompt (provides task tracking). */
+  taskBoard?: string;
 }) {
   const promptLanguage = params.promptLanguage ?? "en";
   const l10n = promptLanguage === "zh" ? SYSTEM_PROMPT_L10N_ZH : SYSTEM_PROMPT_L10N_EN;
@@ -646,6 +648,11 @@ export function buildAgentSystemPrompt(params: {
   // Inject session summary before Runtime section (if available)
   if (params.sessionSummary) {
     lines.push(params.sessionSummary, "");
+  }
+
+  // 🆕 Inject task board before Runtime section (if available)
+  if (params.taskBoard) {
+    lines.push(params.taskBoard, "");
   }
 
   lines.push(

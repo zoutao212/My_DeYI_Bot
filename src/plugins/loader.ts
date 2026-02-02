@@ -435,6 +435,40 @@ export function loadClawdbotPlugins(options: PluginLoadOptions = {}): PluginRegi
     });
   }
 
+  // 🆕 注册内置插件（动态管道）
+  // 注意：使用延迟加载，避免循环依赖
+  try {
+    const pipelineRecord = createPluginRecord({
+      id: "clawdbot-pipeline",
+      name: "Dynamic Pipeline Plugin",
+      description: "动态管道插件：LLM 驱动的意图分析与能力调度",
+      version: "1.0.0",
+      source: "built-in",
+      origin: "bundled",
+      enabled: true,
+      configSchema: false,
+    });
+    
+    const pipelineApi = createApi(pipelineRecord, {
+      config: cfg,
+      pluginConfig: undefined,
+    });
+    
+    // 延迟导入并注册
+    import("../agents/pipeline/register.js")
+      .then(({ registerPipelinePlugin }) => {
+        registerPipelinePlugin(pipelineApi);
+        logger.info("[plugins] Registered built-in plugin: clawdbot-pipeline");
+      })
+      .catch((err) => {
+        logger.warn(`[plugins] Failed to register built-in pipeline plugin: ${String(err)}`);
+      });
+    
+    registry.plugins.push(pipelineRecord);
+  } catch (err) {
+    logger.warn(`[plugins] Failed to setup built-in pipeline plugin: ${String(err)}`);
+  }
+
   if (cacheEnabled) {
     registryCache.set(cacheKey, registry);
   }

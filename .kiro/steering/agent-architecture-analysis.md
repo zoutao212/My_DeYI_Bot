@@ -1,7 +1,5 @@
 ---
-title: Agent 架构分析方法论
-version: v20260130_1
-tags: [agent, architecture, analysis, methodology]
+inclusion: manual
 ---
 
 # Agent 架构分析方法论
@@ -367,4 +365,3 @@ RunEmbeddedPiAgent
 **版本**：v20260130_1  
 **来源**：Clawdbot Agent 大脑架构分析实战  
 **适用范围**：所有复杂的 Agent 系统架构分析
-

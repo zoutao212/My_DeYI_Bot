@@ -5,6 +5,7 @@ import {
   GroupChatSchema,
   HumanDelaySchema,
   IdentitySchema,
+  MemoryServiceSchema,
   ToolsLinksSchema,
   ToolsMediaSchema,
 } from "./zod-schema.core.js";
@@ -395,6 +396,7 @@ export const AgentEntrySchema = z
     agentDir: z.string().optional(),
     model: AgentModelSchema.optional(),
     memorySearch: MemorySearchSchema,
+    memory: MemoryServiceSchema,
     humanDelay: HumanDelaySchema.optional(),
     heartbeat: HeartbeatSchema,
     identity: IdentitySchema,

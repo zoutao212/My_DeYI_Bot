@@ -5,6 +5,8 @@ import {
 } from "./llm-approvals.js";
 import { getLlmRequestContext } from "./llm-request-context.js";
 import { createHash } from "node:crypto";
+import { registerUnhandledRejectionHandler } from "./unhandled-rejections.js";
+import { formatErrorMessage } from "./errors.js";
 
 function toPlainHeaders(headers: HeadersInit | undefined): Record<string, string> {
   const out: Record<string, string> = {};
@@ -180,58 +182,85 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
   }
 
   const wrapped: typeof fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-    const ctx = getLlmRequestContext();
-    
-    // 如果没有 LLM 请求上下文，直接调用原始 fetch（不拦截 Embeddings 等非 LLM 请求）
-    if (!ctx) {
-      return await original(input, init);
-    }
-    
-    // 添加请求间隔控制，避免并发请求
-    const now = Date.now();
-    const timeSinceLastRequest = now - lastRequestTime;
-    if (timeSinceLastRequest < MIN_REQUEST_INTERVAL_MS) {
-      const waitTime = MIN_REQUEST_INTERVAL_MS - timeSinceLastRequest;
-      await new Promise(resolve => setTimeout(resolve, waitTime));
-    }
-    lastRequestTime = Date.now();
-
-    const payload = await buildApprovalPayload({ input, init });
-    if (!payload) {
-      return await original(input, init);
-    }
-
-    pruneAttempts();
-    const attemptKey = computeAttemptKey(payload);
-    const attemptEntry = attempts.get(attemptKey);
-    
-    // 检查是否超过重试次数（只计算失败次数）
-    if (attemptEntry && attemptEntry.failureCount > MAX_ATTEMPTS_PER_KEY) {
-      throw new Error(
-        `LLM_REQUEST_RETRY_LIMIT: 已超过最大重试次数（${MAX_ATTEMPTS_PER_KEY}），请求被阻断`,
-      );
-    }
-    
-    // 如果是重试请求，等待 1 秒
-    if (attemptEntry && attemptEntry.failureCount > 0) {
-      console.warn(`LLM 请求重试中（第 ${attemptEntry.failureCount} 次失败后重试），等待 ${RETRY_DELAY_MS}ms...`);
-      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
-    }
-
-    const approvals = loadLlmApprovals();
-    const ask = shouldAskLlmApproval({ approvals, request: payload });
-    if (ask.ask) {
-      const res = await params.requestApproval({ request: payload, timeoutMs: 120_000 });
-      const decision = res.decision;
-      if (decision === "allow-once" || decision === "allow-always") {
-        // 审批通过，执行请求
-        return await executeRequestWithRetry(attemptKey, input, init);
+    try {
+      const ctx = getLlmRequestContext();
+      
+      // 如果没有 LLM 请求上下文，直接调用原始 fetch（不拦截 Embeddings 等非 LLM 请求）
+      if (!ctx) {
+        return await original(input, init);
       }
-      throw new Error("LLM_REQUEST_DENIED: approval required");
-    }
+      
+      // 添加请求间隔控制，避免并发请求
+      const now = Date.now();
+      const timeSinceLastRequest = now - lastRequestTime;
+      if (timeSinceLastRequest < MIN_REQUEST_INTERVAL_MS) {
+        const waitTime = MIN_REQUEST_INTERVAL_MS - timeSinceLastRequest;
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
+      lastRequestTime = Date.now();
 
-    // 无需审批，直接执行请求
-    return await executeRequestWithRetry(attemptKey, input, init);
+      const payload = await buildApprovalPayload({ input, init });
+      if (!payload) {
+        return await original(input, init);
+      }
+
+      pruneAttempts();
+      const attemptKey = computeAttemptKey(payload);
+      const attemptEntry = attempts.get(attemptKey);
+      
+      // 检查是否超过重试次数（只计算失败次数）
+      if (attemptEntry && attemptEntry.failureCount > MAX_ATTEMPTS_PER_KEY) {
+        throw new Error(
+          `LLM_REQUEST_RETRY_LIMIT: 已超过最大重试次数（${MAX_ATTEMPTS_PER_KEY}），请求被阻断`,
+        );
+      }
+      
+      // 如果是重试请求，等待 1 秒
+      if (attemptEntry && attemptEntry.failureCount > 0) {
+        console.warn(`LLM 请求重试中（第 ${attemptEntry.failureCount} 次失败后重试），等待 ${RETRY_DELAY_MS}ms...`);
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+      }
+
+      const approvals = loadLlmApprovals();
+      const ask = shouldAskLlmApproval({ approvals, request: payload });
+      if (ask.ask) {
+        const res = await params.requestApproval({ request: payload, timeoutMs: 120_000 });
+        const decision = res.decision;
+        if (decision === "allow-once" || decision === "allow-always") {
+          // 审批通过，执行请求
+          return await executeRequestWithRetry(attemptKey, input, init);
+        }
+        throw new Error("LLM_REQUEST_DENIED: approval required");
+      }
+
+      // 无需审批，直接执行请求
+      return await executeRequestWithRetry(attemptKey, input, init);
+    } catch (error) {
+      // 捕获并记录各种错误类型
+      if (error && typeof error === "object" && "name" in error) {
+        const errorName = error.name;
+        
+        if (errorName === "AbortError") {
+          console.warn("[llm-gated-fetch] Request aborted:", error);
+          throw error; // 重新抛出，让上层处理
+        }
+        
+        if (errorName === "TypeError") {
+          const errorMessage = (error as { message?: string }).message;
+          if (errorMessage && errorMessage.includes("fetch failed")) {
+            console.warn("[llm-gated-fetch] Network error (fetch failed):", error);
+            throw error; // 重新抛出，让上层处理
+          }
+        }
+        
+        console.warn(`[llm-gated-fetch] Request error (${errorName}):`, error);
+        throw error;
+      }
+      
+      // 未知错误
+      console.warn("[llm-gated-fetch] Unknown error:", error);
+      throw error;
+    }
   };
 
   // 执行请求并处理重试逻辑
@@ -297,9 +326,51 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
           failureCount: current.failureCount + 1 
         });
       }
+      
+      // 记录错误类型
+      if (error && typeof error === "object" && "name" in error) {
+        const errorName = error.name;
+        if (errorName === "AbortError") {
+          console.warn("[llm-gated-fetch] Request aborted in executeRequestWithRetry:", error);
+        } else if (errorName === "TypeError") {
+          const errorMessage = (error as { message?: string }).message;
+          if (errorMessage && errorMessage.includes("fetch failed")) {
+            console.warn("[llm-gated-fetch] Network error (fetch failed):", error);
+          } else {
+            console.warn(`[llm-gated-fetch] Request error (${errorName}):`, error);
+          }
+        } else {
+          console.warn(`[llm-gated-fetch] Request error (${errorName}):`, error);
+        }
+      } else {
+        console.warn("[llm-gated-fetch] Unknown request error:", error);
+      }
+      
       throw error;
     }
   };
 
   globalThis.fetch = wrapped;
 }
+
+// 注册 unhandledRejection handler 来处理网络错误
+registerUnhandledRejectionHandler((reason) => {
+  const message = formatErrorMessage(reason);
+  
+  // 处理网络错误（fetch failed）
+  if (message.includes("fetch failed") || message.includes("TypeError: fetch failed")) {
+    console.error("[llm-gated-fetch] Network error (unhandled):", message);
+    // 返回 true 表示已处理，不需要 process.exit(1)
+    return true;
+  }
+  
+  // 处理 AbortError
+  if (message.includes("AbortError") || message.includes("aborted")) {
+    console.warn("[llm-gated-fetch] Request aborted (unhandled):", message);
+    // 返回 true 表示已处理
+    return true;
+  }
+  
+  // 其他错误不处理
+  return false;
+});

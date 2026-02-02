@@ -319,6 +319,7 @@ export type PluginHookBeforeAgentStartEvent = {
 export type PluginHookBeforeAgentStartResult = {
   systemPrompt?: string;
   prependContext?: string;
+  characterName?: string;  // 🆕 动态识别的角色名（传递给 buildEmbeddedSystemPrompt）
 };
 
 // agent_end hook

@@ -197,6 +197,95 @@ describe("session-summary", () => {
       const summary = generateSessionSummary(messages);
       expect(summary?.blockers.length).toBe(3);
     });
+
+    // 🆕 Test progress extraction
+    it("should extract progress from fraction pattern", () => {
+      const messages: AgentMessage[] = [
+        {
+          role: "user",
+          content: [{ type: "text", text: "执行任务" }],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "已完成 3/5 个子任务" }],
+        },
+      ];
+
+      const summary = generateSessionSummary(messages);
+      expect(summary?.progress).toEqual({
+        completed: 3,
+        total: 5,
+        percentage: 60,
+      });
+    });
+
+    it("should extract progress from percentage pattern", () => {
+      const messages: AgentMessage[] = [
+        {
+          role: "user",
+          content: [{ type: "text", text: "执行任务" }],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "进度 75%" }],
+        },
+      ];
+
+      const summary = generateSessionSummary(messages);
+      expect(summary?.progress).toEqual({
+        completed: 75,
+        total: 100,
+        percentage: 75,
+      });
+    });
+
+    // 🆕 Test next steps extraction
+    it("should extract next steps", () => {
+      const messages: AgentMessage[] = [
+        {
+          role: "user",
+          content: [{ type: "text", text: "执行任务" }],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "下一步：修复类型错误\n接下来：实现任务执行器" }],
+        },
+      ];
+
+      const summary = generateSessionSummary(messages);
+      expect(summary?.nextSteps).toContain("下一步：修复类型错误");
+      expect(summary?.nextSteps).toContain("接下来：实现任务执行器");
+    });
+
+    // 🆕 Test key files extraction
+    it("should extract key files from tool calls", () => {
+      const messages: AgentMessage[] = [
+        {
+          role: "user",
+          content: [{ type: "text", text: "修改文件" }],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "好的" }],
+          tool_calls: [
+            {
+              id: "1",
+              type: "function",
+              function: { name: "read", arguments: '{"path":"src/test.ts"}' },
+            },
+            {
+              id: "2",
+              type: "function",
+              function: { name: "write", arguments: '{"path":"src/output.ts"}' },
+            },
+          ],
+        },
+      ];
+
+      const summary = generateSessionSummary(messages);
+      expect(summary?.keyFiles).toContain("src/test.ts");
+      expect(summary?.keyFiles).toContain("src/output.ts");
+    });
   });
 
   describe("formatSessionSummary", () => {
@@ -208,6 +297,9 @@ describe("session-summary", () => {
         blockers: ["error: file not found"],
         totalTurns: 3,
         createdAt: Date.now(),
+        progress: { completed: 2, total: 5, percentage: 40 },
+        nextSteps: ["修复类型错误", "实现任务执行器"],
+        keyFiles: ["src/test.ts", "src/output.ts"],
       };
 
       const formatted = formatSessionSummary(summary);
@@ -222,6 +314,13 @@ describe("session-summary", () => {
       expect(formatted).toContain("1. 使用 Markdown 格式");
       expect(formatted).toContain("**遇到的问题**：");
       expect(formatted).toContain("1. error: file not found");
+      expect(formatted).toContain("**进度**：2/5 (40%)");
+      expect(formatted).toContain("**下一步计划**：");
+      expect(formatted).toContain("1. 修复类型错误");
+      expect(formatted).toContain("2. 实现任务执行器");
+      expect(formatted).toContain("**关键文件**：");
+      expect(formatted).toContain("- src/test.ts");
+      expect(formatted).toContain("- src/output.ts");
     });
 
     it("should format summary without optional sections", () => {

@@ -32,10 +32,18 @@ function shouldEnable(params: {
   modelId?: string;
 }): boolean {
   const provider = (params.provider ?? "").trim().toLowerCase();
+  
   // 对 vectorengine 禁用 thought_signature（无论使用哪个 API）
   // 原因：供应商的 API 适配层和 Gemini 原生 API 都不支持 thought_signature
-  if (provider.includes("vectorengine")) return false;
-  return false;
+  if (provider.includes("vectorengine")) {
+    log.debug(`[thought_signature] Disabled for vectorengine provider`);
+    return false;
+  }
+  
+  // 对其他 provider，默认启用 thought_signature patcher
+  // 这样可以确保中转 API 不会因为缺少 thought_signature 而报错
+  log.debug(`[thought_signature] Enabled for provider: ${provider}`);
+  return true;
 }
 
 function ensureThoughtSignatureOnRecord(params: {
@@ -246,64 +254,80 @@ function walkAndPatch(params: {
 
   const functionCall = rec.functionCall;
   if (functionCall && typeof functionCall === "object") {
+    // ✅ 只给包含 functionCall 的 part wrapper 添加 thoughtSignature
+    // ❌ 不要给 functionCall 对象本身添加 thoughtSignature（会导致 API 报错）
     noteCandidate({ record: rec, path: params.path, report: params.report });
     ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
-    noteCandidate({
-      record: functionCall as Record<string, unknown>,
-      path: `${params.path}.functionCall`,
-      report: params.report,
-    });
-    ensureThoughtSignatureOnRecord({
-      record: functionCall as Record<string, unknown>,
-      path: `${params.path}.functionCall`,
-      report: params.report,
-    });
+    
+    // 不再给 functionCall 对象本身添加 thoughtSignature
+    // noteCandidate({
+    //   record: functionCall as Record<string, unknown>,
+    //   path: `${params.path}.functionCall`,
+    //   report: params.report,
+    // });
+    // ensureThoughtSignatureOnRecord({
+    //   record: functionCall as Record<string, unknown>,
+    //   path: `${params.path}.functionCall`,
+    //   report: params.report,
+    // });
   }
   const function_call = rec.function_call;
   if (function_call && typeof function_call === "object") {
+    // ✅ 只给包含 function_call 的 part wrapper 添加 thoughtSignature
+    // ❌ 不要给 function_call 对象本身添加 thoughtSignature（会导致 API 报错）
     noteCandidate({ record: rec, path: params.path, report: params.report });
     ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
-    noteCandidate({
-      record: function_call as Record<string, unknown>,
-      path: `${params.path}.function_call`,
-      report: params.report,
-    });
-    ensureThoughtSignatureOnRecord({
-      record: function_call as Record<string, unknown>,
-      path: `${params.path}.function_call`,
-      report: params.report,
-    });
+    
+    // 不再给 function_call 对象本身添加 thoughtSignature
+    // noteCandidate({
+    //   record: function_call as Record<string, unknown>,
+    //   path: `${params.path}.function_call`,
+    //   report: params.report,
+    // });
+    // ensureThoughtSignatureOnRecord({
+    //   record: function_call as Record<string, unknown>,
+    //   path: `${params.path}.function_call`,
+    //   report: params.report,
+    // });
   }
 
   const functionResponse = rec.functionResponse;
   if (functionResponse && typeof functionResponse === "object") {
+    // ✅ 只给包含 functionResponse 的 part wrapper 添加 thoughtSignature
+    // ❌ 不要给 functionResponse 对象本身添加 thoughtSignature（会导致 API 报错）
     noteCandidate({ record: rec, path: params.path, report: params.report });
     ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
-    noteCandidate({
-      record: functionResponse as Record<string, unknown>,
-      path: `${params.path}.functionResponse`,
-      report: params.report,
-    });
-    ensureThoughtSignatureOnRecord({
-      record: functionResponse as Record<string, unknown>,
-      path: `${params.path}.functionResponse`,
-      report: params.report,
-    });
+    
+    // 不再给 functionResponse 对象本身添加 thoughtSignature
+    // noteCandidate({
+    //   record: functionResponse as Record<string, unknown>,
+    //   path: `${params.path}.functionResponse`,
+    //   report: params.report,
+    // });
+    // ensureThoughtSignatureOnRecord({
+    //   record: functionResponse as Record<string, unknown>,
+    //   path: `${params.path}.functionResponse`,
+    //   report: params.report,
+    // });
   }
   const function_response = rec.function_response;
   if (function_response && typeof function_response === "object") {
+    // ✅ 只给包含 function_response 的 part wrapper 添加 thoughtSignature
+    // ❌ 不要给 function_response 对象本身添加 thoughtSignature（会导致 API 报错）
     noteCandidate({ record: rec, path: params.path, report: params.report });
     ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
-    noteCandidate({
-      record: function_response as Record<string, unknown>,
-      path: `${params.path}.function_response`,
-      report: params.report,
-    });
-    ensureThoughtSignatureOnRecord({
-      record: function_response as Record<string, unknown>,
-      path: `${params.path}.function_response`,
-      report: params.report,
-    });
+    
+    // 不再给 function_response 对象本身添加 thoughtSignature
+    // noteCandidate({
+    //   record: function_response as Record<string, unknown>,
+    //   path: `${params.path}.function_response`,
+    //   report: params.report,
+    // });
+    // ensureThoughtSignatureOnRecord({
+    //   record: function_response as Record<string, unknown>,
+    //   path: `${params.path}.function_response`,
+    //   report: params.report,
+    // });
   }
 
   for (const [k, v] of Object.entries(rec)) {
@@ -342,6 +366,46 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
   const wrapStreamFn: GeminiPayloadThoughtSignaturePatcher["wrapStreamFn"] = (streamFn) => {
     const wrapped: StreamFn = (model, context, options) => {
       const nextOnPayload = (payload: unknown) => {
+        // Fix 1: Flatten config field to top level (Gemini API format)
+        if (payload && typeof payload === "object" && "config" in payload) {
+          const payloadObj = payload as Record<string, unknown>;
+          const config = payloadObj.config;
+          
+          if (config && typeof config === "object") {
+            const configObj = config as Record<string, unknown>;
+            
+            log.warn(`[payload] ⚠️ Found 'config' field in payload (not Gemini API compliant), flattening to top level`);
+            
+            // Move config.systemInstruction to top level
+            if (configObj.systemInstruction) {
+              payloadObj.systemInstruction = configObj.systemInstruction;
+              log.info(`[payload] Moved config.systemInstruction to top level`);
+            }
+            
+            // Move config.tools to top level
+            if (configObj.tools) {
+              payloadObj.tools = configObj.tools;
+              log.info(`[payload] Moved config.tools to top level`);
+            }
+            
+            // Move config.maxOutputTokens to generationConfig.maxOutputTokens
+            if (typeof configObj.maxOutputTokens === "number") {
+              payloadObj.generationConfig = {
+                ...(typeof payloadObj.generationConfig === "object" && payloadObj.generationConfig !== null 
+                  ? payloadObj.generationConfig as Record<string, unknown>
+                  : {}),
+                maxOutputTokens: configObj.maxOutputTokens
+              };
+              log.info(`[payload] Moved config.maxOutputTokens to generationConfig.maxOutputTokens`);
+            }
+            
+            // Delete the config field
+            delete payloadObj.config;
+            log.info(`[payload] ✓ Removed 'config' field, payload now Gemini API compliant`);
+          }
+        }
+        
+        // Fix 2: Add thought_signature to parts
         const report: ScanReport = {
           added: [],
           candidates: 0,

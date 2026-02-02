@@ -340,62 +340,14 @@ export async function runEmbeddedAttempt(
     });
     const ttsHint = params.config ? buildTtsSystemPromptHint(params.config) : undefined;
 
-    const appendPrompt = buildEmbeddedSystemPrompt({
-      workspaceDir: effectiveWorkspace,
-      defaultThinkLevel: params.thinkLevel,
-      reasoningLevel: params.reasoningLevel ?? "off",
-      extraSystemPrompt: params.extraSystemPrompt,
-      ownerNumbers: params.ownerNumbers,
-      reasoningTagHint,
-      heartbeatPrompt: isDefaultAgent
-        ? resolveHeartbeatPrompt(params.config?.agents?.defaults?.heartbeat?.prompt)
-        : undefined,
-      skillsPrompt,
-      docsPath: docsPath ?? undefined,
-      ttsHint,
-      workspaceNotes,
-      reactionGuidance,
-      promptMode,
-      promptLanguage,
-      runtimeInfo,
-      messageToolHints,
-      sandboxInfo,
-      tools,
-      modelAliasLines: buildModelAliasLines(params.config),
-      userTimezone,
-      userTime,
-      userTimeFormat,
-      contextFiles,
-    });
-    const systemPromptReport = buildSystemPromptReport({
-      source: "run",
-      generatedAt: Date.now(),
-      sessionId: params.sessionId,
-      sessionKey: params.sessionKey,
-      provider: params.provider,
-      model: params.modelId,
-      workspaceDir: effectiveWorkspace,
-      bootstrapMaxChars: resolveBootstrapMaxChars(params.config),
-      sandbox: (() => {
-        const runtime = resolveSandboxRuntimeStatus({
-          cfg: params.config,
-          sessionKey: params.sessionKey ?? params.sessionId,
-        });
-        return { mode: runtime.mode, sandboxed: runtime.sandboxed };
-      })(),
-      systemPrompt: appendPrompt,
-      bootstrapFiles: hookAdjustedBootstrapFiles,
-      injectedFiles: contextFiles,
-      skillsPrompt,
-      tools,
-    });
-    const systemPrompt = createSystemPromptOverride(appendPrompt);
-
+    // 🆕 Step 1: 提前创建 SessionManager（用于 hook）
     const sessionLock = await acquireSessionWriteLock({
       sessionFile: params.sessionFile,
     });
 
     let sessionManager: ReturnType<typeof guardSessionManager> | undefined;
+    let hookCharacterName: string | undefined;
+    let hookPrependContext: string | undefined;
     let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
     try {
       const hadSessionFile = await fs
@@ -465,6 +417,95 @@ export async function runEmbeddedAttempt(
         sessionId: params.sessionId,
         cwd: effectiveWorkspace,
       });
+
+      // 🆕 Step 2: 获取 hook runner（用于 before_agent_start 和 agent_end）
+      const hookRunner = getGlobalHookRunner();
+      
+      // 🆕 Step 3: 执行 hook 获取动态角色识别结果（在 buildEmbeddedSystemPrompt 之前）
+      if (hookRunner?.hasHooks("before_agent_start")) {
+        try {
+          const tempMessages = sessionManager.buildSessionContext().messages;
+          const hookResult = await hookRunner.runBeforeAgentStart(
+            {
+              prompt: params.prompt,
+              messages: tempMessages,
+            },
+            {
+              agentId: params.sessionKey?.split(":")[0] ?? "main",
+              sessionKey: params.sessionKey,
+              workspaceDir: params.workspaceDir,
+              messageProvider: params.messageProvider ?? undefined,
+            },
+          );
+          
+          if (hookResult?.characterName) {
+            hookCharacterName = hookResult.characterName;
+            log.info(`hooks: detected character: ${hookCharacterName}`);
+          }
+          
+          if (hookResult?.prependContext) {
+            hookPrependContext = hookResult.prependContext;
+            log.debug(`hooks: prepended context (${hookResult.prependContext.length} chars)`);
+          }
+        } catch (hookErr) {
+          log.warn(`before_agent_start hook failed: ${String(hookErr)}`);
+        }
+      }
+
+      // 🆕 Step 4: 生成 system prompt（传递动态识别的角色名）
+      const appendPrompt = await buildEmbeddedSystemPrompt({
+        workspaceDir: effectiveWorkspace,
+        defaultThinkLevel: params.thinkLevel,
+        reasoningLevel: params.reasoningLevel ?? "off",
+        extraSystemPrompt: params.extraSystemPrompt,
+        ownerNumbers: params.ownerNumbers,
+        reasoningTagHint,
+        heartbeatPrompt: isDefaultAgent
+          ? resolveHeartbeatPrompt(params.config?.agents?.defaults?.heartbeat?.prompt)
+          : undefined,
+        skillsPrompt,
+        docsPath: docsPath ?? undefined,
+        ttsHint,
+        workspaceNotes,
+        reactionGuidance,
+        promptMode,
+        promptLanguage,
+        runtimeInfo,
+        messageToolHints,
+        sandboxInfo,
+        tools,
+        modelAliasLines: buildModelAliasLines(params.config),
+        userTimezone,
+        userTime,
+        userTimeFormat,
+        contextFiles,
+        characterName: hookCharacterName,  // 🆕 传递动态识别的角色名
+        characterBasePath: process.cwd(),  // 🆕 传递基础路径
+      });
+      
+      const systemPromptReport = buildSystemPromptReport({
+        source: "run",
+        generatedAt: Date.now(),
+        sessionId: params.sessionId,
+        sessionKey: params.sessionKey,
+        provider: params.provider,
+        model: params.modelId,
+        workspaceDir: effectiveWorkspace,
+        bootstrapMaxChars: resolveBootstrapMaxChars(params.config),
+        sandbox: (() => {
+          const runtime = resolveSandboxRuntimeStatus({
+            cfg: params.config,
+            sessionKey: params.sessionKey ?? params.sessionId,
+          });
+          return { mode: runtime.mode, sandboxed: runtime.sandboxed };
+        })(),
+        systemPrompt: appendPrompt,
+        bootstrapFiles: hookAdjustedBootstrapFiles,
+        injectedFiles: contextFiles,
+        skillsPrompt,
+        tools,
+      });
+      const systemPrompt = createSystemPromptOverride(appendPrompt);
 
       const settingsManager = SettingsManager.create(effectiveWorkspace, agentDir);
       ensurePiCompactionReserveTokens({
@@ -642,7 +683,7 @@ export async function runEmbeddedAttempt(
 
         if (sessionSummaryText && sessionSummary) {
           // Rebuild system prompt with session summary
-          const updatedSystemPrompt = buildEmbeddedSystemPrompt({
+          const updatedSystemPrompt = await buildEmbeddedSystemPrompt({
             workspaceDir: effectiveWorkspace,
             defaultThinkLevel: params.thinkLevel,
             reasoningLevel: params.reasoningLevel ?? "off",
@@ -815,38 +856,19 @@ export async function runEmbeddedAttempt(
         }
       }
 
-      // Get hook runner once for both before_agent_start and agent_end hooks
-      const hookRunner = getGlobalHookRunner();
+      // 🆕 hookRunner 已经在前面声明（第 422 行附近），这里不需要重复声明
 
       let promptError: unknown = null;
       try {
         const promptStartedAt = Date.now();
 
-        // Run before_agent_start hooks to allow plugins to inject context
+        // 🆕 使用之前 hook 返回的 prependContext（已经在 sessionManager 创建后执行过 hook）
         let effectivePrompt = params.prompt;
-        if (hookRunner?.hasHooks("before_agent_start")) {
-          try {
-            const hookResult = await hookRunner.runBeforeAgentStart(
-              {
-                prompt: params.prompt,
-                messages: activeSession.messages,
-              },
-              {
-                agentId: params.sessionKey?.split(":")[0] ?? "main",
-                sessionKey: params.sessionKey,
-                workspaceDir: params.workspaceDir,
-                messageProvider: params.messageProvider ?? undefined,
-              },
-            );
-            if (hookResult?.prependContext) {
-              effectivePrompt = `${hookResult.prependContext}\n\n${params.prompt}`;
-              log.debug(
-                `hooks: prepended context to prompt (${hookResult.prependContext.length} chars)`,
-              );
-            }
-          } catch (hookErr) {
-            log.warn(`before_agent_start hook failed: ${String(hookErr)}`);
-          }
+        if (hookPrependContext) {
+          effectivePrompt = `${hookPrependContext}\n\n${params.prompt}`;
+          log.debug(
+            `hooks: using prepended context from earlier hook (${hookPrependContext.length} chars)`,
+          );
         }
 
         log.debug(`embedded run prompt start: runId=${params.runId} sessionId=${params.sessionId}`);

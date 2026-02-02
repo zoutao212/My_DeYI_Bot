@@ -163,6 +163,10 @@ export type AgentDefaultsConfig = {
   typingIntervalSeconds?: number;
   /** Typing indicator start mode (never|instant|thinking|message). */
   typingMode?: TypingMode;
+  /** 🆕 Default character name for personality (e.g., "lina"). */
+  characterName?: string;
+  /** 🆕 Base path for character config directory (defaults to workspace). */
+  characterBasePath?: string;
   /** Periodic background heartbeat runs. */
   heartbeat?: {
     /** Heartbeat interval (duration string, default unit: minutes; default: 30m). */
