@@ -48,11 +48,12 @@
 | **内置 Plugin 动态注册失败** | `.kiro/lessons-learned/47_内置Plugin动态注册失败调试方法论.md` |
 | **模板文件与实际使用路径区分** | `.kiro/lessons-learned/48_模板文件与实际使用路径区分.md` |
 | **Provider API 兼容性问题** | `.kiro/lessons-learned/49_Provider特定API兼容性问题处理.md` |
+| **工具调用验证与重试** | `.kiro/lessons-learned/50_工具调用验证与重试机制.md` |
 
 clawdbot 实际的 系统日志在 C:\Users\zouta\.clawdbot\runtimelog
 clawdbot 对话内容在 C:\Users\zouta\.clawdbot\agents\main\sessions
 
-**关键词**：修复无效、打补丁、源头修复、重试绕过、数据流追踪、配置验证、schema 验证、静默失败、API 格式切换、字段兼容性、配置开关、功能开关、审批机制、Zod schema、类型定义、UI 配置、localStorage、默认值、干扰性功能、技术细节隐藏、Windows、PowerShell、CMD、exec 工具、中文路径、编码问题、命令语法、文本编码、GBK、GB2312、UTF-8、乱码、编码转换、read 工具、工具增强、包装模式、向后兼容、参数扩展、智能回退、Buffer 解码、TextDecoder、替换字符、平台差异、AI 行为修正、工具调用、平台适配、系统提示词、工具描述、命令验证、全局拦截器、fetch、副作用、上下文检查、性能优化、数据流调试、断点调试、日志追踪、数据丢失、环节定位、工具调用歧义、API 混淆、配对机制、节点配对、频道配对、无限循环、错误提示、工具设计、SessionManager、buildSessionContext、fileEntries、缓存问题、状态管理、Agent 失忆、历史消息丢失、Agent 架构、LLM 调度、System Prompt、对话历史、会话摘要、数据提取、正则表达式、模式匹配、信息提取、文本解析、渐进式开发、功能增强、可选参数、测试驱动、错误处理、try-catch、AbortError、unhandledRejection、系统崩溃、错误传播、基础设施代码、API Payload、格式错误、逐层对比、修复清单、分层修复、中转 API、官方 API、错误信息不准确、限流、配额、内部错误、切换 API、简化测试、临时故障、重试机制、等待重试、角色扮演、文本生成、工具调用混淆、用户误解、操作验证、日志检查、项目管理、任务拆分、进度追踪、大型项目、分层管理、标准化格式、任务编号、状态标记、执行指南、文件拆分、阶段管理、Hook、返回值、字段遗漏、合并逻辑、Plugin、路径处理、智能检测、路径规范化、跨平台、目录检测、路径重复、内置 Plugin、动态注册、相对路径、绝对路径、jiti、模块加载、静默失败、测试环境、真实环境、路径解析、错误处理、日志输出、Provider 兼容性、thought_signature、API 扩展字段、Gemini API、中转 API 兼容性、shouldEnable、patcher 禁用、Corrupted thought signature、vectorengine、yinli、API 格式差异
+**关键词**：修复无效、打补丁、源头修复、重试绕过、数据流追踪、配置验证、schema 验证、静默失败、API 格式切换、字段兼容性、配置开关、功能开关、审批机制、Zod schema、类型定义、UI 配置、localStorage、默认值、干扰性功能、技术细节隐藏、Windows、PowerShell、CMD、exec 工具、中文路径、编码问题、命令语法、文本编码、GBK、GB2312、UTF-8、乱码、编码转换、read 工具、工具增强、包装模式、向后兼容、参数扩展、智能回退、Buffer 解码、TextDecoder、替换字符、平台差异、AI 行为修正、工具调用、平台适配、系统提示词、工具描述、命令验证、全局拦截器、fetch、副作用、上下文检查、性能优化、数据流调试、断点调试、日志追踪、数据丢失、环节定位、工具调用歧义、API 混淆、配对机制、节点配对、频道配对、无限循环、错误提示、工具设计、SessionManager、buildSessionContext、fileEntries、缓存问题、状态管理、Agent 失忆、历史消息丢失、Agent 架构、LLM 调度、System Prompt、对话历史、会话摘要、数据提取、正则表达式、模式匹配、信息提取、文本解析、渐进式开发、功能增强、可选参数、测试驱动、错误处理、try-catch、AbortError、unhandledRejection、系统崩溃、错误传播、基础设施代码、API Payload、格式错误、逐层对比、修复清单、分层修复、中转 API、官方 API、错误信息不准确、限流、配额、内部错误、切换 API、简化测试、临时故障、重试机制、等待重试、角色扮演、文本生成、工具调用混淆、用户误解、操作验证、日志检查、项目管理、任务拆分、进度追踪、大型项目、分层管理、标准化格式、任务编号、状态标记、执行指南、文件拆分、阶段管理、Hook、返回值、字段遗漏、合并逻辑、Plugin、路径处理、智能检测、路径规范化、跨平台、目录检测、路径重复、内置 Plugin、动态注册、相对路径、绝对路径、jiti、模块加载、静默失败、测试环境、真实环境、路径解析、错误处理、日志输出、Provider 兼容性、thought_signature、API 扩展字段、Gemini API、中转 API 兼容性、shouldEnable、patcher 禁用、Corrupted thought signature、vectorengine、yinli、API 格式差异、工具调用验证、工具调用重试、验证机制、重试策略、错误分类、可重试错误、不可重试错误、工具调用失败、操作验证、结果确认、缓存问题、文件系统延迟、权限问题、路径问题
 
 ## 使用方法
 
@@ -200,6 +201,6 @@ grepSearch -query "关键词" -includePattern ".kiro/lessons-learned/**/*.md"
 
 ---
 
-**版本：** v20260202_5  
+**版本：** v20260202_6  
 **最后更新：** 2026-02-02  
-**变更：** 新增"Provider 特定 API 兼容性问题处理"（当不同 provider 对 Gemini API 扩展字段支持不同时的系统化处理流程，包括 thought_signature 字段的兼容性问题）
+**变更：** 新增"工具调用验证与重试机制"（当工具调用返回成功但实际未生效时的系统化验证和重试方法）

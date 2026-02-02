@@ -76,21 +76,30 @@ export function resolveTranscriptPolicy(params: {
   const isOpenRouterGemini =
     (provider === "openrouter" || provider === "opencode") &&
     modelId.toLowerCase().includes("gemini");
+  
+  // 🔧 Fix: yinli is a Gemini proxy provider that needs Google-like transcript handling
+  // yinli uses google-generative-ai API but needs the same sanitization as Google providers
+  const isYinliGemini = provider.includes("yinli") && modelId.toLowerCase().includes("gemini");
+  
   const isAntigravityClaudeModel = isAntigravityClaude({
     api: params.modelApi,
     provider,
     modelId,
   });
 
-  const needsNonImageSanitize = isGoogle || isAnthropic || isMistral || isOpenRouterGemini;
+  // Include yinli Gemini models in Google-like handling
+  const needsGoogleLikeHandling = isGoogle || isOpenRouterGemini || isYinliGemini;
+  const needsNonImageSanitize = isGoogle || isAnthropic || isMistral || isOpenRouterGemini || isYinliGemini;
 
-  const sanitizeToolCallIds = isGoogle || isMistral;
+  // Tool call ID sanitization: native Google API, yinli proxy, and Mistral need strict IDs
+  // OpenRouter handles tool call IDs internally, so we don't sanitize for OpenRouter Gemini
+  const sanitizeToolCallIds = isGoogle || isYinliGemini || isMistral;
   const toolCallIdMode: ToolCallIdMode | undefined = isMistral
     ? "strict9"
     : sanitizeToolCallIds
       ? "strict"
       : undefined;
-  const repairToolUseResultPairing = isGoogle || isAnthropic;
+  const repairToolUseResultPairing = needsGoogleLikeHandling || isAnthropic;
   
   // 🔧 Fix: yinli provider also needs thoughtSignature sanitization
   // yinli returns thoughtSignature in responses but rejects it in requests
@@ -108,9 +117,10 @@ export function resolveTranscriptPolicy(params: {
     preserveSignatures: isAntigravityClaudeModel,
     sanitizeThoughtSignatures: isOpenAi ? undefined : sanitizeThoughtSignatures,
     normalizeAntigravityThinkingBlocks,
-    applyGoogleTurnOrdering: !isOpenAi && isGoogle,
-    validateGeminiTurns: !isOpenAi && isGoogle,
+    // 🔧 Fix: Apply Google turn ordering to yinli Gemini models
+    applyGoogleTurnOrdering: !isOpenAi && needsGoogleLikeHandling,
+    validateGeminiTurns: !isOpenAi && needsGoogleLikeHandling,
     validateAnthropicTurns: !isOpenAi && isAnthropic,
-    allowSyntheticToolResults: !isOpenAi && (isGoogle || isAnthropic),
+    allowSyntheticToolResults: !isOpenAi && (needsGoogleLikeHandling || isAnthropic),
   };
 }
