@@ -53,6 +53,52 @@ function shouldEnable(params: {
   return true;
 }
 
+/**
+ * 检查是否需要移除 thought_signature（针对不支持的 provider）
+ */
+function shouldStripThoughtSignature(params: {
+  provider?: string;
+  modelApi?: string | null;
+  modelId?: string;
+}): boolean {
+  const provider = (params.provider ?? "").trim().toLowerCase();
+  // yinli 和 vectorengine 需要移除所有 thought_signature
+  return provider.includes("yinli") || provider.includes("vectorengine");
+}
+
+/**
+ * 递归移除 payload 中所有的 thought_signature 和 thoughtSignature 字段
+ * 用于不支持 thought_signature 的 provider（如 yinli）
+ */
+function stripAllThoughtSignatures(value: unknown): void {
+  if (!value || typeof value !== "object") return;
+  
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      stripAllThoughtSignatures(item);
+    }
+    return;
+  }
+  
+  const record = value as Record<string, unknown>;
+  
+  // 移除 thought_signature 和 thoughtSignature
+  if ("thought_signature" in record) {
+    delete record.thought_signature;
+  }
+  if ("thoughtSignature" in record) {
+    delete record.thoughtSignature;
+  }
+  
+  // 递归处理所有子对象
+  for (const key of Object.keys(record)) {
+    const child = record[key];
+    if (child && typeof child === "object") {
+      stripAllThoughtSignatures(child);
+    }
+  }
+}
+
 function ensureThoughtSignatureOnRecord(params: {
   record: Record<string, unknown>;
   path: string;
@@ -357,7 +403,12 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
   modelId?: string;
   modelApi?: string | null;
 }): GeminiPayloadThoughtSignaturePatcher | null {
-  if (!shouldEnable({ provider: params.provider, modelApi: params.modelApi, modelId: params.modelId })) {
+  const addSignatures = shouldEnable({ provider: params.provider, modelApi: params.modelApi, modelId: params.modelId });
+  const stripSignatures = shouldStripThoughtSignature({ provider: params.provider, modelApi: params.modelApi, modelId: params.modelId });
+  
+  // 🔧 Fix: 对于需要清理 thought_signature 的 provider（如 yinli），
+  // 即使不添加 thought_signature，也要创建 patcher 来执行清理
+  if (!addSignatures && !stripSignatures) {
     return null;
   }
 
@@ -412,14 +463,23 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
           }
         }
         
-        // Fix 2: Add thought_signature to parts
+        // Fix 2: Add or strip thought_signature based on provider
         const report: ScanReport = {
           added: [],
           candidates: 0,
           missingBefore: 0,
           missingPaths: [],
         };
-        walkAndPatch({ value: payload, path: "$", report });
+        
+        if (stripSignatures) {
+          // 🔧 Fix: 对于 yinli 等不支持 thought_signature 的 provider，
+          // 在发送请求前彻底移除所有 thought_signature
+          stripAllThoughtSignatures(payload);
+          log.info(`[thought_signature] Stripped all thought_signature fields for provider: ${base.provider}`);
+        } else if (addSignatures) {
+          // 对于支持的 provider，添加缺失的 thought_signature
+          walkAndPatch({ value: payload, path: "$", report });
+        }
         
         // Safety check: Verify no assistant messages with null content remain
         // (should have been fixed in sanitizeSessionHistory)
