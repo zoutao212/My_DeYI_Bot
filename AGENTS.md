@@ -98,6 +98,12 @@
 ## Security & Configuration Tips
 - Web provider stores creds at `~/.clawdbot/credentials/`; rerun `clawdbot login` if logged out.
 - Pi sessions live under `~/.clawdbot/sessions/` by default; the base directory is not configurable.
+
+## Path Conventions (Character Memory)
+- **Global workspace**: `clawd/memory/` - system-level, shared across all characters
+- **Character isolation**: `clawd/characters/<name>/memory/` - character-specific, private memories
+- **Full reference**: See `clawd/PATHS.md` for complete path definitions and usage guidelines
+- **Rule**: Character-specific information should be written to the character's isolation directory, not the global workspace
 - Environment variables: see `~/.profile`.
 - Never commit or publish real phone numbers, videos, or live configuration values. Use obviously fake placeholders in docs, tests, and examples.
  - Release flow: always read `docs/reference/RELEASING.md` and `docs/platforms/mac/release.md` before any release work; do not ask routine questions once those docs answer them.

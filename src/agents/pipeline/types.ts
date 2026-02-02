@@ -105,6 +105,8 @@ export interface PipelineContext {
   agentId: string;
   /** 用户 ID */
   userId?: string;
+  /** 工作目录 */
+  workspaceDir?: string;
   /** Clawdbot 配置 */
   config: ClawdbotConfig;
 }

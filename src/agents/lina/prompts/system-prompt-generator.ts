@@ -18,6 +18,20 @@ export interface SystemPromptContext {
 export function generateSystemPrompt(context: SystemPromptContext): string {
   const { config, profile, currentDate, userName } = context;
 
+  // 🆕 如果 profile 包含 systemPrompt（来自 prompts/system.md），优先使用它
+  if (profile.systemPrompt) {
+    // 替换模板变量
+    let prompt = profile.systemPrompt;
+    prompt = prompt.replace(/{currentDate}/g, currentDate);
+    prompt = prompt.replace(/{userName}/g, userName || "用户");
+    // 暂时移除记忆相关的占位符（后续由 Memory Service 填充）
+    prompt = prompt.replace(/{coreMemories}/g, "（暂无核心记忆）");
+    prompt = prompt.replace(/{relevantMemories}/g, "（暂无相关记忆）");
+    
+    return prompt;
+  }
+
+  // 🔧 如果没有 systemPrompt，使用原有的生成逻辑（向后兼容）
   const sections: string[] = [];
 
   // 1. 角色定位

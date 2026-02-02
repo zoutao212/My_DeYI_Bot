@@ -97,6 +97,25 @@ export function installSessionToolResultGuard(
       const contentType = msg.content === null ? "null" : msg.content === undefined ? "undefined" : Array.isArray(msg.content) ? `array(${msg.content.length})` : typeof msg.content;
       log.info(`[guard] appendMessage called: role=assistant, content=${contentType}`);
       
+      // 🔧 Fix: Remove thoughtSignature from assistant messages before saving
+      // Some providers (like yinli) return thoughtSignature in responses, but reject it in requests
+      // We need to remove it from saved messages to prevent errors in subsequent requests
+      if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block && typeof block === "object") {
+            const rec = block as unknown as Record<string, unknown>;
+            if ("thoughtSignature" in rec) {
+              delete rec.thoughtSignature;
+              log.debug(`[guard] Removed thoughtSignature from content block`);
+            }
+            if ("thought_signature" in rec) {
+              delete rec.thought_signature;
+              log.debug(`[guard] Removed thought_signature from content block`);
+            }
+          }
+        }
+      }
+      
       // 🔧 Fix: Handle sensitive words error from API
       // When API returns error due to sensitive words, fill content with friendly error message
       const stopReason = (msg as { stopReason?: unknown }).stopReason;

@@ -40,6 +40,13 @@ function shouldEnable(params: {
     return false;
   }
   
+  // 对 yinli 禁用 thought_signature
+  // 原因：yinli 的 API 不支持 thought_signature，会返回 "Corrupted thought signature" 错误
+  if (provider.includes("yinli")) {
+    log.debug(`[thought_signature] Disabled for yinli provider`);
+    return false;
+  }
+  
   // 对其他 provider，默认启用 thought_signature patcher
   // 这样可以确保中转 API 不会因为缺少 thought_signature 而报错
   log.debug(`[thought_signature] Enabled for provider: ${provider}`);

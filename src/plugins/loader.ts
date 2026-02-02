@@ -454,18 +454,26 @@ export function loadClawdbotPlugins(options: PluginLoadOptions = {}): PluginRegi
       pluginConfig: undefined,
     });
     
-    // 🔧 FIX: 同步导入并注册（避免异步导致 Plugin 未注册）
+    // 🔧 FIX: 使用绝对路径导入（避免相对路径解析错误）
+    // 计算 register.js 的绝对路径
+    const modulePath = fileURLToPath(import.meta.url);
+    const loaderDir = path.dirname(modulePath);
+    const registerPath = path.resolve(loaderDir, "../agents/pipeline/register.js");
+    
+    logger.info(`[plugins] Loading pipeline plugin from: ${registerPath}`);
+    
     // 使用 jiti 同步加载模块
-    const pipelineModule = jiti("../agents/pipeline/register.js") as {
+    const pipelineModule = jiti(registerPath) as {
       registerPipelinePlugin: (api: ReturnType<typeof createApi>) => void;
     };
     
     pipelineModule.registerPipelinePlugin(pipelineApi);
-    logger.info("[plugins] Registered built-in plugin: clawdbot-pipeline");
+    logger.info("[plugins] ✅ Registered built-in plugin: clawdbot-pipeline");
     
     registry.plugins.push(pipelineRecord);
   } catch (err) {
-    logger.warn(`[plugins] Failed to setup built-in pipeline plugin: ${String(err)}`);
+    logger.error(`[plugins] ❌ Failed to setup built-in pipeline plugin: ${String(err)}`);
+    logger.error(`[plugins] Stack trace: ${err instanceof Error ? err.stack : String(err)}`);
   }
 
   if (cacheEnabled) {

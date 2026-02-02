@@ -91,7 +91,11 @@ export function resolveTranscriptPolicy(params: {
       ? "strict"
       : undefined;
   const repairToolUseResultPairing = isGoogle || isAnthropic;
-  const sanitizeThoughtSignatures = isOpenRouterGemini
+  
+  // 🔧 Fix: yinli provider also needs thoughtSignature sanitization
+  // yinli returns thoughtSignature in responses but rejects it in requests
+  const isYinliProvider = provider.includes("yinli");
+  const sanitizeThoughtSignatures = isOpenRouterGemini || isYinliProvider
     ? { allowBase64Only: true, includeCamelCase: true }
     : undefined;
   const normalizeAntigravityThinkingBlocks = isAntigravityClaudeModel;

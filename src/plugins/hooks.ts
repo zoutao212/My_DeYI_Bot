@@ -174,7 +174,7 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
   /**
    * Run before_agent_start hook.
    * Allows plugins to inject context into the system prompt.
-   * Runs sequentially, merging systemPrompt and prependContext from all handlers.
+   * Runs sequentially, merging systemPrompt, prependContext, and characterName from all handlers.
    */
   async function runBeforeAgentStart(
     event: PluginHookBeforeAgentStartEvent,
@@ -190,6 +190,7 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
           acc?.prependContext && next.prependContext
             ? `${acc.prependContext}\n\n${next.prependContext}`
             : (next.prependContext ?? acc?.prependContext),
+        characterName: next.characterName ?? acc?.characterName,  // 🆕 合并 characterName
       }),
     );
   }

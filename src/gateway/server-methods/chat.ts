@@ -764,6 +764,9 @@ export const chatHandlers: GatewayRequestHandlers = {
       resolveThinkingDefault({ cfg, provider, model, catalog });
 
     let systemPrompt: string | null = null;
+    let characterName: string | undefined;
+    let prependContext: string | undefined;
+    
     try {
       const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
       const effectiveWorkspaceDir = workspaceDir || process.cwd();
@@ -782,6 +785,33 @@ export const chatHandlers: GatewayRequestHandlers = {
         agentId,
         promptLanguage: p.promptLanguage === "zh" ? "zh" : "en",
       });
+      
+      // 🆕 执行 Pipeline Hook（before_agent_start）
+      try {
+        const { getActivePluginRegistry } = await import("../../plugins/runtime.js");
+        const { createHookRunner } = await import("../../plugins/hooks.js");
+        const registry = getActivePluginRegistry();
+        
+        if (registry) {
+          const hookRunner = createHookRunner(registry);
+          const hookResult = await hookRunner.runBeforeAgentStart(
+            { prompt: p.message },
+            {
+              sessionKey: p.sessionKey,
+              agentId,
+            },
+          );
+          
+          if (hookResult) {
+            characterName = hookResult.characterName;
+            prependContext = hookResult.prependContext;
+          }
+        }
+      } catch (err) {
+        // Hook 执行失败不影响预览
+        console.warn(`[chat.send.preview] Pipeline hook failed: ${err}`);
+      }
+      
       const skillsSnapshot = (() => {
         try {
           return buildWorkspaceSkillSnapshot(effectiveWorkspaceDir, {
@@ -853,6 +883,26 @@ export const chatHandlers: GatewayRequestHandlers = {
         runtimeInfo,
         sandboxInfo: { enabled: sandboxRuntime.sandboxed },
       });
+      
+      // 🆕 如果 Hook 返回了 characterName，追加完整的角色设定
+      if (characterName && systemPrompt) {
+        try {
+          const { loadCharacterProfile } = await import("../../agents/lina/config/loader.js");
+          const characterProfile = await loadCharacterProfile(characterName, effectiveWorkspaceDir);
+          
+          // 拼接完整的角色设定
+          let characterSection = `# 角色设定 (${characterName})\n\n${characterProfile.systemPrompt}`;
+          
+          // 如果有核心记忆，追加到角色设定中
+          if (characterProfile.coreMemories) {
+            characterSection += `\n\n## 核心记忆\n\n${characterProfile.coreMemories}`;
+          }
+          
+          systemPrompt = `${systemPrompt}\n\n${characterSection}`;
+        } catch (err) {
+          console.warn(`[chat.send.preview] Failed to load character profile: ${err}`);
+        }
+      }
 
       // Ensure we didn't accidentally return an empty/whitespace-only prompt.
       if (typeof systemPrompt === "string") {
@@ -889,6 +939,9 @@ export const chatHandlers: GatewayRequestHandlers = {
       clientToolsStatus: "not_applicable",
       clientTools: null,
       attachments: normalizedAttachments,
+      // 🆕 添加 Pipeline Hook 返回的信息
+      characterName,
+      prependContext,
     });
   },
   "chat.abort": ({ params, respond, context }) => {

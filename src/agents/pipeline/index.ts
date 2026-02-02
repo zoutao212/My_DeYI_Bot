@@ -39,7 +39,7 @@ export {
 } from "./plugin.js";
 
 // 注册
-export { pipelinePluginDefinition, registerPipelinePlugin } from "./register.js";
+export { registerPipelinePlugin } from "./register.js";
 
 // 角色服务
 export {

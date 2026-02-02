@@ -817,3 +817,140 @@ if (stopReason === "error" && errorMessage.includes("sensitive words")) {
 **版本：** v20260130_4  
 **来源：** content: null BUG 调试实战（耗时 2 天）+ 敏感词错误容错修复  
 **变更：** 新增"系统容错机制设计"原则（第八原则）
+
+
+---
+
+## 实战案例 2：thought_signature BUG（双向修复的典型案例）
+
+**日期**：2026-02-02  
+**问题**：yinli provider 的 thought_signature 兼容性问题
+
+### 问题演变
+
+#### 第一次修复：只修复入站（失败）
+
+**修改**：在 `shouldEnable` 函数中禁用 `yinli` provider 的 patcher
+
+```typescript
+// src/agents/gemini-payload-thought-signature.ts
+if (provider.includes("yinli")) {
+  log.debug(`[thought_signature] Disabled for yinli provider`);
+  return false;
+}
+```
+
+**结果**：
+- ✅ seq=1 成功（没有历史消息）
+- ✅ seq=2 成功（历史消息中没有 thoughtSignature）
+- ❌ seq=3 失败（历史消息中有 seq=2 返回的 thoughtSignature）
+
+**问题**：只修复了"请求发送"，没有修复"响应保存"
+
+#### 第二次修复：双向修复（成功）
+
+**位置 1：shouldEnable（入站 - 禁用请求中的 patcher）**
+```typescript
+// src/agents/gemini-payload-thought-signature.ts
+if (provider.includes("yinli")) {
+  log.debug(`[thought_signature] Disabled for yinli provider`);
+  return false;
+}
+```
+
+**位置 2：session-tool-result-guard（出站 - 移除响应中的字段）**
+```typescript
+// src/agents/session-tool-result-guard.ts
+if (Array.isArray(msg.content)) {
+  for (const block of msg.content) {
+    if (block && typeof block === "object") {
+      const rec = block as unknown as Record<string, unknown>;
+      if ("thoughtSignature" in rec) {
+        delete rec.thoughtSignature;
+        log.debug(`[guard] Removed thoughtSignature from content block`);
+      }
+      if ("thought_signature" in rec) {
+        delete rec.thought_signature;
+        log.debug(`[guard] Removed thought_signature from content block`);
+      }
+    }
+  }
+}
+```
+
+**为什么成功**：
+1. **入站修复**：请求中不添加 `thought_signature`
+2. **出站修复**：响应保存时移除 LLM 返回的 `thoughtSignature`
+3. **双向保护**：无论是请求还是响应，都不会有 `thoughtSignature`
+
+### 数据流分析
+
+```
+seq=1: 用户消息
+  → 我们不添加 thought_signature ✅（入站修复）
+  → API 正常响应 ✅
+
+seq=2: 工具调用
+  → 我们不添加 thought_signature ✅（入站修复）
+  → API 返回响应（包含 thoughtSignature）✅
+  → 我们移除 thoughtSignature 后保存 ✅（出站修复）
+
+seq=3: 继续对话
+  → 我们读取历史消息（不包含 thoughtSignature）✅（出站修复生效）
+  → 发送给 API ✅
+  → API 正常响应 ✅
+```
+
+### yinli provider 的特殊行为
+
+1. **不接受请求中的 `thoughtSignature`**（会报错）
+2. **但会在响应中返回 `thoughtSignature`**（LLM 自己加的）
+3. **历史消息中也不能包含 `thoughtSignature`**（会报错）
+
+**关键**：这是一个典型的"数据循环污染"问题：
+- LLM 返回的数据 → 保存到 session → 作为历史消息 → 发送给 API → 报错
+
+### 为什么单向修复会失败？
+
+**只修复入站（请求）**：
+- seq=1 成功（没有历史消息）
+- seq=2 成功（历史消息中没有 thoughtSignature）
+- seq=3 失败（历史消息中有 seq=2 返回的 thoughtSignature）
+
+**只修复出站（响应）**：
+- seq=1 可能失败（如果之前有保存的 thoughtSignature）
+- seq=2 可能失败（如果 seq=1 的响应中有 thoughtSignature）
+
+**双向修复**：
+- 所有 seq 都成功
+- 数据在整个循环中都是正确的
+
+### 关键教训
+
+1. **LLM 响应可能包含意外字段**
+   - LLM 可能返回我们没有请求的字段
+   - 必须在保存响应时清理不需要的字段
+
+2. **历史消息会影响后续请求**
+   - 保存到 session 的数据会作为历史消息发送给 API
+   - 必须确保保存的数据符合 API 要求
+
+3. **数据流是循环的**
+   - 响应 → 保存 → 历史消息 → 请求 → 响应 → ...
+   - 单向修复会导致问题在循环中重现
+
+4. **修复要验证完整流程**
+   - 不要只测试 seq=1
+   - 至少测试 3 轮对话
+   - 验证历史消息是否正确
+
+5. **不要相信"已经重启了"**
+   - 检查日志时间戳，确认是否真的重启了
+   - 检查日志内容，确认新代码是否生效
+   - 不要只看"成功"，要看"不再需要修复"
+
+---
+
+**版本：** v20260202_5  
+**来源：** thought_signature BUG 调试实战（双向修复的典型案例）  
+**变更：** 新增"thought_signature BUG"实战案例，强化双向数据流修复原则
