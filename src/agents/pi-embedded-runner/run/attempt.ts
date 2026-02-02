@@ -331,7 +331,6 @@ export async function runEmbeddedAttempt(
       },
     });
     const isDefaultAgent = sessionAgentId === defaultAgentId;
-    const promptMode = isSubagentSessionKey(params.sessionKey) ? "minimal" : "full";
     const docsPath = await resolveClawdbotDocsPath({
       workspaceDir: effectiveWorkspace,
       argv1: process.argv[1],
@@ -424,17 +423,14 @@ export async function runEmbeddedAttempt(
       // 🆕 Step 3: 执行 hook 获取动态角色识别结果（在 buildEmbeddedSystemPrompt 之前）
       if (hookRunner?.hasHooks("before_agent_start")) {
         try {
-          const tempMessages = sessionManager.buildSessionContext().messages;
           const hookResult = await hookRunner.runBeforeAgentStart(
             {
               prompt: params.prompt,
-              messages: tempMessages,
             },
             {
-              agentId: params.sessionKey?.split(":")[0] ?? "main",
               sessionKey: params.sessionKey,
-              workspaceDir: params.workspaceDir,
-              messageProvider: params.messageProvider ?? undefined,
+              agentId: sessionAgentId,
+              workspaceDir: effectiveWorkspace,
             },
           );
           
@@ -451,7 +447,13 @@ export async function runEmbeddedAttempt(
           log.warn(`before_agent_start hook failed: ${String(hookErr)}`);
         }
       }
-
+      
+      // 🆕 promptMode 逻辑：子代理或角色化对话使用 minimal，否则使用 full
+      const promptMode = 
+        isSubagentSessionKey(params.sessionKey) || hookCharacterName
+          ? "minimal"
+          : "full";
+      
       // 🆕 Step 4: 生成 system prompt（传递动态识别的角色名）
       const appendPrompt = await buildEmbeddedSystemPrompt({
         workspaceDir: effectiveWorkspace,

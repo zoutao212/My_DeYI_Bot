@@ -97,9 +97,12 @@ export function installSessionToolResultGuard(
       const contentType = msg.content === null ? "null" : msg.content === undefined ? "undefined" : Array.isArray(msg.content) ? `array(${msg.content.length})` : typeof msg.content;
       log.info(`[guard] appendMessage called: role=assistant, content=${contentType}`);
       
-      // 🔧 Fix: Remove thoughtSignature from assistant messages before saving
-      // Some providers (like yinli) return thoughtSignature in responses, but reject it in requests
-      // We need to remove it from saved messages to prevent errors in subsequent requests
+      // 🆕 DEBUG: Log full message structure to see what API returned
+      log.info(`[guard] [DEBUG] Full assistant message: ${JSON.stringify(msg, null, 2).slice(0, 2000)}`);
+      
+      // 🔧 Fix: Remove provider-specific signature fields from assistant messages before saving
+      // Some providers (like yinli) return signature fields in responses, but may reject them in requests
+      // We need to remove them from saved messages to prevent errors in subsequent requests
       if (Array.isArray(msg.content)) {
         for (const block of msg.content) {
           if (block && typeof block === "object") {
@@ -111,6 +114,10 @@ export function installSessionToolResultGuard(
             if ("thought_signature" in rec) {
               delete rec.thought_signature;
               log.debug(`[guard] Removed thought_signature from content block`);
+            }
+            if ("textSignature" in rec) {
+              delete rec.textSignature;
+              log.debug(`[guard] Removed textSignature from content block`);
             }
           }
         }

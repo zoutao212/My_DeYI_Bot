@@ -214,11 +214,12 @@ export function patchToolSchemaForClaudeCompatibility(tool: AnyAgentTool): AnyAg
       properties[alias] = properties[original];
       changed = true;
     }
-    const idx = required.indexOf(original);
-    if (idx !== -1) {
-      required.splice(idx, 1);
-      changed = true;
-    }
+    // 🔧 Fix: Keep original field in required array
+    // LLM needs to know that at least one of (original, alias) is required
+    // Runtime validation (assertRequiredParams) will check that at least one is provided
+    // But we keep original in schema's required array so LLM knows it's not optional
+    // Note: This means schema says "original is required", but we accept alias too
+    // This is better than saying "both are optional" which confuses LLM
   }
 
   if (!changed) return tool;

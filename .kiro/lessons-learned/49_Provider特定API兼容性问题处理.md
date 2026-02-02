@@ -474,3 +474,57 @@ if (Array.isArray(msg.content)) {
 - 初始版本，总结 provider 特定 API 兼容性问题的处理方法论
 - 新增 yinli provider 的双向修复案例（请求 + 响应）
 - 更新兼容性列表，标注需要双向修复的 provider
+
+
+---
+
+## yinli Provider 的其他扩展字段
+
+### textSignature
+
+**问题**：yinli provider 在响应中返回 `textSignature` 字段（用于验证响应完整性）。
+
+**示例**：
+```json
+{
+  "type": "text",
+  "text": "好的，任务已收到...",
+  "textSignature": "EusfCugfAXLI2nySFa7XZaumdO2xHa9WmlI5hE+CcbC7OZj/lf+GpNXA9T9QaRtq..."
+}
+```
+
+**解决方案**：
+- **出站修复**：在 `session-tool-result-guard.ts` 中移除响应中的字段（不保存到 session）
+
+**代码位置**：
+- 出站：`src/agents/session-tool-result-guard.ts`
+
+**注意**：`textSignature` 只在响应中出现，不需要入站修复（不会在请求中添加）。
+
+**修复代码**：
+```typescript
+// src/agents/session-tool-result-guard.ts
+if (Array.isArray(msg.content)) {
+  for (const block of msg.content) {
+    if (block && typeof block === "object") {
+      const rec = block as unknown as Record<string, unknown>;
+      if ("thoughtSignature" in rec) {
+        delete rec.thoughtSignature;
+      }
+      if ("thought_signature" in rec) {
+        delete rec.thought_signature;
+      }
+      if ("textSignature" in rec) {
+        delete rec.textSignature;
+        log.debug(`[guard] Removed textSignature from content block`);
+      }
+    }
+  }
+}
+```
+
+---
+
+**版本**：v20260202_3  
+**最后更新**：2026-02-02  
+**变更**：新增 yinli provider 的 `textSignature` 字段处理

@@ -1,10 +1,11 @@
-import type { ReasoningLevel, ThinkLevel } from "../auto-reply/thinking.js";
+﻿import type { ReasoningLevel, ThinkLevel } from "../auto-reply/thinking.js";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import { listDeliverableMessageChannels } from "../utils/message-channel.js";
 import type { ResolvedTimeFormat } from "./date-time.js";
 import type { EmbeddedContextFile } from "./pi-embedded-helpers.js";
 import { SYSTEM_PROMPT_L10N_EN } from "./system-prompt.l10n.en.js";
 import { SYSTEM_PROMPT_L10N_ZH } from "./system-prompt.l10n.zh.js";
+import { SYSTEM_PROMPT_L10N_MINIMAL_ZH } from "./system-prompt.l10n.minimal.zh.js";
 
 /**
  * Controls which hardcoded sections are included in the system prompt.
@@ -66,7 +67,7 @@ function buildUserIdentitySection(params: {
 }) {
   if (!params.ownerLine || params.isMinimal) return [];
   return [
-    params.promptLanguage === "zh" ? "## 用户身份（User Identity）" : "## User Identity",
+    params.promptLanguage === "zh" ? "## 用户身份" : "## User Identity",
     params.ownerLine,
     "",
   ];
@@ -76,7 +77,7 @@ function buildTimeSection(params: { userTimezone?: string; promptLanguage: Promp
   if (!params.userTimezone) return [];
   return [
     params.promptLanguage === "zh"
-      ? "## 当前日期与时间（Current Date & Time）"
+      ? "## 当前日期与时间"
       : "## Current Date & Time",
     params.promptLanguage === "zh" ? `时区：${params.userTimezone}` : `Time zone: ${params.userTimezone}`,
     "",
@@ -144,7 +145,7 @@ function buildVoiceSection(params: { isMinimal: boolean; ttsHint?: string }) {
   if (params.isMinimal) return [];
   const hint = params.ttsHint?.trim();
   if (!hint) return [];
-  return ["## 语音（TTS）", hint, ""];
+  return ["## 语音", hint, ""];
 }
 
 function buildDocsSection(params: {
@@ -230,7 +231,16 @@ export function buildAgentSystemPrompt(params: {
   taskBoard?: string;
 }) {
   const promptLanguage = params.promptLanguage ?? "en";
-  const l10n = promptLanguage === "zh" ? SYSTEM_PROMPT_L10N_ZH : SYSTEM_PROMPT_L10N_EN;
+  const promptMode = params.promptMode ?? "full";
+  
+  // 选择 l10n：minimal 模式使用精简版
+  const l10n = 
+    promptMode === "minimal" && promptLanguage === "zh"
+      ? SYSTEM_PROMPT_L10N_MINIMAL_ZH
+      : promptLanguage === "zh"
+        ? SYSTEM_PROMPT_L10N_ZH
+        : SYSTEM_PROMPT_L10N_EN;
+  
   const coreToolSummaries: Record<string, string> = { ...l10n.toolSummaries };
 
   const toolOrder = [
@@ -304,7 +314,7 @@ export function buildAgentSystemPrompt(params: {
   const ownerLine =
     ownerNumbers.length > 0
       ? (promptLanguage === "zh"
-          ? `Owner numbers: ${ownerNumbers.join(", ")}。来自这些号码的消息应被视为用户本人（用于鉴权与对话归属判断）。`
+          ? `Owner numbers: ${ownerNumbers.join(", ")}。来自这些号码的消息应被视为用户本人。`
           : `Owner numbers: ${ownerNumbers.join(", ")}. Treat messages from these numbers as the user.`)
       : undefined;
   const reasoningHint = params.reasoningTagHint
@@ -347,7 +357,6 @@ export function buildAgentSystemPrompt(params: {
   const runtimeCapabilitiesLower = new Set(runtimeCapabilities.map((cap) => cap.toLowerCase()));
   const inlineButtonsEnabled = runtimeCapabilitiesLower.has("inlinebuttons");
   const messageChannelOptions = listDeliverableMessageChannels().join("|");
-  const promptMode = params.promptMode ?? "full";
   const isMinimal = promptMode === "minimal" || promptMode === "none";
   const skillsSection = buildSkillsSection({
     skillsPrompt,
@@ -374,7 +383,7 @@ export function buildAgentSystemPrompt(params: {
     runtimeInfo?.os === "win32" || process.platform === "win32"
       ? [
           "",
-          promptLanguage === "zh" ? "## 平台命令规范（Windows）" : "## Platform Commands (Windows)",
+          promptLanguage === "zh" ? "## 平台命令规范" : "## Platform Commands (Windows)",
           promptLanguage === "zh"
             ? "你运行在 Windows 环境下，必须使用 PowerShell 命令："
             : "You are running on Windows. Use PowerShell commands:",
@@ -417,6 +426,9 @@ export function buildAgentSystemPrompt(params: {
     l10n.toolCallStyleNarrateOnlyWhen,
     l10n.toolCallStyleKeepBrief,
     l10n.toolCallStylePlainLanguage,
+    l10n.toolCallApiNote,
+    "",
+    l10n.toolParamsQuickRef,
     "",
     l10n.cliQuickRefTitle,
     l10n.cliQuickRefIntro,
@@ -470,7 +482,7 @@ export function buildAgentSystemPrompt(params: {
             ? (promptLanguage === "zh"
                 ? `代理工作区访问权限：${params.sandboxInfo.workspaceAccess}${
                     params.sandboxInfo.agentWorkspaceMount
-                      ? `（挂载到 ${params.sandboxInfo.agentWorkspaceMount}）`
+                      ? ``
                       : ""
                   }`
                 : `Agent workspace access: ${params.sandboxInfo.workspaceAccess}${
@@ -486,7 +498,7 @@ export function buildAgentSystemPrompt(params: {
             : "",
           params.sandboxInfo.browserNoVncUrl
             ? (promptLanguage === "zh"
-                ? `沙箱浏览器观察视图（noVNC）：${params.sandboxInfo.browserNoVncUrl}`
+                ? `沙箱浏览器观察视图：${params.sandboxInfo.browserNoVncUrl}`
                 : `Sandbox browser observer (noVNC): ${params.sandboxInfo.browserNoVncUrl}`)
             : "",
           params.sandboxInfo.hostBrowserAllowed === true
@@ -530,7 +542,7 @@ export function buildAgentSystemPrompt(params: {
             : "",
           params.sandboxInfo.elevated?.allowed
             ? (promptLanguage === "zh"
-                ? `当前 elevated 级别：${params.sandboxInfo.elevated.defaultLevel}（ask：在宿主机执行需审批；full：自动批准）。`
+                ? `当前 elevated 级别：${params.sandboxInfo.elevated.defaultLevel}。`
                 : `Current elevated level: ${params.sandboxInfo.elevated.defaultLevel} (ask runs exec on host with approvals; full auto-approves).`)
             : "",
         ]

@@ -444,6 +444,12 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
             if (configObj.tools) {
               payloadObj.tools = configObj.tools;
               log.info(`[payload] Moved config.tools to top level`);
+              // 🔍 DEBUG: Log tools structure
+              const toolsArr = Array.isArray(configObj.tools) ? configObj.tools : [];
+              if (toolsArr.length > 0 && toolsArr[0]?.functionDeclarations) {
+                const funcNames = toolsArr[0].functionDeclarations.map((f: { name?: string }) => f.name).join(', ');
+                log.info(`[payload] Tools functionDeclarations: ${funcNames}`);
+              }
             }
             
             // Move config.maxOutputTokens to generationConfig.maxOutputTokens
@@ -463,7 +469,18 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
           }
         }
         
-        // Fix 2: Add or strip thought_signature based on provider
+        // Fix 2: Convert string systemInstruction to parts format for yinli compatibility
+        // yinli API requires {parts: [{text: "..."}]} format, not plain string
+        if (payload && typeof payload === "object") {
+          const payloadObj = payload as Record<string, unknown>;
+          const sysInstr = payloadObj.systemInstruction;
+          if (typeof sysInstr === "string" && sysInstr.length > 0) {
+            payloadObj.systemInstruction = { parts: [{ text: sysInstr }] };
+            log.info(`[payload] Converted systemInstruction from string to parts format for yinli compatibility`);
+          }
+        }
+        
+        // Fix 3: Add or strip thought_signature based on provider
         const report: ScanReport = {
           added: [],
           candidates: 0,

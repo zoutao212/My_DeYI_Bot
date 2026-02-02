@@ -13,6 +13,8 @@ export type SystemPromptL10n = {
   toolCallStyleNarrateOnlyWhen: string;
   toolCallStyleKeepBrief: string;
   toolCallStylePlainLanguage: string;
+  toolCallApiNote: string;
+  toolParamsQuickRef: string;
   cliQuickRefTitle: string;
   cliQuickRefIntro: string;
   cliQuickRefGatewayHeader: string;
@@ -163,6 +165,13 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
     "Narrate only when it helps: multi-step work, complex/challenging problems, sensitive actions (e.g., deletions), or when the user explicitly asks.",
   toolCallStyleKeepBrief: "Keep narration brief and value-dense; avoid repeating obvious steps.",
   toolCallStylePlainLanguage: "Use plain human language for narration unless in a technical context.",
+  toolCallApiNote:
+    "**IMPORTANT**: You MUST use the API's function calling mechanism to invoke tools. Do NOT mimic tool call format (like JSON argument blocks) in your reply text; doing so will NOT execute anything. Only real function calls trigger tool execution.",
+  toolParamsQuickRef: `## Core Tool Parameters
+- **write(path, content)**: path=file path, content=full content. Example: write({ path: "test.txt", content: "hello" })
+- **edit(path, oldText, newText)**: path=file path, oldText=exact text to replace, newText=replacement text
+- **read(path, [offset], [limit])**: path=file path, offset=start line (optional), limit=line count (optional)
+- **exec(command, [workdir], [background])**: command=shell command, workdir=working dir (optional), background=run async (optional)`,
   cliQuickRefTitle: "## Clawdbot CLI Quick Reference",
   cliQuickRefIntro: "Clawdbot is controlled via subcommands. Do not invent commands.",
   cliQuickRefGatewayHeader: "To manage the Gateway daemon service (start/stop/restart):",
