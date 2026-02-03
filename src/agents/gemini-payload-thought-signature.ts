@@ -46,14 +46,19 @@ function shouldEnable(params: {
     return false;
   }
 
-  // vectorengine 需要 thought_signature（重新启用）
-  // 原因：vectorengine API 要求在 tool_calls 中包含 thought_signature
-  // 错误信息："Function call is missing a thought_signature in functionCall parts"
+  // 🔧 Fix: 对 vectorengine 禁用整个 patcher（包括格式转换）
+  // 原因：vectorengine 是标准的 OpenAI 兼容接口
+  // - 需要标准的 OpenAI 格式（messages, tool_calls, role: assistant）
+  // - 不需要 Gemini 格式转换（contents, functionCall, role: model）
+  // - 不需要 thought_signature
+  // 测试证明：
+  // - ✅ 标准 OpenAI 格式成功
+  // - ❌ Gemini 格式失败（报错 "field messages is required"）
   if (effectiveProvider.includes("vectorengine")) {
-    log.debug(
-      `[thought_signature] Enabled for vectorengine provider (required by API)`,
+    log.info(
+      `[thought_signature] Disabled for vectorengine provider (standard OpenAI format, no conversion needed)`,
     );
-    return true;
+    return false;
   }
 
   // 对其他 provider，默认启用 thought_signature patcher
@@ -219,12 +224,56 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
     const role =
       typeof msgRec.role === "string" ? msgRec.role.trim().toLowerCase() : "";
 
-    // 🔧 Fix: Handle Gemini format messages (role: "model" or "user" with parts)
-    // These messages are already in Gemini format, but we need to fix functionResponse.name
+    // 🆕 Fix: Convert user messages from OpenAI format to vectorengine format FIRST
+    // This must be done before checking for Gemini format messages
+    // OpenAI format: { role: "user", content: [{ type: "text", text: "..." }] }
+    // vectorengine format: { role: "user", content: [{ text: "..." }] }  ← 注意：是 content，不是 parts！
+    if (role === "user") {
+      const content = msgRec.content;
+      
+      // If content is an array with { type: "text", text: "..." }, convert to { text: "..." }
+      if (Array.isArray(content)) {
+        const needsConversion = content.some((item) => {
+          if (!item || typeof item !== "object") return false;
+          const itemRec = item as Record<string, unknown>;
+          return itemRec.type === "text" && typeof itemRec.text === "string";
+        });
+        
+        if (needsConversion) {
+          // Convert from OpenAI format to vectorengine format
+          const convertedContent = content
+            .map((item) => {
+              if (!item || typeof item !== "object") return null;
+              const itemRec = item as Record<string, unknown>;
+              
+              // Extract text from { type: "text", text: "..." }
+              if (itemRec.type === "text" && typeof itemRec.text === "string") {
+                return { text: itemRec.text };
+              }
+              
+              // Keep other types as-is (e.g., image_url)
+              return item;
+            })
+            .filter(Boolean);
+          
+          if (convertedContent.length > 0) {
+            log.debug(`[format] Converted user message from OpenAI format to vectorengine format (${convertedContent.length} items)`);
+            msgRec.content = convertedContent;
+          }
+        }
+      } else if (typeof content === "string" && content.length > 0) {
+        // Convert from string to vectorengine format
+        log.debug(`[format] Converted user message from string to vectorengine format`);
+        msgRec.content = [{ text: content }];
+      }
+    }
+
+    // 🔧 Fix: Handle vectorengine format messages (role: "model" or "user" with content array)
+    // These messages are already in vectorengine format, but we need to fix functionResponse.name
     if (role === "model" || role === "user") {
-      const parts = msgRec.parts;
-      if (Array.isArray(parts)) {
-        for (const part of parts) {
+      const content = msgRec.content;
+      if (Array.isArray(content)) {
+        for (const part of content) {
           if (part && typeof part === "object") {
             const partRec = part as Record<string, unknown>;
 
@@ -273,52 +322,7 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
         }
       }
 
-      // Return the message as-is (already in Gemini format)
-      return msg;
-    }
-
-    // 🆕 Fix: Convert user messages from OpenAI format to Gemini format
-    // OpenAI format: { role: "user", content: [{ type: "text", text: "..." }] }
-    // Gemini format: { role: "user", parts: [{ text: "..." }] }
-    if (role === "user") {
-      const content = msgRec.content;
-      
-      // If content is an array (OpenAI format), convert to parts (Gemini format)
-      if (Array.isArray(content)) {
-        const parts = content
-          .map((item) => {
-            if (!item || typeof item !== "object") return null;
-            const itemRec = item as Record<string, unknown>;
-            
-            // Extract text from { type: "text", text: "..." }
-            if (itemRec.type === "text" && typeof itemRec.text === "string") {
-              return { text: itemRec.text };
-            }
-            
-            // Keep other types as-is (e.g., image_url)
-            return item;
-          })
-          .filter(Boolean);
-        
-        if (parts.length > 0) {
-          log.debug(`[format] Converted user message from OpenAI format to Gemini format (${parts.length} parts)`);
-          return {
-            role: "user",
-            parts: parts,
-          };
-        }
-      }
-      
-      // If content is a string (simple format), convert to parts
-      if (typeof content === "string" && content.length > 0) {
-        log.debug(`[format] Converted user message from string to Gemini format`);
-        return {
-          role: "user",
-          parts: [{ text: content }],
-        };
-      }
-      
-      // Return as-is if already in Gemini format or empty
+      // Return the message as-is (already in vectorengine format)
       return msg;
     }
 
