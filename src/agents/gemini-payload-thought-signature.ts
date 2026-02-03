@@ -34,24 +34,28 @@ function shouldEnable(params: {
   // Extract provider from modelId if provider is empty
   const providerStr = (params.provider ?? "").trim().toLowerCase();
   const modelStr = (params.modelId ?? "").trim().toLowerCase();
-  const providerFromModel = modelStr.includes("/") ? modelStr.split("/")[0] : "";
+  const providerFromModel = modelStr.includes("/")
+    ? modelStr.split("/")[0]
+    : "";
   const effectiveProvider = providerStr || providerFromModel;
-  
+
   // 对 yinli 禁用 thought_signature
   // 原因：yinli 的 API 不支持 thought_signature，会返回 "Corrupted thought signature" 错误
   if (effectiveProvider.includes("yinli")) {
     log.debug(`[thought_signature] Disabled for yinli provider`);
     return false;
   }
-  
+
   // vectorengine 需要 thought_signature（重新启用）
   // 原因：vectorengine API 要求在 tool_calls 中包含 thought_signature
   // 错误信息："Function call is missing a thought_signature in functionCall parts"
   if (effectiveProvider.includes("vectorengine")) {
-    log.debug(`[thought_signature] Enabled for vectorengine provider (required by API)`);
+    log.debug(
+      `[thought_signature] Enabled for vectorengine provider (required by API)`,
+    );
     return true;
   }
-  
+
   // 对其他 provider，默认启用 thought_signature patcher
   // 这样可以确保中转 API 不会因为缺少 thought_signature 而报错
   log.debug(`[thought_signature] Enabled for provider: ${effectiveProvider}`);
@@ -69,9 +73,11 @@ function shouldStripThoughtSignature(params: {
   // Extract provider from modelId if provider is empty
   const providerStr = (params.provider ?? "").trim().toLowerCase();
   const modelStr = (params.modelId ?? "").trim().toLowerCase();
-  const providerFromModel = modelStr.includes("/") ? modelStr.split("/")[0] : "";
+  const providerFromModel = modelStr.includes("/")
+    ? modelStr.split("/")[0]
+    : "";
   const effectiveProvider = providerStr || providerFromModel;
-  
+
   // 只有 yinli 需要移除所有 thought_signature
   // vectorengine 需要保留 thought_signature（API 要求）
   return effectiveProvider.includes("yinli");
@@ -81,13 +87,14 @@ function shouldStripThoughtSignature(params: {
  * 生成稳定的工具调用 ID（基于工具名称和参数）
  */
 function generateStableToolCallId(name: string, args: unknown): string {
-  const argsStr = typeof args === "object" ? JSON.stringify(args) : String(args);
+  const argsStr =
+    typeof args === "object" ? JSON.stringify(args) : String(args);
   const seed = `${name}:${argsStr}`;
   // 使用简单的 hash 生成稳定的 ID
   let hash = 0;
   for (let i = 0; i < seed.length; i++) {
     const char = seed.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
+    hash = (hash << 5) - hash + char;
     hash = hash & hash; // Convert to 32bit integer
   }
   return `call_${Math.abs(hash).toString(36)}`;
@@ -100,13 +107,14 @@ function generateStableToolCallId(name: string, args: unknown): string {
 function convertGeminiToOpenAIFormat(message: unknown): unknown {
   if (!message || typeof message !== "object") return message;
   const msgRec = message as Record<string, unknown>;
-  const role = typeof msgRec.role === "string" ? msgRec.role.trim().toLowerCase() : "";
-  
+  const role =
+    typeof msgRec.role === "string" ? msgRec.role.trim().toLowerCase() : "";
+
   // 转换 model 消息 → assistant
   if (role === "model") {
     const parts = msgRec.parts;
     if (!Array.isArray(parts)) return message;
-    
+
     // 检查是否有 functionCall
     const functionCalls = parts
       .filter((p) => p && typeof p === "object" && "functionCall" in p)
@@ -115,10 +123,10 @@ function convertGeminiToOpenAIFormat(message: unknown): unknown {
         const fc = part.functionCall;
         if (!fc || typeof fc !== "object") return null;
         const fcRec = fc as Record<string, unknown>;
-        
+
         const name = String(fcRec.name || "unknown");
         const args = fcRec.args || {};
-        
+
         return {
           id: generateStableToolCallId(name, args),
           type: "function",
@@ -129,7 +137,7 @@ function convertGeminiToOpenAIFormat(message: unknown): unknown {
         };
       })
       .filter(Boolean);
-    
+
     if (functionCalls.length > 0) {
       return {
         role: "assistant",
@@ -137,7 +145,7 @@ function convertGeminiToOpenAIFormat(message: unknown): unknown {
         tool_calls: functionCalls,
       };
     }
-    
+
     // 没有 functionCall，提取 text
     const textParts = parts
       .filter((p) => p && typeof p === "object" && "text" in p)
@@ -146,36 +154,36 @@ function convertGeminiToOpenAIFormat(message: unknown): unknown {
         return part.text;
       })
       .filter((t) => typeof t === "string");
-    
+
     if (textParts.length > 0) {
       return {
         role: "assistant",
         content: textParts.join(""),
       };
     }
-    
+
     // 空 parts
     return {
       role: "assistant",
       content: null,
     };
   }
-  
+
   // 转换 function/user 消息 → tool
   if (role === "function" || role === "user") {
     const parts = msgRec.parts;
     if (!Array.isArray(parts) || parts.length === 0) return message;
-    
+
     const firstPart = parts[0];
     if (!firstPart || typeof firstPart !== "object") return message;
     const partRec = firstPart as Record<string, unknown>;
     const fr = partRec.functionResponse;
     if (!fr || typeof fr !== "object") return message;
     const frRec = fr as Record<string, unknown>;
-    
+
     const name = String(frRec.name || "unknown");
     const response = frRec.response || {};
-    
+
     // 从 response 中提取 args（如果有）
     let args = {};
     if (response && typeof response === "object") {
@@ -184,14 +192,14 @@ function convertGeminiToOpenAIFormat(message: unknown): unknown {
         args = respRec.args;
       }
     }
-    
+
     return {
       role: "tool",
       tool_call_id: generateStableToolCallId(name, args),
       content: JSON.stringify(response),
     };
   }
-  
+
   // 其他消息保持不变
   return message;
 }
@@ -204,12 +212,13 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
   // 🔧 Fix: Track pending functionCall names to fix functionResponse.name
   // Gemini format doesn't have id fields, so we match by order (FIFO)
   const pendingFunctionNames: string[] = [];
-  
+
   return messages.map((msg) => {
     if (!msg || typeof msg !== "object") return msg;
     const msgRec = msg as Record<string, unknown>;
-    const role = typeof msgRec.role === "string" ? msgRec.role.trim().toLowerCase() : "";
-    
+    const role =
+      typeof msgRec.role === "string" ? msgRec.role.trim().toLowerCase() : "";
+
     // 🔧 Fix: Handle Gemini format messages (role: "model" or "user" with parts)
     // These messages are already in Gemini format, but we need to fix functionResponse.name
     if (role === "model" || role === "user") {
@@ -218,85 +227,104 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
         for (const part of parts) {
           if (part && typeof part === "object") {
             const partRec = part as Record<string, unknown>;
-            
+
             // Track functionCall names
             if ("functionCall" in partRec) {
               const fc = partRec.functionCall;
               if (fc && typeof fc === "object") {
                 const fcRec = fc as Record<string, unknown>;
-                const name = typeof fcRec.name === "string" ? fcRec.name : "unknown";
+                const name =
+                  typeof fcRec.name === "string" ? fcRec.name : "unknown";
                 pendingFunctionNames.push(name);
-                log.debug(`[format] Tracked functionCall: name="${name}", queue length=${pendingFunctionNames.length}`);
+                log.debug(
+                  `[format] Tracked functionCall: name="${name}", queue length=${pendingFunctionNames.length}`,
+                );
               }
             }
-            
+
             // Fix functionResponse.name using pending names
             if ("functionResponse" in partRec) {
               const fr = partRec.functionResponse;
               if (fr && typeof fr === "object") {
                 const frRec = fr as Record<string, unknown>;
-                if (frRec.name === "unknown" && pendingFunctionNames.length > 0) {
+                if (
+                  frRec.name === "unknown" &&
+                  pendingFunctionNames.length > 0
+                ) {
                   const name = pendingFunctionNames.shift()!;
                   frRec.name = name;
-                  log.info(`[format] ✓ Fixed functionResponse.name: "unknown" → "${name}" (queue length=${pendingFunctionNames.length})`);
+                  log.info(
+                    `[format] ✓ Fixed functionResponse.name: "unknown" → "${name}" (queue length=${pendingFunctionNames.length})`,
+                  );
                 } else if (pendingFunctionNames.length > 0) {
                   // Remove from queue even if name is not "unknown"
                   pendingFunctionNames.shift();
-                  log.debug(`[format] functionResponse already has name="${frRec.name}", removed from queue (queue length=${pendingFunctionNames.length})`);
+                  log.debug(
+                    `[format] functionResponse already has name="${frRec.name}", removed from queue (queue length=${pendingFunctionNames.length})`,
+                  );
                 } else {
-                  log.warn(`[format] ⚠️ functionResponse but queue is empty, name="${frRec.name}"`);
+                  log.warn(
+                    `[format] ⚠️ functionResponse but queue is empty, name="${frRec.name}"`,
+                  );
                 }
               }
             }
           }
         }
       }
-      
+
       // Return the message as-is (already in Gemini format)
       return msg;
     }
-    
+
     // 转换 assistant 消息
     if (role === "assistant") {
       const toolCalls = msgRec.tool_calls;
       if (Array.isArray(toolCalls) && toolCalls.length > 0) {
         // 转换为 Gemini 格式
-        const parts = toolCalls.map((tc) => {
-          if (!tc || typeof tc !== "object") return null;
-          const tcRec = tc as Record<string, unknown>;
-          const func = tcRec.function;
-          if (!func || typeof func !== "object") return null;
-          const funcRec = func as Record<string, unknown>;
-          
-          // 解析 arguments（JSON 字符串 → 对象）
-          let args = {};
-          if (typeof funcRec.arguments === "string") {
-            try {
-              args = JSON.parse(funcRec.arguments);
-            } catch (e) {
-              log.warn(`[format] Failed to parse arguments: ${funcRec.arguments}`);
+        const parts = toolCalls
+          .map((tc) => {
+            if (!tc || typeof tc !== "object") return null;
+            const tcRec = tc as Record<string, unknown>;
+            const func = tcRec.function;
+            if (!func || typeof func !== "object") return null;
+            const funcRec = func as Record<string, unknown>;
+
+            // 解析 arguments（JSON 字符串 → 对象）
+            let args = {};
+            if (typeof funcRec.arguments === "string") {
+              try {
+                args = JSON.parse(funcRec.arguments);
+              } catch (e) {
+                log.warn(
+                  `[format] Failed to parse arguments: ${funcRec.arguments}`,
+                );
+              }
             }
-          }
-          
-          // 🔧 Fix: Track functionCall name for matching tool results
-          const name = typeof funcRec.name === "string" ? funcRec.name : "unknown";
-          pendingFunctionNames.push(name);
-          log.debug(`[format] Tracked functionCall from assistant: name="${name}", queue length=${pendingFunctionNames.length}`);
-          
-          return {
-            functionCall: {
-              name: funcRec.name,
-              args: args,
-            },
-          };
-        }).filter(Boolean);
-        
+
+            // 🔧 Fix: Track functionCall name for matching tool results
+            const name =
+              typeof funcRec.name === "string" ? funcRec.name : "unknown";
+            pendingFunctionNames.push(name);
+            log.debug(
+              `[format] Tracked functionCall from assistant: name="${name}", queue length=${pendingFunctionNames.length}`,
+            );
+
+            return {
+              functionCall: {
+                name: funcRec.name,
+                args: args,
+              },
+            };
+          })
+          .filter(Boolean);
+
         return {
           role: "model",
           parts: parts,
         };
       }
-      
+
       // 没有 tool_calls 的 assistant 消息
       const content = msgRec.content;
       if (typeof content === "string" && content.length > 0) {
@@ -317,12 +345,12 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
         parts: [],
       };
     }
-    
+
     // 转换 tool 消息（OpenAI 格式）
     if (role === "tool") {
       const content = msgRec.content;
       const toolCallId = msgRec.tool_call_id;
-      
+
       // 解析 content（可能是 JSON 字符串）
       let response = {};
       if (typeof content === "string") {
@@ -335,28 +363,31 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
       } else if (content && typeof content === "object") {
         response = content;
       }
-      
+
       // 🆕 Fix: Clean up response.result content to remove metadata
       // Remove "Read text file [auto]" prefix and YAML frontmatter
       if (response && typeof response === "object") {
         const respRec = response as Record<string, unknown>;
         if (typeof respRec.result === "string") {
           let cleaned = respRec.result;
-          
+
           // Remove "Read text file [auto]" or "Read image file [...]" prefix
-          cleaned = cleaned.replace(/^Read (?:text|image) file \[.*?\]\n\n/, "");
-          
+          cleaned = cleaned.replace(
+            /^Read (?:text|image) file \[.*?\]\n\n/,
+            "",
+          );
+
           // Remove YAML frontmatter (---\n...\n---\n)
           cleaned = cleaned.replace(/^---\n[\s\S]*?\n---\n\n/, "");
-          
+
           respRec.result = cleaned;
           log.debug(`[format] Cleaned response.result: removed metadata`);
         }
       }
-      
+
       // 🔧 Fix: Use pending names queue to match tool results
       let name = "unknown";
-      
+
       // 1. Try to extract from response
       if (response && typeof response === "object") {
         const respRec = response as Record<string, unknown>;
@@ -366,22 +397,28 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
           name = respRec.name;
         }
       }
-      
+
       // 2. If still unknown, use pending names queue
       if (name === "unknown" && pendingFunctionNames.length > 0) {
         name = pendingFunctionNames.shift()!;
-        log.info(`[format] ✓ Fixed tool message name using queue: "unknown" → "${name}" (queue length=${pendingFunctionNames.length})`);
+        log.info(
+          `[format] ✓ Fixed tool message name using queue: "unknown" → "${name}" (queue length=${pendingFunctionNames.length})`,
+        );
       } else if (name === "unknown" && typeof toolCallId === "string") {
         // 3. If queue is empty, log warning
-        log.warn(`[format] Unable to extract tool name from tool_call_id: ${toolCallId}, queue is empty`);
+        log.warn(
+          `[format] Unable to extract tool name from tool_call_id: ${toolCallId}, queue is empty`,
+        );
       } else if (name !== "unknown" && pendingFunctionNames.length > 0) {
         // 4. If name is already known, remove from queue
         pendingFunctionNames.shift();
-        log.debug(`[format] tool message already has name="${name}", removed from queue (queue length=${pendingFunctionNames.length})`);
+        log.debug(
+          `[format] tool message already has name="${name}", removed from queue (queue length=${pendingFunctionNames.length})`,
+        );
       }
-      
+
       return {
-        role: "user",  // Gemini 格式中，工具结果的 role 是 "user"
+        role: "user", // Gemini 格式中，工具结果的 role 是 "user"
         parts: [
           {
             functionResponse: {
@@ -392,12 +429,12 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
         ],
       };
     }
-    
+
     // 转换 toolResult 消息（Clawdbot 内部格式）
     if (role === "toolresult") {
       const content = msgRec.content;
       const toolName = msgRec.toolName;
-      
+
       // 解析 content
       let response = {};
       if (typeof content === "string") {
@@ -420,34 +457,39 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
       } else if (content && typeof content === "object") {
         response = content;
       }
-      
+
       // 🆕 Fix: Clean up response.result content to remove metadata
       // Remove "Read text file [auto]" prefix and YAML frontmatter
       if (response && typeof response === "object") {
         const respRec = response as Record<string, unknown>;
         if (typeof respRec.result === "string") {
           let cleaned = respRec.result;
-          
+
           // Remove "Read text file [auto]" or "Read image file [...]" prefix
-          cleaned = cleaned.replace(/^Read (?:text|image) file \[.*?\]\n\n/, "");
-          
+          cleaned = cleaned.replace(
+            /^Read (?:text|image) file \[.*?\]\n\n/,
+            "",
+          );
+
           // Remove YAML frontmatter (---\n...\n---\n)
           cleaned = cleaned.replace(/^---\n[\s\S]*?\n---\n\n/, "");
-          
+
           respRec.result = cleaned;
           log.debug(`[format] Cleaned response.result: removed metadata`);
         }
       }
-      
+
       // 使用 toolName 字段
       const name = typeof toolName === "string" ? toolName : "unknown";
-      
+
       if (name === "unknown") {
-        log.warn(`[format] Unable to extract tool name from toolResult message`);
+        log.warn(
+          `[format] Unable to extract tool name from toolResult message`,
+        );
       }
-      
+
       return {
-        role: "user",  // Gemini 格式中，工具结果的 role 是 "user"
+        role: "user", // Gemini 格式中，工具结果的 role 是 "user"
         parts: [
           {
             functionResponse: {
@@ -458,7 +500,7 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
         ],
       };
     }
-    
+
     // 其他消息保持不变
     return msg;
   });
@@ -470,16 +512,16 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
  */
 function stripAllThoughtSignatures(value: unknown): void {
   if (!value || typeof value !== "object") return;
-  
+
   if (Array.isArray(value)) {
     for (const item of value) {
       stripAllThoughtSignatures(item);
     }
     return;
   }
-  
+
   const record = value as Record<string, unknown>;
-  
+
   // 移除 thought_signature 和 thoughtSignature
   if ("thought_signature" in record) {
     delete record.thought_signature;
@@ -487,7 +529,7 @@ function stripAllThoughtSignatures(value: unknown): void {
   if ("thoughtSignature" in record) {
     delete record.thoughtSignature;
   }
-  
+
   // 递归处理所有子对象
   for (const key of Object.keys(record)) {
     const child = record[key];
@@ -503,9 +545,11 @@ function ensureThoughtSignatureOnRecord(params: {
   report: ScanReport;
 }): void {
   const hasSnake =
-    typeof params.record.thought_signature === "string" && params.record.thought_signature.trim();
+    typeof params.record.thought_signature === "string" &&
+    params.record.thought_signature.trim();
   const hasCamel =
-    typeof params.record.thoughtSignature === "string" && params.record.thoughtSignature.trim();
+    typeof params.record.thoughtSignature === "string" &&
+    params.record.thoughtSignature.trim();
   if (hasSnake || hasCamel) return;
 
   const name =
@@ -518,9 +562,15 @@ function ensureThoughtSignatureOnRecord(params: {
           : undefined;
 
   const seed =
-    (typeof params.record.id === "string" && params.record.id.trim() && params.record.id) ||
-    (typeof params.record.call_id === "string" && params.record.call_id.trim() && params.record.call_id) ||
-    (typeof params.record.toolCallId === "string" && params.record.toolCallId.trim() && params.record.toolCallId) ||
+    (typeof params.record.id === "string" &&
+      params.record.id.trim() &&
+      params.record.id) ||
+    (typeof params.record.call_id === "string" &&
+      params.record.call_id.trim() &&
+      params.record.call_id) ||
+    (typeof params.record.toolCallId === "string" &&
+      params.record.toolCallId.trim() &&
+      params.record.toolCallId) ||
     `${params.path}:${name ?? ""}`;
 
   const signature = makeStableThoughtSignatureBase64(seed);
@@ -540,9 +590,11 @@ function noteCandidate(params: {
 }): void {
   params.report.candidates += 1;
   const hasSnake =
-    typeof params.record.thought_signature === "string" && params.record.thought_signature.trim();
+    typeof params.record.thought_signature === "string" &&
+    params.record.thought_signature.trim();
   const hasCamel =
-    typeof params.record.thoughtSignature === "string" && params.record.thoughtSignature.trim();
+    typeof params.record.thoughtSignature === "string" &&
+    params.record.thoughtSignature.trim();
   if (hasSnake || hasCamel) return;
   params.report.missingBefore += 1;
   if (params.report.missingPaths.length < 20) {
@@ -559,7 +611,11 @@ function walkAndPatch(params: {
   if (!value) return;
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i += 1) {
-      walkAndPatch({ value: value[i], path: `${params.path}[${i}]`, report: params.report });
+      walkAndPatch({
+        value: value[i],
+        path: `${params.path}[${i}]`,
+        report: params.report,
+      });
     }
     return;
   }
@@ -567,11 +623,17 @@ function walkAndPatch(params: {
 
   const rec = value as Record<string, unknown>;
 
-  const role = typeof rec.role === "string" ? rec.role.trim().toLowerCase() : "";
-  const isToolResultMessage = role === "tool" || typeof rec.tool_call_id === "string";
+  const role =
+    typeof rec.role === "string" ? rec.role.trim().toLowerCase() : "";
+  const isToolResultMessage =
+    role === "tool" || typeof rec.tool_call_id === "string";
   if (isToolResultMessage) {
     noteCandidate({ record: rec, path: params.path, report: params.report });
-    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
+    ensureThoughtSignatureOnRecord({
+      record: rec,
+      path: params.path,
+      report: params.report,
+    });
   }
 
   const type = rec.type;
@@ -586,7 +648,11 @@ function walkAndPatch(params: {
 
   if (isFunctionCallType) {
     noteCandidate({ record: rec, path: params.path, report: params.report });
-    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
+    ensureThoughtSignatureOnRecord({
+      record: rec,
+      path: params.path,
+      report: params.report,
+    });
   }
 
   const parts = rec.parts;
@@ -617,13 +683,21 @@ function walkAndPatch(params: {
     // Some Gemini/OpenAI-completions adapters validate the *part wrapper* (contents[].parts[].*)
     // for thought_signature when it contains a functionCall/functionResponse. Patch the wrapper too.
     noteCandidate({ record: rec, path: params.path, report: params.report });
-    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
+    ensureThoughtSignatureOnRecord({
+      record: rec,
+      path: params.path,
+      report: params.report,
+    });
   }
 
   const toolCallsSnake = rec.tool_calls;
   if (Array.isArray(toolCallsSnake)) {
     noteCandidate({ record: rec, path: params.path, report: params.report });
-    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
+    ensureThoughtSignatureOnRecord({
+      record: rec,
+      path: params.path,
+      report: params.report,
+    });
     for (let i = 0; i < toolCallsSnake.length; i += 1) {
       const entry = toolCallsSnake[i];
       if (!entry || typeof entry !== "object") continue;
@@ -656,7 +730,11 @@ function walkAndPatch(params: {
   const toolCallsCamel = rec.toolCalls;
   if (Array.isArray(toolCallsCamel)) {
     noteCandidate({ record: rec, path: params.path, report: params.report });
-    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
+    ensureThoughtSignatureOnRecord({
+      record: rec,
+      path: params.path,
+      report: params.report,
+    });
     for (let i = 0; i < toolCallsCamel.length; i += 1) {
       const entry = toolCallsCamel[i];
       if (!entry || typeof entry !== "object") continue;
@@ -690,7 +768,11 @@ function walkAndPatch(params: {
   const functionObj = rec.function;
   if (functionObj && typeof functionObj === "object") {
     noteCandidate({ record: rec, path: params.path, report: params.report });
-    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
+    ensureThoughtSignatureOnRecord({
+      record: rec,
+      path: params.path,
+      report: params.report,
+    });
     noteCandidate({
       record: functionObj as Record<string, unknown>,
       path: `${params.path}.function`,
@@ -707,8 +789,12 @@ function walkAndPatch(params: {
   if (functionCall && typeof functionCall === "object") {
     // ✅ 给包含 functionCall 的 part wrapper 添加 thoughtSignature
     noteCandidate({ record: rec, path: params.path, report: params.report });
-    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
-    
+    ensureThoughtSignatureOnRecord({
+      record: rec,
+      path: params.path,
+      report: params.report,
+    });
+
     // ✅ vectorengine 需要在 functionCall 对象内部添加 thought_signature
     // ❌ yinli 不需要（会报错）
     // 解决方案：通过 params 传递 provider 信息，根据 provider 决定是否添加
@@ -727,8 +813,12 @@ function walkAndPatch(params: {
   if (function_call && typeof function_call === "object") {
     // ✅ 给包含 function_call 的 part wrapper 添加 thoughtSignature
     noteCandidate({ record: rec, path: params.path, report: params.report });
-    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
-    
+    ensureThoughtSignatureOnRecord({
+      record: rec,
+      path: params.path,
+      report: params.report,
+    });
+
     // ✅ vectorengine 需要在 function_call 对象内部添加 thought_signature
     // ❌ yinli 不需要（会报错）
     noteCandidate({
@@ -747,8 +837,12 @@ function walkAndPatch(params: {
   if (functionResponse && typeof functionResponse === "object") {
     // ✅ 给包含 functionResponse 的 part wrapper 添加 thoughtSignature
     noteCandidate({ record: rec, path: params.path, report: params.report });
-    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
-    
+    ensureThoughtSignatureOnRecord({
+      record: rec,
+      path: params.path,
+      report: params.report,
+    });
+
     // ✅ vectorengine 需要在 functionResponse 对象内部添加 thought_signature
     // ❌ yinli 不需要（会报错）
     noteCandidate({
@@ -766,8 +860,12 @@ function walkAndPatch(params: {
   if (function_response && typeof function_response === "object") {
     // ✅ 给包含 function_response 的 part wrapper 添加 thoughtSignature
     noteCandidate({ record: rec, path: params.path, report: params.report });
-    ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
-    
+    ensureThoughtSignatureOnRecord({
+      record: rec,
+      path: params.path,
+      report: params.report,
+    });
+
     // ✅ vectorengine 需要在 function_response 对象内部添加 thought_signature
     // ❌ yinli 不需要（会报错）
     noteCandidate({
@@ -784,7 +882,11 @@ function walkAndPatch(params: {
 
   for (const [k, v] of Object.entries(rec)) {
     if (k === "thought_signature" || k === "thoughtSignature") continue;
-    walkAndPatch({ value: v, path: `${params.path}.${k}`, report: params.report });
+    walkAndPatch({
+      value: v,
+      path: `${params.path}.${k}`,
+      report: params.report,
+    });
   }
 }
 
@@ -802,9 +904,17 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
   modelId?: string;
   modelApi?: string | null;
 }): GeminiPayloadThoughtSignaturePatcher | null {
-  const addSignatures = shouldEnable({ provider: params.provider, modelApi: params.modelApi, modelId: params.modelId });
-  const stripSignatures = shouldStripThoughtSignature({ provider: params.provider, modelApi: params.modelApi, modelId: params.modelId });
-  
+  const addSignatures = shouldEnable({
+    provider: params.provider,
+    modelApi: params.modelApi,
+    modelId: params.modelId,
+  });
+  const stripSignatures = shouldStripThoughtSignature({
+    provider: params.provider,
+    modelApi: params.modelApi,
+    modelId: params.modelId,
+  });
+
   // 🔧 Fix: 对于需要清理 thought_signature 的 provider（如 yinli），
   // 即使不添加 thought_signature，也要创建 patcher 来执行清理
   if (!addSignatures && !stripSignatures) {
@@ -820,7 +930,9 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
     modelApi: params.modelApi,
   };
 
-  const wrapStreamFn: GeminiPayloadThoughtSignaturePatcher["wrapStreamFn"] = (streamFn) => {
+  const wrapStreamFn: GeminiPayloadThoughtSignaturePatcher["wrapStreamFn"] = (
+    streamFn,
+  ) => {
     const wrapped: StreamFn = (model, context, options) => {
       const nextOnPayload = (payload: unknown) => {
         // ❌ 移除错误的格式转换逻辑
@@ -829,79 +941,93 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
         // - 顶层：messages（OpenAI 格式）
         // - 内容：tool_calls、role: assistant（OpenAI 格式）
         // 不需要转换为 Gemini 格式（functionCall、role: model）
-        
+
         // Fix 1: Flatten config field to top level (Gemini API format)
         if (payload && typeof payload === "object" && "config" in payload) {
           const payloadObj = payload as Record<string, unknown>;
           const config = payloadObj.config;
-          
+
           if (config && typeof config === "object") {
             const configObj = config as Record<string, unknown>;
-            
-            log.warn(`[payload] ⚠️ Found 'config' field in payload (not Gemini API compliant), flattening to top level`);
-            
+
+            log.warn(
+              `[payload] ⚠️ Found 'config' field in payload (not Gemini API compliant), flattening to top level`,
+            );
+
             // Move config.systemInstruction to top level
             if (configObj.systemInstruction) {
               payloadObj.systemInstruction = configObj.systemInstruction;
               log.info(`[payload] Moved config.systemInstruction to top level`);
             }
-            
+
             // Move config.tools to top level and clean format
             if (configObj.tools) {
               // Clean tools format: remove label, execute, etc.
-              const cleanedTools = Array.isArray(configObj.tools) 
+              const cleanedTools = Array.isArray(configObj.tools)
                 ? configObj.tools.map((toolGroup: unknown) => {
-                    if (!toolGroup || typeof toolGroup !== "object") return toolGroup;
+                    if (!toolGroup || typeof toolGroup !== "object")
+                      return toolGroup;
                     const group = toolGroup as Record<string, unknown>;
-                    
+
                     // If it's a tool group with functionDeclarations
                     if (Array.isArray(group.functionDeclarations)) {
                       return {
-                        functionDeclarations: group.functionDeclarations.map((fn: unknown) => {
-                          if (!fn || typeof fn !== "object") return fn;
-                          const func = fn as Record<string, unknown>;
-                          // Only keep name, description, parameters
-                          return {
-                            name: func.name,
-                            description: func.description,
-                            parameters: func.parameters,
-                          };
-                        }),
+                        functionDeclarations: group.functionDeclarations.map(
+                          (fn: unknown) => {
+                            if (!fn || typeof fn !== "object") return fn;
+                            const func = fn as Record<string, unknown>;
+                            // Only keep name, description, parameters
+                            return {
+                              name: func.name,
+                              description: func.description,
+                              parameters: func.parameters,
+                            };
+                          },
+                        ),
                       };
                     }
-                    
+
                     return toolGroup;
                   })
                 : configObj.tools;
-              
+
               payloadObj.tools = cleanedTools;
-              log.info(`[payload] Moved config.tools to top level and cleaned format`);
-              
+              log.info(
+                `[payload] Moved config.tools to top level and cleaned format`,
+              );
+
               // 🔍 DEBUG: Log tools structure
               const toolsArr = Array.isArray(cleanedTools) ? cleanedTools : [];
               if (toolsArr.length > 0 && toolsArr[0]?.functionDeclarations) {
-                const funcNames = toolsArr[0].functionDeclarations.map((f: { name?: string }) => f.name).join(', ');
+                const funcNames = toolsArr[0].functionDeclarations
+                  .map((f: { name?: string }) => f.name)
+                  .join(", ");
                 log.info(`[payload] Tools functionDeclarations: ${funcNames}`);
               }
             }
-            
+
             // Move config.maxOutputTokens to generationConfig.maxOutputTokens
             if (typeof configObj.maxOutputTokens === "number") {
               payloadObj.generationConfig = {
-                ...(typeof payloadObj.generationConfig === "object" && payloadObj.generationConfig !== null 
-                  ? payloadObj.generationConfig as Record<string, unknown>
+                ...(typeof payloadObj.generationConfig === "object" &&
+                payloadObj.generationConfig !== null
+                  ? (payloadObj.generationConfig as Record<string, unknown>)
                   : {}),
-                maxOutputTokens: configObj.maxOutputTokens
+                maxOutputTokens: configObj.maxOutputTokens,
               };
-              log.info(`[payload] Moved config.maxOutputTokens to generationConfig.maxOutputTokens`);
+              log.info(
+                `[payload] Moved config.maxOutputTokens to generationConfig.maxOutputTokens`,
+              );
             }
-            
+
             // Delete the config field
             delete payloadObj.config;
-            log.info(`[payload] ✓ Removed 'config' field, payload now Gemini API compliant`);
+            log.info(
+              `[payload] ✓ Removed 'config' field, payload now Gemini API compliant`,
+            );
           }
         }
-        
+
         // Fix 2: Convert string systemInstruction to parts format for yinli compatibility
         // yinli API requires {parts: [{text: "..."}]} format, not plain string
         if (payload && typeof payload === "object") {
@@ -909,20 +1035,35 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
           const sysInstr = payloadObj.systemInstruction;
           if (typeof sysInstr === "string" && sysInstr.length > 0) {
             payloadObj.systemInstruction = { parts: [{ text: sysInstr }] };
-            log.info(`[payload] Converted systemInstruction from string to parts format for yinli compatibility`);
+            log.info(
+              `[payload] Converted systemInstruction from string to parts format for yinli compatibility`,
+            );
           }
         }
-        
+
         // Fix 4: Convert OpenAI format to Gemini format for vectorengine
         // vectorengine uses OpenAI endpoint (/v1/chat/completions) but expects Gemini payload format
         // Extract provider from model string (e.g., "vectorengine/gemini-3-flash-preview" → "vectorengine")
         const modelStr = typeof base.modelId === "string" ? base.modelId : "";
-        const providerFromModel = modelStr.includes("/") ? modelStr.split("/")[0] : "";
+        const providerFromModel = modelStr.includes("/")
+          ? modelStr.split("/")[0]
+          : "";
         // 🔧 Fix: base.provider 可能是空字符串，需要显式检查
-        const effectiveProvider = (base.provider && base.provider.trim() !== "" ? base.provider : providerFromModel).toLowerCase();
-        
-        log.debug(`[format] effectiveProvider="${effectiveProvider}", base.provider="${base.provider}", providerFromModel="${providerFromModel}"`);
-        
+        const effectiveProvider = (
+          base.provider && base.provider.trim() !== ""
+            ? base.provider
+            : providerFromModel
+        ).toLowerCase();
+
+        log.debug(
+          `[format] effectiveProvider="${effectiveProvider}", base.provider="${base.provider}", providerFromModel="${providerFromModel}"`,
+        );
+
+        // ❌ Disabled Fix 4: Do NOT convert to Gemini format for vectorengine
+        // vectorengine should support OpenAI format directly. Converting to Gemini format (role: model)
+        // while using openai-completions endpoint causes repeating tool calls because the history format
+        // is mismatched/confusing to the model or intermediate layers.
+        /*
         if (effectiveProvider.includes("vectorengine")) {
           if (payload && typeof payload === "object" && "messages" in payload) {
             const payloadObj = payload as Record<string, unknown>;
@@ -935,7 +1076,8 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
             }
           }
         }
-        
+        */
+
         // Fix 3: Add or strip thought_signature based on provider
         const report: ScanReport = {
           added: [],
@@ -943,92 +1085,137 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
           missingBefore: 0,
           missingPaths: [],
         };
-        
+
         if (stripSignatures) {
           // 🔧 Fix: 对于 yinli 等不支持 thought_signature 的 provider，
           // 在发送请求前彻底移除所有 thought_signature
           stripAllThoughtSignatures(payload);
-          log.info(`[thought_signature] Stripped all thought_signature fields for provider: ${effectiveProvider}`);
+          log.info(
+            `[thought_signature] Stripped all thought_signature fields for provider: ${effectiveProvider}`,
+          );
         } else if (addSignatures) {
           // 🔧 Fix: 对于 vectorengine，需要确保历史消息中的 functionCall 内部也有 thought_signature
           // 这是因为 LLM 返回的 assistant 消息可能没有在 functionCall 内部添加 thought_signature
           // 导致保存到 session 的历史消息格式不对，下次请求时 API 报错
           if (effectiveProvider.includes("vectorengine")) {
             // 递归检查并修复 functionCall 内部的 thought_signature
-            function ensureInnerThoughtSignatures(value: unknown, path: string): void {
+            function ensureInnerThoughtSignatures(
+              value: unknown,
+              path: string,
+            ): void {
               if (!value || typeof value !== "object") return;
-              
+
               if (Array.isArray(value)) {
                 for (let i = 0; i < value.length; i++) {
                   ensureInnerThoughtSignatures(value[i], `${path}[${i}]`);
                 }
                 return;
               }
-              
+
               const record = value as Record<string, unknown>;
-              
+
               // 如果是 functionCall/functionResponse 对象，确保其内部有 thought_signature
-              if (record.functionCall && typeof record.functionCall === "object") {
+              if (
+                record.functionCall &&
+                typeof record.functionCall === "object"
+              ) {
                 const fc = record.functionCall as Record<string, unknown>;
-                const hasSnake = typeof fc.thought_signature === "string" && fc.thought_signature.trim();
-                const hasCamel = typeof fc.thoughtSignature === "string" && fc.thoughtSignature.trim();
-                
+                const hasSnake =
+                  typeof fc.thought_signature === "string" &&
+                  fc.thought_signature.trim();
+                const hasCamel =
+                  typeof fc.thoughtSignature === "string" &&
+                  fc.thoughtSignature.trim();
+
                 if (!hasSnake && !hasCamel) {
                   // 生成 thought_signature
-                  const name = typeof fc.name === "string" ? fc.name : "unknown";
+                  const name =
+                    typeof fc.name === "string" ? fc.name : "unknown";
                   const seed = `${path}.functionCall:${name}`;
                   const signature = makeStableThoughtSignatureBase64(seed);
                   fc.thought_signature = signature;
                   fc.thoughtSignature = signature;
-                  log.debug(`[thought_signature] Added missing thought_signature to functionCall at ${path}`);
+                  log.debug(
+                    `[thought_signature] Added missing thought_signature to functionCall at ${path}`,
+                  );
                 }
               }
-              
-              if (record.function_call && typeof record.function_call === "object") {
+
+              if (
+                record.function_call &&
+                typeof record.function_call === "object"
+              ) {
                 const fc = record.function_call as Record<string, unknown>;
-                const hasSnake = typeof fc.thought_signature === "string" && fc.thought_signature.trim();
-                const hasCamel = typeof fc.thoughtSignature === "string" && fc.thoughtSignature.trim();
-                
+                const hasSnake =
+                  typeof fc.thought_signature === "string" &&
+                  fc.thought_signature.trim();
+                const hasCamel =
+                  typeof fc.thoughtSignature === "string" &&
+                  fc.thoughtSignature.trim();
+
                 if (!hasSnake && !hasCamel) {
-                  const name = typeof fc.name === "string" ? fc.name : "unknown";
+                  const name =
+                    typeof fc.name === "string" ? fc.name : "unknown";
                   const seed = `${path}.function_call:${name}`;
                   const signature = makeStableThoughtSignatureBase64(seed);
                   fc.thought_signature = signature;
                   fc.thoughtSignature = signature;
-                  log.debug(`[thought_signature] Added missing thought_signature to function_call at ${path}`);
+                  log.debug(
+                    `[thought_signature] Added missing thought_signature to function_call at ${path}`,
+                  );
                 }
               }
-              
-              if (record.functionResponse && typeof record.functionResponse === "object") {
+
+              if (
+                record.functionResponse &&
+                typeof record.functionResponse === "object"
+              ) {
                 const fr = record.functionResponse as Record<string, unknown>;
-                const hasSnake = typeof fr.thought_signature === "string" && fr.thought_signature.trim();
-                const hasCamel = typeof fr.thoughtSignature === "string" && fr.thoughtSignature.trim();
-                
+                const hasSnake =
+                  typeof fr.thought_signature === "string" &&
+                  fr.thought_signature.trim();
+                const hasCamel =
+                  typeof fr.thoughtSignature === "string" &&
+                  fr.thoughtSignature.trim();
+
                 if (!hasSnake && !hasCamel) {
-                  const name = typeof fr.name === "string" ? fr.name : "unknown";
+                  const name =
+                    typeof fr.name === "string" ? fr.name : "unknown";
                   const seed = `${path}.functionResponse:${name}`;
                   const signature = makeStableThoughtSignatureBase64(seed);
                   fr.thought_signature = signature;
                   fr.thoughtSignature = signature;
-                  log.debug(`[thought_signature] Added missing thought_signature to functionResponse at ${path}`);
+                  log.debug(
+                    `[thought_signature] Added missing thought_signature to functionResponse at ${path}`,
+                  );
                 }
               }
-              
-              if (record.function_response && typeof record.function_response === "object") {
+
+              if (
+                record.function_response &&
+                typeof record.function_response === "object"
+              ) {
                 const fr = record.function_response as Record<string, unknown>;
-                const hasSnake = typeof fr.thought_signature === "string" && fr.thought_signature.trim();
-                const hasCamel = typeof fr.thoughtSignature === "string" && fr.thoughtSignature.trim();
-                
+                const hasSnake =
+                  typeof fr.thought_signature === "string" &&
+                  fr.thought_signature.trim();
+                const hasCamel =
+                  typeof fr.thoughtSignature === "string" &&
+                  fr.thoughtSignature.trim();
+
                 if (!hasSnake && !hasCamel) {
-                  const name = typeof fr.name === "string" ? fr.name : "unknown";
+                  const name =
+                    typeof fr.name === "string" ? fr.name : "unknown";
                   const seed = `${path}.function_response:${name}`;
                   const signature = makeStableThoughtSignatureBase64(seed);
                   fr.thought_signature = signature;
                   fr.thoughtSignature = signature;
-                  log.debug(`[thought_signature] Added missing thought_signature to function_response at ${path}`);
+                  log.debug(
+                    `[thought_signature] Added missing thought_signature to function_response at ${path}`,
+                  );
                 }
               }
-              
+
               // 递归处理所有子对象
               for (const key of Object.keys(record)) {
                 const child = record[key];
@@ -1037,14 +1224,16 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
                 }
               }
             }
-            
+
             ensureInnerThoughtSignatures(payload, "$");
-            log.info(`[thought_signature] Ensured inner thought_signature for vectorengine provider (fixing historical messages)`);
+            log.info(
+              `[thought_signature] Ensured inner thought_signature for vectorengine provider (fixing historical messages)`,
+            );
           }
-          
+
           // 对于支持的 provider，添加缺失的 thought_signature
           walkAndPatch({ value: payload, path: "$", report });
-          
+
           // 🔧 Fix: 对于 yinli provider，即使添加了 thought_signature，
           // 也要移除 functionCall/functionResponse 内部的 thought_signature
           // 因为 yinli 只接受 wrapper 上的 thought_signature，不接受内部的
@@ -1052,38 +1241,50 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
             // 递归移除 functionCall/functionResponse 内部的 thought_signature
             function stripInnerThoughtSignatures(value: unknown): void {
               if (!value || typeof value !== "object") return;
-              
+
               if (Array.isArray(value)) {
                 for (const item of value) {
                   stripInnerThoughtSignatures(item);
                 }
                 return;
               }
-              
+
               const record = value as Record<string, unknown>;
-              
+
               // 如果是 functionCall/functionResponse 对象，移除其内部的 thought_signature
-              if (record.functionCall && typeof record.functionCall === "object") {
+              if (
+                record.functionCall &&
+                typeof record.functionCall === "object"
+              ) {
                 const fc = record.functionCall as Record<string, unknown>;
                 delete fc.thought_signature;
                 delete fc.thoughtSignature;
               }
-              if (record.function_call && typeof record.function_call === "object") {
+              if (
+                record.function_call &&
+                typeof record.function_call === "object"
+              ) {
                 const fc = record.function_call as Record<string, unknown>;
                 delete fc.thought_signature;
                 delete fc.thoughtSignature;
               }
-              if (record.functionResponse && typeof record.functionResponse === "object") {
+              if (
+                record.functionResponse &&
+                typeof record.functionResponse === "object"
+              ) {
                 const fr = record.functionResponse as Record<string, unknown>;
                 delete fr.thought_signature;
                 delete fr.thoughtSignature;
               }
-              if (record.function_response && typeof record.function_response === "object") {
+              if (
+                record.function_response &&
+                typeof record.function_response === "object"
+              ) {
                 const fr = record.function_response as Record<string, unknown>;
                 delete fr.thought_signature;
                 delete fr.thoughtSignature;
               }
-              
+
               // 递归处理所有子对象
               for (const key of Object.keys(record)) {
                 const child = record[key];
@@ -1092,12 +1293,14 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
                 }
               }
             }
-            
+
             stripInnerThoughtSignatures(payload);
-            log.info(`[thought_signature] Stripped inner thought_signature from functionCall/functionResponse for yinli provider`);
+            log.info(
+              `[thought_signature] Stripped inner thought_signature from functionCall/functionResponse for yinli provider`,
+            );
           }
         }
-        
+
         // Safety check: Verify no assistant messages with null content remain
         // (should have been fixed in sanitizeSessionHistory)
         if (payload && typeof payload === "object" && "messages" in payload) {
@@ -1107,19 +1310,28 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
               const msg = messages[i];
               if (msg && typeof msg === "object") {
                 const msgRec = msg as Record<string, unknown>;
-                const role = typeof msgRec.role === "string" ? msgRec.role.trim().toLowerCase() : "";
+                const role =
+                  typeof msgRec.role === "string"
+                    ? msgRec.role.trim().toLowerCase()
+                    : "";
                 if (role === "assistant" && msgRec.content === null) {
-                  log.error(`❌ BUG: assistant.content is still null after sanitization (message index: ${i})`);
+                  log.error(
+                    `❌ BUG: assistant.content is still null after sanitization (message index: ${i})`,
+                  );
                   // Emergency fix to prevent API failure
-                  const hadToolCalls = Boolean(msgRec.tool_calls || msgRec.toolCalls);
+                  const hadToolCalls = Boolean(
+                    msgRec.tool_calls || msgRec.toolCalls,
+                  );
                   msgRec.content = "";
-                  log.info(`[payload] Fixed content: null → "" (index: ${i}, hasToolCalls: ${hadToolCalls})`);
+                  log.info(
+                    `[payload] Fixed content: null → "" (index: ${i}, hasToolCalls: ${hadToolCalls})`,
+                  );
                 }
               }
             }
           }
         }
-        
+
         const summary = {
           ...base,
           modelApi: (model as Model<Api>)?.api,
@@ -1129,8 +1341,14 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
           missingPaths: report.missingPaths,
           entries: report.added.slice(0, 40),
         };
-        if (report.candidates > 0 || report.added.length > 0 || report.missingBefore > 0) {
-          log.info(`gemini payload thoughtSignature scan: ${JSON.stringify(summary)}`);
+        if (
+          report.candidates > 0 ||
+          report.added.length > 0 ||
+          report.missingBefore > 0
+        ) {
+          log.info(
+            `gemini payload thoughtSignature scan: ${JSON.stringify(summary)}`,
+          );
         }
 
         void appendRuntimeTrace({
