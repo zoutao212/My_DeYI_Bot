@@ -4,6 +4,7 @@ import type { SessionManager } from "@mariozechner/pi-coding-agent";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { makeMissingToolResult } from "./session-transcript-repair.js";
 import { emitSessionTranscriptUpdate } from "../sessions/transcript-events.js";
+import { convertGeminiToOpenAIFormat } from "./gemini-payload-thought-signature.js";
 
 const log = createSubsystemLogger("agent/guard");
 
@@ -52,13 +53,21 @@ export function installSessionToolResultGuard(
      * Defaults to true.
      */
     allowSyntheticToolResults?: boolean;
+    /**
+     * Provider name for format conversion
+     */
+    provider?: string;
   },
 ): {
   flushPendingToolResults: () => void;
   getPendingIds: () => string[];
 } {
+  const provider = opts?.provider;
   const originalAppend = sessionManager.appendMessage.bind(sessionManager);
   const pending = new Map<string, string | undefined>();
+  
+  // 🔧 Fix: For Gemini format, use a queue to match functionCall and functionResponse by order
+  const geminiPendingToolNames: string[] = [];
 
   const persistToolResult = (
     message: AgentMessage,
@@ -88,7 +97,61 @@ export function installSessionToolResultGuard(
   };
 
   const guardedAppend = (message: AgentMessage) => {
+    // 🔧 Fix: For vectorengine, keep Gemini format in session
+    // vectorengine expects Gemini format, so we don't convert back to OpenAI format
+    // This avoids tool_call_id mismatch issues
+    
     const role = (message as { role?: unknown }).role;
+    
+    // 🔧 Fix: Handle Gemini format tool calls (role: "model" + parts + functionCall)
+    // Extract toolName and add to queue for later matching with functionResponse
+    if (role === "model") {
+      const parts = (message as { parts?: unknown }).parts;
+      if (Array.isArray(parts)) {
+        for (const part of parts) {
+          if (part && typeof part === "object") {
+            const rec = part as Record<string, unknown>;
+            if ("functionCall" in rec) {
+              const functionCall = rec.functionCall as Record<string, unknown>;
+              const toolName = typeof functionCall.name === "string" ? functionCall.name : undefined;
+              if (toolName) {
+                geminiPendingToolNames.push(toolName);
+                log.debug(`[guard] Gemini functionCall detected: toolName="${toolName}", queue length=${geminiPendingToolNames.length}`);
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    // 🔧 Fix: Handle Gemini format tool results (role: "user" + parts + functionResponse)
+    // vectorengine saves tool results in Gemini format, not OpenAI format
+    if (role === "user") {
+      const parts = (message as { parts?: unknown }).parts;
+      if (Array.isArray(parts)) {
+        for (const part of parts) {
+          if (part && typeof part === "object") {
+            const rec = part as Record<string, unknown>;
+            if ("functionResponse" in rec) {
+              const functionResponse = rec.functionResponse as Record<string, unknown>;
+              
+              // Match with the first pending toolName (FIFO order)
+              if (geminiPendingToolNames.length > 0 && functionResponse.name === "unknown") {
+                const toolName = geminiPendingToolNames.shift()!;
+                functionResponse.name = toolName;
+                log.info(`[guard] ✓ Fixed Gemini functionResponse.name: "unknown" → "${toolName}" (queue length=${geminiPendingToolNames.length})`);
+              } else if (geminiPendingToolNames.length > 0) {
+                // Remove from queue even if name is not "unknown"
+                geminiPendingToolNames.shift();
+                log.debug(`[guard] Gemini functionResponse already has name="${functionResponse.name}", removed from queue (queue length=${geminiPendingToolNames.length})`);
+              } else {
+                log.warn(`[guard] ⚠️ Gemini functionResponse but queue is empty, name="${functionResponse.name}"`);
+              }
+            }
+          }
+        }
+      }
+    }
 
     // 🔧 Fix: Normalize assistant messages with null content (OpenAI API requirement)
     // This ensures content is never saved as null to the session
@@ -145,8 +208,10 @@ export function installSessionToolResultGuard(
         ] as never;
         log.info(`[guard] ✓ Filled assistant.content with sensitive words error message`);
       } else if (msg.content === null) {
-        msg.content = [] as never; // Empty array for assistant messages with only tool_calls
-        log.info(`[guard] ✓ Fixed assistant.content: null → [] before saving to session`);
+        // 🔧 Fix: vectorengine requires content to be empty string, not null or empty array
+        // OpenAI Completions API allows null, but vectorengine rejects it
+        msg.content = "" as never;
+        log.info(`[guard] ✓ Fixed assistant.content: null → "" before saving to session`);
       } else if (Array.isArray(msg.content) && msg.content.length === 0 && stopReason === "error") {
         // 🔧 Fix: Handle empty content with error stopReason
         // This prevents system from breaking when API returns error with empty content
@@ -166,8 +231,17 @@ export function installSessionToolResultGuard(
       const id = extractToolResultId(message as Extract<AgentMessage, { role: "toolResult" }>);
       const toolName = id ? pending.get(id) : undefined;
       if (id) pending.delete(id);
+      
+      // 🔧 Fix: Ensure toolName is preserved in the message for format conversion
+      // vectorengine needs toolName to convert toolResult → functionResponse correctly
+      const msgWithToolName = message as Extract<AgentMessage, { role: "toolResult" }> & { toolName?: string };
+      if (toolName && !msgWithToolName.toolName) {
+        msgWithToolName.toolName = toolName;
+        log.debug(`[guard] Added toolName="${toolName}" to toolResult message (id=${id})`);
+      }
+      
       return originalAppend(
-        persistToolResult(message, {
+        persistToolResult(msgWithToolName, {
           toolCallId: id ?? undefined,
           toolName,
           isSynthetic: false,

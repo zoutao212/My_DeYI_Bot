@@ -191,7 +191,11 @@ export function createLlmCallConsoleLogger(params: {
         if (!didLogPayload) {
           didLogPayload = true;
           
-          // Validate payload format before sending
+          // ⚠️ 重要：先调用下一个 wrapper 的 onPayload（格式转换 + 添加 thought_signature）
+          // 然后再验证 payload（验证转换后的格式）
+          options?.onPayload?.(payload);
+          
+          // Validate payload format after transformation
           const validation = validateAndLogPayload({
             payload,
             provider: String(m.provider ?? base.provider ?? "unknown"),
@@ -246,8 +250,10 @@ export function createLlmCallConsoleLogger(params: {
               payload,
             },
           });
+        } else {
+          // 如果已经记录过日志，仍然需要调用下一个 wrapper
+          options?.onPayload?.(payload);
         }
-        options?.onPayload?.(payload);
       };
 
       const result = streamFn(model, context, {

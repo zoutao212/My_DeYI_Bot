@@ -550,8 +550,47 @@ export async function sanitizeSessionHistory(params: {
   // 🔧 Fix: Normalize assistant messages with null content (OpenAI API requirement)
   // This must happen BEFORE any other processing to ensure the fix is persisted
   let fixedCount = 0;
+  let toolResultCount = 0;
+  
+  // 🔧 Fix: For vectorengine, fix Gemini format functionResponse.name = "unknown"
+  // vectorengine uses Gemini format in session, but functionResponse.name may be "unknown"
+  // We need to match functionCall and functionResponse by order to fix the name
+  const geminiToolNames: string[] = [];
+  
   for (let i = 0; i < params.messages.length; i++) {
     const msg = params.messages[i];
+    const msgAny = msg as any;
+    
+    // Extract toolName from Gemini format functionCall (role: "model")
+    if (msgAny.role === "model" && msgAny.parts) {
+      for (const part of msgAny.parts) {
+        if (part && typeof part === "object" && part.functionCall) {
+          const toolName = part.functionCall.name;
+          if (typeof toolName === "string") {
+            geminiToolNames.push(toolName);
+            log.debug(`[sanitize] Extracted toolName from functionCall: "${toolName}" (index=${i})`);
+          }
+        }
+      }
+    }
+    
+    // Fix Gemini format functionResponse.name = "unknown" (role: "user")
+    if (msg.role === "user" && msgAny.parts) {
+      for (const part of msgAny.parts) {
+        if (part && typeof part === "object" && part.functionResponse) {
+          if (part.functionResponse.name === "unknown" && geminiToolNames.length > 0) {
+            const toolName = geminiToolNames.shift()!;
+            part.functionResponse.name = toolName;
+            log.info(`[sanitize] ✓ Fixed Gemini functionResponse.name: "unknown" → "${toolName}" (index=${i})`);
+          } else if (geminiToolNames.length > 0) {
+            // Remove from queue even if name is not "unknown"
+            geminiToolNames.shift();
+            log.debug(`[sanitize] functionResponse already has name="${part.functionResponse.name}", removed from queue (index=${i})`);
+          }
+        }
+      }
+    }
+    
     if (msg.role === "assistant") {
       const contentType = msg.content === null ? "null" : Array.isArray(msg.content) ? `array(${msg.content.length})` : typeof msg.content;
       log.info(`[sanitize] message[${i}]: role=assistant, content=${contentType}`);
@@ -563,9 +602,49 @@ export async function sanitizeSessionHistory(params: {
         log.info(`[sanitize] message[${i}]: content is already empty array (good!)`);
       }
     }
+    
+    // 🔧 Fix: Convert toolResult messages to OpenAI format (role: "tool")
+    // This is required for vectorengine and other Gemini-compatible APIs
+    if (msg.role === "toolResult") {
+      const toolName = msgAny.toolName || "unknown";
+      const content = msg.content;
+      
+      // Convert to OpenAI format
+      msg.role = "tool" as any;
+      msgAny.tool_call_id = `call_${toolName}_${i}`;
+      
+      // ✅ 关键：将 toolName 保存到 content 中
+      // 这样 convertOpenAIToGeminiFormat 可以提取出来
+      let contentStr: string;
+      if (typeof content === "string") {
+        contentStr = content;
+      } else if (Array.isArray(content) && content.length > 0) {
+        const firstItem = content[0];
+        if (firstItem && typeof firstItem === "object" && "text" in firstItem) {
+          contentStr = (firstItem as any).text;
+        } else {
+          contentStr = JSON.stringify(content);
+        }
+      } else {
+        contentStr = JSON.stringify(content);
+      }
+      
+      // ✅ 将 toolName 包装到 content 中（JSON 格式）
+      // convertOpenAIToGeminiFormat 会从 content 中提取 "tool" 字段
+      msgAny.content = JSON.stringify({
+        tool: toolName,  // ← 关键字段，用于 functionResponse.name
+        result: contentStr
+      });
+      
+      toolResultCount++;
+      log.info(`✓ Converted toolResult → tool: name="${toolName}", index=${i}, sessionId=${params.sessionId}`);
+    }
   }
   if (fixedCount === 0) {
     log.info(`[sanitize] No null content found in ${params.messages.length} messages (sessionId: ${params.sessionId})`);
+  }
+  if (toolResultCount > 0) {
+    log.info(`[sanitize] Converted ${toolResultCount} toolResult messages to OpenAI format (sessionId: ${params.sessionId})`);
   }
   
   const policy =

@@ -18,10 +18,15 @@ export function guardSessionManager(
     agentId?: string;
     sessionKey?: string;
     allowSyntheticToolResults?: boolean;
+    provider?: string;
   },
 ): GuardedSessionManager {
-  if (typeof (sessionManager as GuardedSessionManager).flushPendingToolResults === "function") {
-    return sessionManager as GuardedSessionManager;
+  // 🔧 Fix: Always reinstall guard to ensure latest logic is applied
+  // This is necessary when we update the guard logic (e.g., adding Gemini format support)
+  const alreadyGuarded = typeof (sessionManager as GuardedSessionManager).flushPendingToolResults === "function";
+  if (alreadyGuarded) {
+    // Remove the old guard marker so we can reinstall
+    delete (sessionManager as GuardedSessionManager).flushPendingToolResults;
   }
 
   const hookRunner = getGlobalHookRunner();
@@ -48,6 +53,7 @@ export function guardSessionManager(
   const guard = installSessionToolResultGuard(sessionManager, {
     transformToolResultForPersistence: transform,
     allowSyntheticToolResults: opts?.allowSyntheticToolResults,
+    provider: opts?.provider,
   });
   (sessionManager as GuardedSessionManager).flushPendingToolResults = guard.flushPendingToolResults;
   return sessionManager as GuardedSessionManager;

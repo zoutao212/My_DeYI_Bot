@@ -365,6 +365,7 @@ export async function runEmbeddedAttempt(
         agentId: sessionAgentId,
         sessionKey: params.sessionKey,
         allowSyntheticToolResults: transcriptPolicy.allowSyntheticToolResults,
+        provider: params.provider,
       });
       trackSessionManagerAccess(params.sessionFile);
       
@@ -643,13 +644,17 @@ export async function runEmbeddedAttempt(
           activeSession.agent.streamFn,
         );
       }
+      // ⚠️ 重要：wrapper 的嵌套顺序决定了执行顺序
+      // 最后包装的 wrapper 最先执行（洋葱模型）
+      // 我们需要：格式转换 → payload 验证 → 发送
+      // 所以包装顺序应该是：llmCallConsoleLogger → geminiPayloadThoughtSignaturePatcher
+      if (llmCallConsoleLogger) {
+        activeSession.agent.streamFn = llmCallConsoleLogger.wrapStreamFn(activeSession.agent.streamFn);
+      }
       if (geminiPayloadThoughtSignaturePatcher) {
         activeSession.agent.streamFn = geminiPayloadThoughtSignaturePatcher.wrapStreamFn(
           activeSession.agent.streamFn,
         );
-      }
-      if (llmCallConsoleLogger) {
-        activeSession.agent.streamFn = llmCallConsoleLogger.wrapStreamFn(activeSession.agent.streamFn);
       }
 
       try {

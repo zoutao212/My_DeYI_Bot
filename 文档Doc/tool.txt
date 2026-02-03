@@ -1,0 +1,235 @@
+问题根因
+vectorengine API 使用的是 Gemini 原生格式，不是 OpenAI 格式！
+
+Gemini 原生格式的 functionCall 结构
+{
+  "role": "model",
+  "parts": [
+    {
+      "functionCall": {
+        "name": "write",
+        "args": {...},
+        "thought_signature": "xxx"  // ← API 期望在这里
+      },
+      "thought_signature": "xxx"  // ← 我们加在这里了
+    }
+  ]
+}
+我们当前的格式（OpenAI）
+{
+  "role": "assistant",
+  "tool_calls": [
+    {
+      "type": "function",
+      "function": {
+        "name": "write",
+        "arguments": "{...}",
+        "thought_signature": "xxx"  // ← 我们加在这里
+      },
+      "thought_signature": "xxx"
+    }
+  ]
+}
+问题所在
+我们的 patcher 是为 OpenAI 格式设计的，但 vectorengine API 期望的是 Gemini 原生格式！
+
+查看代码中的注释（第 265-280 行）：
+
+const functionCall = rec.functionCall;
+if (functionCall && typeof functionCall === "object") {
+  // ✅ 只给包含 functionCall 的 part wrapper 添加 thoughtSignature
+  // ❌ 不要给 functionCall 对象本身添加 thoughtSignature（会导致 API 报错）
+  noteCandidate({ record: rec, path: params.path, report: params.report });
+  ensureThoughtSignatureOnRecord({ record: rec, path: params.path, report: params.report });
+  
+  // 不再给 functionCall 对象本身添加 thoughtSignature
+  // noteCandidate({...});
+  // ensureThoughtSignatureOnRecord({...});
+}
+这段代码被注释掉了！ 这是为了修复 yinli 的问题，但导致 vectorengine 也无法正常工作。
+
+修复方案
+需要区分两种情况：
+
+yinli provider：不要在 functionCall 对象内部添加 thought_signature
+vectorengine provider：必须在 functionCall 对象内部添加 thought_signature
+修复代码
+
+
+等等，我意识到一个更根本的问题：
+
+vectorengine 使用的是 OpenAI Completions API 格式，不是 Gemini 原生 API 格式！
+
+让我检查一下 vectorengine 的 API 类型：
+
+Command
+Get-Content "Runtimelog/tempfile/12332" -Encoding UTF8 | Select-String "model=vectorengine" | Select-Object -First 3
+=vectorengine" | Select-Object -First 3                                                                 
+02:08:19 [llm] → LLM请求 seq=1 model=vectorengine/gemini-3-flash-preview api=openai-completions runId=
+9dee3284-f6bc-45fd-afe4-cab9d62077ba sessionKey=agent:main:48d3a2fa-699a-499d-a64c-0f68785bbb2d payload 
+Bytes=26775 payloadPreview={"model":"gemini-3-flash-preview","messages":[{"role":"system","content":"你 
+是运行在 Clawdbot 内部的个人助理。\n## 工具\n可用工具:\n工具名区分大小写。请严格按列表中的名称调用工具  
+。\n- read: 读取文件内容\n- write: 创建或覆盖文件\n- edit: 精确替换文件中的文本\n- exec: 执行 Shell 命  
+令\n- process: 管理后台 exec 会话\n## 平台命令规范\n你运行在 Windows 环境下，必须使用 PowerShell 命令： 
+\n- 文件搜索：`Select-String -Path . -Pattern \"关键词\" -Recurse -Encoding UTF8`\n- 列出文件：`Get-Chi 
+ldItem -Recurse`\n- 读取文件：`Get-Content \"file.txt\" -Encoding UTF8`\n- **禁止使用 Linux 命令**：`gr 
+ep`、`find`、`cat`、`ls` 等在 Windows 上不可用\nTOOLS.md 不控制工具可用性；它只是指导如何使用外部工具的 
+用户文档。\n当任务更复杂或耗时更长时，可以派生一个子代理。它会完成工作并在结束后通知你。\n## 工具调用风 
+格\n默认:不…(17892 chars)
+02:08:23 [llm] ← LLM回复 seq=1 ok durationMs=3437 model=vectorengine/gemini-3-flash-preview api=openai  
+-completions runId=9dee3284-f6bc-45fd-afe4-cab9d62077ba sessionKey=agent:main:48d3a2fa-699a-499d-a64c-0 
+f68785bbb2d
+02:08:23 [llm] → LLM请求 seq=2 model=vectorengine/gemini-3-flash-preview api=openai-completions runId=
+9dee3284-f6bc-45fd-afe4-cab9d62077ba sessionKey=agent:main:48d3a2fa-699a-499d-a64c-0f68785bbb2d payload 
+Bytes=27433 payloadPreview={"model":"gemini-3-flash-preview","messages":[{"role":"system","content":"你 
+是运行在 Clawdbot 内部的个人助理。\n## 工具\n可用工具:\n工具名区分大小写。请严格按列表中的名称调用工具  
+。\n- read: 读取文件内容\n- write: 创建或覆盖文件\n- edit: 精确替换文件中的文本\n- exec: 执行 Shell 命  
+令\n- process: 管理后台 exec 会话\n## 平台命令规范\n你运行在 Windows 环境下，必须使用 PowerShell 命令： 
+\n- 文件搜索：`Select-String -Path . -Pattern \"关键词\" -Recurse -Encoding UTF8`\n- 列出文件：`Get-Chi 
+ldItem -Recurse`\n- 读取文件：`Get-Content \"file.txt\" -Encoding UTF8`\n- **禁止使用 Linux 命令**：`gr 
+ep`、`find`、`cat`、`ls` 等在 Windows 上不可用\nTOOLS.md 不控制工具可用性；它只是指导如何使用外部工具的 
+用户文档。\n当任务更复杂或耗时更长时，可以派生一个子代理。它会完成工作并在结束后通知你。\n## 工具调用风 
+格\n默认:不…(18550 chars)
+
+
+关键发现：api=openai-completions
+
+vectorengine 使用的是 OpenAI Completions API 格式，不是 Gemini 原生 API 格式！
+
+这意味着：
+
+OpenAI 格式：role: "assistant" + tool_calls: [...]
+Gemini 格式：role: "model" + content: [{functionCall: ...}]
+我们的转换逻辑是错误的！
+
+我们把 OpenAI 格式转换成了 Gemini 格式，但 vectorengine 期望的是 OpenAI 格式！
+
+让我回滚这个转换逻辑：
+
+Accepted edits to
+
+gemini-payload-thought-signature.ts
+
+
+好的，gateway 已经停止了。
+
+现在让我总结一下问题和修复：
+
+问题根因
+vectorengine 使用 OpenAI Completions API 格式，不是 Gemini 原生 API 格式！
+
+OpenAI 格式：role: "assistant" + tool_calls: [...]
+Gemini 格式：role: "model" + content: [{functionCall: ...}]
+我们之前错误地将 OpenAI 格式转换为 Gemini 格式，导致 API 报错。
+
+修复方案
+移除错误的格式转换逻辑，保持 OpenAI 格式不变。
+
+vectorengine API 期望的是标准的 OpenAI Completions API 格式：
+
+role: "assistant"（不是 "model"）
+tool_calls: [...]（不是 content: [{functionCall: ...}]）
+下一步
+请重启 gateway 并测试：
+
+# 重启 gateway
+pnpm clawdbot gateway run --bind loopback --port 18789 --force
+然后发送测试消息："写入 hello 到 C:\Users\zouta\clawd\memory\test.txt"
+
+如果还有问题，请提供新的日志。
+
+
+
+顶层字段是 messages，不是 contents！
+
+这说明我们发送的是 OpenAI Completions API 格式，不是 Gemini 原生 API 格式！
+
+但是 messages 里面的内容是 Gemini 格式（functionCall、role: model）。
+
+这就是问题所在！混合了两种格式！
+
+正确的格式应该是
+OpenAI Completions API 格式
+{
+  "model": "...",
+  "messages": [
+    {
+      "role": "assistant",
+      "tool_calls": [...]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "...",
+      "content": "..."
+    }
+  ]
+}
+Gemini 原生 API 格式
+{
+  "model": "...",
+  "contents": [
+    {
+      "role": "model",
+      "parts": [
+        {
+          "functionCall": {...}
+        }
+      ]
+    },
+    {
+      "role": "function",
+      "parts": [
+        {
+          "functionResponse": {...}
+        }
+      ]
+    }
+  ]
+}
+我们现在的格式是混合的：
+
+顶层：messages（OpenAI 格式）
+内容：functionCall、role: model（Gemini 格式）
+这就是为什么 API 返回 Connection error！
+
+让我修复这个问题。我需要：
+
+保持顶层为 messages（因为 vectorengine 使用 OpenAI endpoint）
+但是 messages 里面的内容应该保持 OpenAI 格式，不要转换为 Gemini 格式
+或者：
+
+如果 vectorengine 真的期望 Gemini 格式，需要把顶层也改为 contents
+让我检查之前的错误信息，确认 vectorengine 到底期望什么格式：
+
+根据之前的错误信息：
+
+Function call is missing a thought_signature in functionCall parts
+这明确指出期望的是 functionCall 格式（Gemini 格式）。
+
+所以，vectorengine 期望的是完整的 Gemini 原生 API 格式，包括顶层的 contents！
+
+让我修复格式转换逻辑，将顶层的 messages 也改为 contents：
+
+Read file(s)
+
+gemini-payload-thought-signature.ts 430 - 551
+我发现问题了！我们只转换了 messages 里面的内容，但没有把顶层的 messages 改为 contents！
+
+但是等等，vectorengine 使用的是 /v1/chat/completions endpoint，这是 OpenAI 格式的 endpoint。如果我们把 messages 改为 contents，可能会导致 endpoint 无法识别。
+
+让我重新思考：vectorengine 到底期望什么格式？
+
+根据错误信息 "Function call is missing a thought_signature in functionCall parts"，这明确指出期望的是 Gemini 格式的 functionCall。
+
+但是，vectorengine 使用的是 OpenAI endpoint (/v1/chat/completions)。
+
+这说明 vectorengine 是一个"混合 API"：
+
+Endpoint：OpenAI 格式（/v1/chat/completions）
+Payload 顶层：OpenAI 格式（messages）
+Payload 内容：Gemini 格式（functionCall、role: model）
+所以我们的格式转换是正确的！
+
+那么问题在哪里？让我重新检查 payload，看看是否有其他问题。
+
+让我检查 content 的结构是否正确。Gemini 格式应该是 parts，不是直接的 content：

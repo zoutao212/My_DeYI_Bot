@@ -53,19 +53,38 @@ export function validateOpenAICompletionsPayload(payload: unknown): ValidationRe
       const role = String(m.role).toLowerCase();
 
       // Validate based on role
-      if (role === "tool") {
-        // Tool result message must have tool_call_id
-        if (!m.tool_call_id || typeof m.tool_call_id !== "string") {
-          errors.push(`messages[${i}]: role=tool requires 'tool_call_id' field`);
+      if (role === "tool" || role === "function") {
+        // Tool result message must have tool_call_id (OpenAI) or be in parts format (Gemini)
+        const hasToolCallId = m.tool_call_id && typeof m.tool_call_id === "string";
+        const hasParts = Array.isArray(m.parts);
+        
+        if (!hasToolCallId && !hasParts) {
+          errors.push(`messages[${i}]: role=${role} requires 'tool_call_id' field (OpenAI) or 'parts' array (Gemini)`);
         }
         
         // Check for thought_signature (required by some providers like vectorengine)
-        if (!m.thought_signature && !m.thoughtSignature) {
-          warnings.push(`messages[${i}]: role=tool missing 'thought_signature' (may cause issues with vectorengine)`);
+        // For Gemini format, check inside parts[].functionResponse
+        if (hasParts) {
+          const parts = m.parts as unknown[];
+          for (let j = 0; j < parts.length; j++) {
+            const part = parts[j];
+            if (part && typeof part === "object") {
+              const p = part as Record<string, unknown>;
+              if (p.functionResponse && typeof p.functionResponse === "object") {
+                const fr = p.functionResponse as Record<string, unknown>;
+                if (!fr.thought_signature && !fr.thoughtSignature && !p.thought_signature && !p.thoughtSignature) {
+                  warnings.push(`messages[${i}].parts[${j}].functionResponse: missing 'thought_signature' (may cause issues with vectorengine)`);
+                }
+              }
+            }
+          }
+        } else if (!m.thought_signature && !m.thoughtSignature) {
+          warnings.push(`messages[${i}]: role=${role} missing 'thought_signature' (may cause issues with vectorengine)`);
         }
-      } else if (role === "assistant") {
-        // Assistant message with tool_calls
+      } else if (role === "assistant" || role === "model") {
+        // Assistant/model message with tool_calls (OpenAI) or parts with functionCall (Gemini)
         if (m.tool_calls && Array.isArray(m.tool_calls)) {
+          // OpenAI format
           for (let j = 0; j < m.tool_calls.length; j++) {
             const tc = m.tool_calls[j];
             if (!tc || typeof tc !== "object") {
@@ -97,12 +116,33 @@ export function validateOpenAICompletionsPayload(payload: unknown): ValidationRe
               warnings.push(`messages[${i}].tool_calls[${j}]: missing 'thought_signature' (may cause issues with vectorengine)`);
             }
           }
+        } else if (m.parts && Array.isArray(m.parts)) {
+          // Gemini format
+          const parts = m.parts as unknown[];
+          for (let j = 0; j < parts.length; j++) {
+            const part = parts[j];
+            if (part && typeof part === "object") {
+              const p = part as Record<string, unknown>;
+              if (p.functionCall && typeof p.functionCall === "object") {
+                const fc = p.functionCall as Record<string, unknown>;
+                if (!fc.name || typeof fc.name !== "string") {
+                  errors.push(`messages[${i}].parts[${j}].functionCall: missing 'name' field`);
+                }
+                // Check for thought_signature (in part wrapper or inside functionCall)
+                if (!fc.thought_signature && !fc.thoughtSignature && !p.thought_signature && !p.thoughtSignature) {
+                  warnings.push(`messages[${i}].parts[${j}].functionCall: missing 'thought_signature' (may cause issues with vectorengine)`);
+                }
+              }
+            }
+          }
         }
       }
 
-      // Check content field
-      if (role !== "tool" && !m.content && !m.tool_calls) {
-        warnings.push(`messages[${i}]: message has no 'content' or 'tool_calls'`);
+      // Check content field (support both OpenAI and Gemini formats)
+      // OpenAI: content or tool_calls
+      // Gemini: content or parts
+      if (role !== "tool" && role !== "function" && !m.content && !m.tool_calls && !m.parts) {
+        warnings.push(`messages[${i}]: message has no 'content', 'tool_calls', or 'parts'`);
       }
     }
   }
@@ -157,7 +197,13 @@ export function validateAndLogPayload(params: {
   runId?: string;
   sessionKey?: string;
 }): ValidationResult {
+  const provider = String(params.provider ?? "").toLowerCase();
   const modelApi = String(params.modelApi ?? "").toLowerCase();
+  
+  // Skip validation for vectorengine (uses Gemini format after conversion)
+  if (provider.includes("vectorengine")) {
+    return { valid: true, errors: [], warnings: [] };
+  }
   
   let result: ValidationResult;
   
