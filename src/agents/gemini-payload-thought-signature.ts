@@ -1059,11 +1059,10 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
           `[format] effectiveProvider="${effectiveProvider}", base.provider="${base.provider}", providerFromModel="${providerFromModel}"`,
         );
 
-        // ❌ Disabled Fix 4: Do NOT convert to Gemini format for vectorengine
-        // vectorengine should support OpenAI format directly. Converting to Gemini format (role: model)
-        // while using openai-completions endpoint causes repeating tool calls because the history format
-        // is mismatched/confusing to the model or intermediate layers.
-        /*
+        // ✅ Fix 4: Convert OpenAI format to Gemini format for vectorengine
+        // vectorengine uses OpenAI endpoint (/v1/chat/completions) but expects Gemini payload format
+        // API error: "Function call is missing a thought_signature in functionCall parts"
+        // This proves vectorengine expects Gemini format (functionCall), not OpenAI format (tool_calls)
         if (effectiveProvider.includes("vectorengine")) {
           if (payload && typeof payload === "object" && "messages" in payload) {
             const payloadObj = payload as Record<string, unknown>;
@@ -1076,7 +1075,6 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
             }
           }
         }
-        */
 
         // Fix 3: Add or strip thought_signature based on provider
         const report: ScanReport = {

@@ -53,6 +53,7 @@ export const SYSTEM_PROMPT_L10N_MINIMAL_ZH: SystemPromptL10n = {
   toolCallStyleKeepBrief: "说明要简洁。",
   toolCallStylePlainLanguage: "使用自然口语。",
   toolCallApiNote: "**重要**：必须通过 API 的 function calling 调用工具，不要在文本中模仿。",
+  toolCallCompletionNote: "**任务完成原则**：完成任务后立即停止工具调用并回复用户。不要重复相同的工具调用。",
   toolParamsQuickRef: "",
   cliQuickRefTitle: "",
   cliQuickRefIntro: "",

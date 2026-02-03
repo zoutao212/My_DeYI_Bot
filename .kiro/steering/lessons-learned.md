@@ -7,6 +7,8 @@
 | **问题类型** | **文件** |
 |---------|------|
 | **LLM 无限循环** | `.kiro/lessons-learned/70_LLM行为异常的完整调试流程.md` |
+| **LLM 无限循环** | `.kiro/lessons-learned/72_LLM无限循环的系统提示词修复.md` |
+| **LLM 无限循环** | `.kiro/lessons-learned/73_LLM无限循环的根本解决方案.md` |
 | **LLM 行为异常** | `.kiro/lessons-learned/70_LLM行为异常的完整调试流程.md` |
 | **工具结果格式问题** | `.kiro/lessons-learned/71_工具结果格式问题调试方法论.md` |
 | **系统提示词措辞** | `.kiro/lessons-learned/70_LLM行为异常的完整调试流程.md` |

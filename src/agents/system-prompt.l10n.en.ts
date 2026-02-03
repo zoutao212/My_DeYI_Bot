@@ -14,6 +14,7 @@ export type SystemPromptL10n = {
   toolCallStyleKeepBrief: string;
   toolCallStylePlainLanguage: string;
   toolCallApiNote: string;
+  toolCallCompletionNote: string;
   toolParamsQuickRef: string;
   cliQuickRefTitle: string;
   cliQuickRefIntro: string;
@@ -167,6 +168,8 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
   toolCallStylePlainLanguage: "Use plain human language for narration unless in a technical context.",
   toolCallApiNote:
     "**IMPORTANT**: You MUST use the API's function calling mechanism to invoke tools. Do NOT mimic tool call format (like JSON argument blocks) in your reply text; doing so will NOT execute anything. Only real function calls trigger tool execution.",
+  toolCallCompletionNote:
+    "**Task Completion Principle**: When you have completed the user's request, you MUST stop calling tools and reply to the user immediately. Do NOT repeat the same tool calls. If a tool call has already succeeded (returned a result), do NOT call the same tool again.",
   toolParamsQuickRef: `## Core Tool Parameters
 - **write(path, content)**: path=file path, content=full content. Example: write({ path: "test.txt", content: "hello" })
 - **edit(path, oldText, newText)**: path=file path, oldText=exact text to replace, newText=replacement text

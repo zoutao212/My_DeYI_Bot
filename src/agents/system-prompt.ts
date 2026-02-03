@@ -427,6 +427,7 @@ export function buildAgentSystemPrompt(params: {
     l10n.toolCallStyleKeepBrief,
     l10n.toolCallStylePlainLanguage,
     l10n.toolCallApiNote,
+    l10n.toolCallCompletionNote,
     "",
     l10n.toolParamsQuickRef,
     "",

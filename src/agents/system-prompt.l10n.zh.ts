@@ -59,6 +59,8 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
   toolCallStylePlainLanguage: "除非在技术语境下，否则使用自然口语表达。",
   toolCallApiNote:
     "**重要**:必须通过 API 的 function calling 机制来调用工具。不要在回复文本中模仿工具调用格式；这样做不会执行任何操作。只有真正的 function call 才会触发工具执行。",
+  toolCallCompletionNote:
+    "**任务完成原则**:当你完成用户请求的任务后，必须立即停止工具调用并回复用户。不要重复执行相同的工具调用。如果工具调用已经成功（返回了结果），不要再次调用相同的工具。",
   toolParamsQuickRef: `## 核心工具参数速查
 - **write(path, content)**:path=文件路径，content=完整内容
 - **edit(path, oldText, newText)**:path=文件路径，oldText=要替换的原文，newText=替换后的新文本
