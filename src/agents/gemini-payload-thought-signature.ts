@@ -277,6 +277,51 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
       return msg;
     }
 
+    // 🆕 Fix: Convert user messages from OpenAI format to Gemini format
+    // OpenAI format: { role: "user", content: [{ type: "text", text: "..." }] }
+    // Gemini format: { role: "user", parts: [{ text: "..." }] }
+    if (role === "user") {
+      const content = msgRec.content;
+      
+      // If content is an array (OpenAI format), convert to parts (Gemini format)
+      if (Array.isArray(content)) {
+        const parts = content
+          .map((item) => {
+            if (!item || typeof item !== "object") return null;
+            const itemRec = item as Record<string, unknown>;
+            
+            // Extract text from { type: "text", text: "..." }
+            if (itemRec.type === "text" && typeof itemRec.text === "string") {
+              return { text: itemRec.text };
+            }
+            
+            // Keep other types as-is (e.g., image_url)
+            return item;
+          })
+          .filter(Boolean);
+        
+        if (parts.length > 0) {
+          log.debug(`[format] Converted user message from OpenAI format to Gemini format (${parts.length} parts)`);
+          return {
+            role: "user",
+            parts: parts,
+          };
+        }
+      }
+      
+      // If content is a string (simple format), convert to parts
+      if (typeof content === "string" && content.length > 0) {
+        log.debug(`[format] Converted user message from string to Gemini format`);
+        return {
+          role: "user",
+          parts: [{ text: content }],
+        };
+      }
+      
+      // Return as-is if already in Gemini format or empty
+      return msg;
+    }
+
     // 转换 assistant 消息
     if (role === "assistant") {
       const toolCalls = msgRec.tool_calls;
@@ -502,6 +547,60 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
     }
 
     // 其他消息保持不变
+    // 🔧 Fix: Convert user messages from OpenAI format to Gemini format
+    // User messages in OpenAI format: { role: "user", content: [{ type: "text", text: "..." }] }
+    // User messages in Gemini format: { role: "user", parts: [{ text: "..." }] }
+    if (role === "user") {
+      const content = msgRec.content;
+      
+      // If already in Gemini format (has parts), return as-is
+      if (msgRec.parts) {
+        return msg;
+      }
+      
+      // Convert OpenAI format to Gemini format
+      if (Array.isArray(content)) {
+        const parts = content
+          .map((block) => {
+            if (!block || typeof block !== "object") return null;
+            const blockRec = block as Record<string, unknown>;
+            
+            // Extract text from OpenAI format
+            if (blockRec.type === "text" && typeof blockRec.text === "string") {
+              return { text: blockRec.text };
+            }
+            
+            // Extract image from OpenAI format
+            if (blockRec.type === "image_url" && blockRec.image_url && typeof blockRec.image_url === "object") {
+              const imageUrl = blockRec.image_url as Record<string, unknown>;
+              if (typeof imageUrl.url === "string") {
+                return { inlineData: { mimeType: "image/jpeg", data: imageUrl.url } };
+              }
+            }
+            
+            return null;
+          })
+          .filter(Boolean);
+        
+        if (parts.length > 0) {
+          log.debug(`[format] Converted user message from OpenAI format to Gemini format (${parts.length} parts)`);
+          return {
+            role: "user",
+            parts: parts,
+          };
+        }
+      }
+      
+      // If content is a string, convert to Gemini format
+      if (typeof content === "string" && content.length > 0) {
+        log.debug(`[format] Converted user message from OpenAI format (string) to Gemini format`);
+        return {
+          role: "user",
+          parts: [{ text: content }],
+        };
+      }
+    }
+    
     return msg;
   });
 }

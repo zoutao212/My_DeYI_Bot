@@ -97,10 +97,6 @@ export function installSessionToolResultGuard(
   };
 
   const guardedAppend = (message: AgentMessage) => {
-    // 🔧 Fix: For vectorengine, keep Gemini format in session
-    // vectorengine expects Gemini format, so we don't convert back to OpenAI format
-    // This avoids tool_call_id mismatch issues
-    
     const role = (message as { role?: unknown }).role;
     
     // 🔧 Fix: Handle Gemini format tool calls (role: "model" + parts + functionCall)
