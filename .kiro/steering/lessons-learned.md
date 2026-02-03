@@ -8,6 +8,7 @@
 |---------|------|
 | **LLM 无限循环** | `.kiro/lessons-learned/70_LLM行为异常的完整调试流程.md` |
 | **LLM 行为异常** | `.kiro/lessons-learned/70_LLM行为异常的完整调试流程.md` |
+| **工具结果格式问题** | `.kiro/lessons-learned/71_工具结果格式问题调试方法论.md` |
 | **系统提示词措辞** | `.kiro/lessons-learned/70_LLM行为异常的完整调试流程.md` |
 | **14 次修复失败** | `.kiro/lessons-learned/70_LLM行为异常的完整调试流程.md` |
 | **工具调用失败** | `.kiro/lessons-learned/07_AI工具使用陷阱.md` |

@@ -336,6 +336,24 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
         response = content;
       }
       
+      // 🆕 Fix: Clean up response.result content to remove metadata
+      // Remove "Read text file [auto]" prefix and YAML frontmatter
+      if (response && typeof response === "object") {
+        const respRec = response as Record<string, unknown>;
+        if (typeof respRec.result === "string") {
+          let cleaned = respRec.result;
+          
+          // Remove "Read text file [auto]" or "Read image file [...]" prefix
+          cleaned = cleaned.replace(/^Read (?:text|image) file \[.*?\]\n\n/, "");
+          
+          // Remove YAML frontmatter (---\n...\n---\n)
+          cleaned = cleaned.replace(/^---\n[\s\S]*?\n---\n\n/, "");
+          
+          respRec.result = cleaned;
+          log.debug(`[format] Cleaned response.result: removed metadata`);
+        }
+      }
+      
       // 🔧 Fix: Use pending names queue to match tool results
       let name = "unknown";
       
@@ -401,6 +419,24 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
         }
       } else if (content && typeof content === "object") {
         response = content;
+      }
+      
+      // 🆕 Fix: Clean up response.result content to remove metadata
+      // Remove "Read text file [auto]" prefix and YAML frontmatter
+      if (response && typeof response === "object") {
+        const respRec = response as Record<string, unknown>;
+        if (typeof respRec.result === "string") {
+          let cleaned = respRec.result;
+          
+          // Remove "Read text file [auto]" or "Read image file [...]" prefix
+          cleaned = cleaned.replace(/^Read (?:text|image) file \[.*?\]\n\n/, "");
+          
+          // Remove YAML frontmatter (---\n...\n---\n)
+          cleaned = cleaned.replace(/^---\n[\s\S]*?\n---\n\n/, "");
+          
+          respRec.result = cleaned;
+          log.debug(`[format] Cleaned response.result: removed metadata`);
+        }
       }
       
       // 使用 toolName 字段

@@ -135,6 +135,30 @@ export function installSessionToolResultGuard(
             if ("functionResponse" in rec) {
               const functionResponse = rec.functionResponse as Record<string, unknown>;
               
+              // 🆕 Fix: Remove signature fields from functionResponse (before saving to session)
+              // These fields may interfere with LLM's understanding of tool results
+              if ("thought_signature" in functionResponse) {
+                delete functionResponse.thought_signature;
+                log.debug(`[guard] Removed thought_signature from functionResponse`);
+              }
+              if ("thoughtSignature" in functionResponse) {
+                delete functionResponse.thoughtSignature;
+                log.debug(`[guard] Removed thoughtSignature from functionResponse`);
+              }
+              
+              // 🆕 Fix: Remove signature fields from functionResponse.response
+              if (functionResponse.response && typeof functionResponse.response === "object") {
+                const response = functionResponse.response as Record<string, unknown>;
+                if ("thought_signature" in response) {
+                  delete response.thought_signature;
+                  log.debug(`[guard] Removed thought_signature from functionResponse.response`);
+                }
+                if ("thoughtSignature" in response) {
+                  delete response.thoughtSignature;
+                  log.debug(`[guard] Removed thoughtSignature from functionResponse.response`);
+                }
+              }
+              
               // Match with the first pending toolName (FIFO order)
               if (geminiPendingToolNames.length > 0 && functionResponse.name === "unknown") {
                 const toolName = geminiPendingToolNames.shift()!;
