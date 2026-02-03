@@ -278,6 +278,11 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
             }
           }
           
+          // 🔧 Fix: Track functionCall name for matching tool results
+          const name = typeof funcRec.name === "string" ? funcRec.name : "unknown";
+          pendingFunctionNames.push(name);
+          log.debug(`[format] Tracked functionCall from assistant: name="${name}", queue length=${pendingFunctionNames.length}`);
+          
           return {
             functionCall: {
               name: funcRec.name,
@@ -331,8 +336,10 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
         response = content;
       }
       
-      // 从 response 中提取工具名称
+      // 🔧 Fix: Use pending names queue to match tool results
       let name = "unknown";
+      
+      // 1. Try to extract from response
       if (response && typeof response === "object") {
         const respRec = response as Record<string, unknown>;
         if (typeof respRec.tool === "string") {
@@ -342,11 +349,17 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
         }
       }
       
-      // 如果还是 unknown，尝试从 tool_call_id 中提取
-      if (name === "unknown" && typeof toolCallId === "string") {
-        // tool_call_id 通常是 "call_xxx"，我们无法从中提取工具名称
-        // 但可以记录日志
-        log.warn(`[format] Unable to extract tool name from tool_call_id: ${toolCallId}`);
+      // 2. If still unknown, use pending names queue
+      if (name === "unknown" && pendingFunctionNames.length > 0) {
+        name = pendingFunctionNames.shift()!;
+        log.info(`[format] ✓ Fixed tool message name using queue: "unknown" → "${name}" (queue length=${pendingFunctionNames.length})`);
+      } else if (name === "unknown" && typeof toolCallId === "string") {
+        // 3. If queue is empty, log warning
+        log.warn(`[format] Unable to extract tool name from tool_call_id: ${toolCallId}, queue is empty`);
+      } else if (name !== "unknown" && pendingFunctionNames.length > 0) {
+        // 4. If name is already known, remove from queue
+        pendingFunctionNames.shift();
+        log.debug(`[format] tool message already has name="${name}", removed from queue (queue length=${pendingFunctionNames.length})`);
       }
       
       return {
@@ -869,7 +882,10 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
         // Extract provider from model string (e.g., "vectorengine/gemini-3-flash-preview" → "vectorengine")
         const modelStr = typeof base.modelId === "string" ? base.modelId : "";
         const providerFromModel = modelStr.includes("/") ? modelStr.split("/")[0] : "";
-        const effectiveProvider = (base.provider || providerFromModel).toLowerCase();
+        // 🔧 Fix: base.provider 可能是空字符串，需要显式检查
+        const effectiveProvider = (base.provider && base.provider.trim() !== "" ? base.provider : providerFromModel).toLowerCase();
+        
+        log.debug(`[format] effectiveProvider="${effectiveProvider}", base.provider="${base.provider}", providerFromModel="${providerFromModel}"`);
         
         if (effectiveProvider.includes("vectorengine")) {
           if (payload && typeof payload === "object" && "messages" in payload) {

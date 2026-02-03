@@ -95,12 +95,65 @@ function resolveExecConfig(cfg: ClawdbotConfig | undefined) {
   };
 }
 
+/**
+ * Wraps a tool to ensure it always returns a non-empty result.
+ * If the tool returns empty content, adds a default success message.
+ * This prevents LLMs from repeating tool calls when they receive empty results.
+ */
+function wrapToolWithResultFallback(tool: AnyAgentTool): AnyAgentTool {
+  const originalExecute = tool.execute;
+  
+  return {
+    ...tool,
+    execute: async (id: string, args: any, signal?: AbortSignal, onUpdate?: any) => {
+      const result = await originalExecute(id, args, signal, onUpdate);
+      
+      // Log the original result for debugging
+      console.log(`[wrapToolWithResultFallback] ${tool.name} original result:`, JSON.stringify(result, null, 2));
+      
+      // Check if content is empty
+      if (result && typeof result === "object" && "content" in result) {
+        const content = (result as any).content;
+        
+        // If content is empty or only contains empty text, add a default success message
+        if (!content || content.length === 0) {
+          console.log(`[wrapToolWithResultFallback] ${tool.name} content is empty, adding default message`);
+          return {
+            ...result,
+            content: [{ type: "text" as const, text: `Successfully executed ${tool.name}` }],
+          };
+        }
+        
+        // Check if all content items are empty text
+        const hasNonEmptyContent = content.some((item: any) => {
+          if (item && typeof item === "object" && item.type === "text") {
+            return item.text && item.text.trim() !== "";
+          }
+          return true; // Non-text items are considered non-empty
+        });
+        
+        if (!hasNonEmptyContent) {
+          console.log(`[wrapToolWithResultFallback] ${tool.name} all content is empty text, adding default message`);
+          return {
+            ...result,
+            content: [{ type: "text" as const, text: `Successfully executed ${tool.name}` }],
+          };
+        }
+      }
+      
+      console.log(`[wrapToolWithResultFallback] ${tool.name} content is OK, returning original result`);
+      return result;
+    },
+  };
+}
+
 export const __testing = {
   cleanToolSchemaForGemini,
   normalizeToolParams,
   patchToolSchemaForClaudeCompatibility,
   wrapToolParamNormalization,
   assertRequiredParams,
+  wrapToolWithResultFallback,
 } as const;
 
 export function createClawdbotCodingTools(options?: {
@@ -218,14 +271,18 @@ export function createClawdbotCodingTools(options?: {
     if (tool.name === "write") {
       if (sandboxRoot) return [];
       // Wrap with param normalization for Claude Code compatibility
-      return [
-        wrapToolParamNormalization(createWriteTool(workspaceRoot), CLAUDE_PARAM_GROUPS.write),
-      ];
+      const writeTool = createWriteTool(workspaceRoot);
+      const normalized = wrapToolParamNormalization(writeTool, CLAUDE_PARAM_GROUPS.write);
+      // Wrap with result fallback to ensure non-empty result (prevents LLM from repeating calls)
+      return [wrapToolWithResultFallback(normalized)];
     }
     if (tool.name === "edit") {
       if (sandboxRoot) return [];
       // Wrap with param normalization for Claude Code compatibility
-      return [wrapToolParamNormalization(createEditTool(workspaceRoot), CLAUDE_PARAM_GROUPS.edit)];
+      const editTool = createEditTool(workspaceRoot);
+      const normalized = wrapToolParamNormalization(editTool, CLAUDE_PARAM_GROUPS.edit);
+      // Wrap with result fallback to ensure non-empty result (prevents LLM from repeating calls)
+      return [wrapToolWithResultFallback(normalized)];
     }
     return [tool as AnyAgentTool];
   });
