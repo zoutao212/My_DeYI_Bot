@@ -75,6 +75,13 @@ export type FollowupRun = {
     extraSystemPrompt?: string;
     enforceFinalTag?: boolean;
   };
+  /**
+   * 标记这是否是队列任务（而不是用户直接发送的消息）
+   * 
+   * - true: 队列任务（不允许调用 enqueue_task）
+   * - false/undefined: 用户消息（允许调用 enqueue_task）
+   */
+  isQueueTask?: boolean;
 };
 
 export type ResolveQueueSettingsParams = {

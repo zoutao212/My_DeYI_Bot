@@ -47,6 +47,10 @@
 | `24_TypeScript类型错误修复方法论.md` | TypeScript、类型错误、类型守卫 | TypeScript、类型、类型守卫、类型过滤 |
 | `25_测试期望值更新方法论.md` | 测试、期望值更新、行为改变 | 测试、期望值、行为改变、降级策略 |
 | `79_历史消息Tool_Call重复执行问题.md` | 历史消息、Tool Call、重复执行、格式转换 | 历史消息、tool call、重复执行、格式转换、伪代码化、OpenAI 兼容 API、Gemini 格式、vectorengine |
+| `80_状态标志生命周期陷阱.md` | 状态标志、生命周期、全局变量 | 状态标志、生命周期、全局变量、isActive、队列任务 |
+| `81_LLM主动生成连续任务实现方法.md` | LLM 连续任务、enqueue_task、队列机制 | LLM、连续任务、enqueue_task、队列、followup |
+| `82_LLM工具调用循环检测模式.md` | LLM 循环检测、工具调用、isQueueTask | LLM、循环检测、工具调用、isQueueTask、队列任务 |
+| `83_Hook副作用检测模式.md` | Hook 副作用、消息类型、队列任务 | Hook、副作用、消息类型、队列任务、collect 模式、prependContext |
 
 ## 快速查找
 
@@ -102,3 +106,4 @@
 - **25_测试期望值更新方法论.md**：修改实现后更新测试期望值的标准流程
 
 **关键词**：系统架构、设计缺陷、数据流分析、上下文管理、任务目标、记忆系统、状态跟踪、TypeScript、类型守卫、类型过滤、测试、期望值、行为改变、降级策略
+| `80_连续任务队列触发机制修复.md` | 连续任务、队列系统、触发机制 | 连续任务、队列、followup、finalizeWithFollowup、scheduleFollowupDrain、递归调用、触发机制、最小改动 |

@@ -386,28 +386,6 @@ export async function runEmbeddedAttempt(
           const entryRoles = messageEntries.slice(0, 10).map((e: any) => e.message?.role || "unknown");
           log.info(`[attempt] First 10 message entry roles: ${entryRoles.join(' → ')}`);
         }
-        
-        // 🔧 FIX: Override buildSessionContext to return recent messages from fileEntries
-        const allMessages = messageEntries.map((e: any) => e.message);
-        const historyLimit = 20; // Keep last 20 messages
-        const recentMessages = allMessages.slice(-historyLimit);
-        
-        log.info(`[attempt] Overriding buildSessionContext: using ${recentMessages.length} recent messages (total: ${allMessages.length})`);
-        
-        // Save original method
-        const originalBuildContext = sm.buildSessionContext?.bind(sm);
-        
-        // Override buildSessionContext to return recent messages
-        sm.buildSessionContext = () => {
-          const roles = recentMessages.map((m: any) => m.role).join(' → ');
-          log.info(`[attempt] buildSessionContext override: returning ${recentMessages.length} messages (${roles})`);
-          return {
-            messages: recentMessages,
-          };
-        };
-        
-        // Store original method for potential restoration
-        (sm as any)._originalBuildContext = originalBuildContext;
       }
 
       await prepareSessionManagerForRun({
@@ -424,9 +402,28 @@ export async function runEmbeddedAttempt(
       // 🆕 Step 3: 执行 hook 获取动态角色识别结果（在 buildEmbeddedSystemPrompt 之前）
       if (hookRunner?.hasHooks("before_agent_start")) {
         try {
+          // 🔧 从全局上下文获取 isQueueTask 标记和实际的 prompt
+          const { getCurrentFollowupRunContext } = await import("../../tools/enqueue-task-tool.js");
+          const followupContext = getCurrentFollowupRunContext();
+          const isQueueTask = followupContext?.isQueueTask === true;
+          
+          // 🔧 使用正确的 prompt：
+          // - 如果是队列任务，使用 followupContext.prompt（队列任务的 prompt）
+          // - 否则，使用 params.prompt（用户的原始消息）
+          const actualPrompt = followupContext?.prompt ?? params.prompt;
+          
+          // 🔍 调试日志：验证 prompt 来源
+          console.log(`[attempt] 🔍 followupContext?.prompt: ${followupContext?.prompt?.slice(0, 100)}`);
+          console.log(`[attempt] 🔍 params.prompt: ${params.prompt?.slice(0, 100)}`);
+          console.log(`[attempt] 🔍 actualPrompt: ${actualPrompt?.slice(0, 100)}`);
+          console.log(`[attempt] 🔍 isQueueTask: ${isQueueTask}`);
+          
           const hookResult = await hookRunner.runBeforeAgentStart(
             {
-              prompt: params.prompt,
+              prompt: actualPrompt,
+              metadata: {
+                isQueueTask,  // 🆕 传递 isQueueTask 标记
+              },
             },
             {
               sessionKey: params.sessionKey,

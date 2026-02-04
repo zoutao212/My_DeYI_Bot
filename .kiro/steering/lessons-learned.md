@@ -78,6 +78,9 @@
 | **字段在数据流中丢失** | `.kiro/lessons-learned/67_字段在数据流中丢失的调试方法论.md` |
 | **构建系统 .buildstamp 陷阱** | `.kiro/lessons-learned/68_构建系统buildstamp陷阱.md` |
 
+| **LLM 主动生成连续任务** | `.kiro/lessons-learned/81_LLM主动生成连续任务实现方法.md` |
+| **LLM 工具调用循环检测** | `.kiro/lessons-learned/82_LLM工具调用循环检测模式.md` |
+
 clawdbot 实际的 系统日志在 C:\Users\zouta\.clawdbot\runtimelog
 clawdbot 对话内容在 C:\Users\zouta\.clawdbot\agents\main\sessions
 

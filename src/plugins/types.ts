@@ -314,6 +314,9 @@ export type PluginHookAgentContext = {
 export type PluginHookBeforeAgentStartEvent = {
   prompt: string;
   messages?: unknown[];
+  metadata?: {
+    isQueueTask?: boolean;  // 🆕 标记是否是队列任务
+  };
 };
 
 export type PluginHookBeforeAgentStartResult = {

@@ -14,6 +14,7 @@ import type { OriginatingChannelType } from "../templating.js";
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import type { FollowupRun } from "./queue.js";
+import { finalizeWithFollowup } from "./agent-runner-helpers.js";
 import {
   applyReplyThreading,
   filterMessagingToolDuplicates,
@@ -25,6 +26,7 @@ import { persistSessionUsageUpdate } from "./session-usage.js";
 import { incrementCompactionCount } from "./session-updates.js";
 import type { TypingController } from "./typing.js";
 import { createTypingSignaler } from "./typing-mode.js";
+import { setCurrentFollowupRunContext } from "../../agents/tools/enqueue-task-tool.js";
 
 export function createFollowupRunner(params: {
   opts?: GetReplyOptions;
@@ -125,6 +127,10 @@ export function createFollowupRunner(params: {
       let fallbackProvider = queued.run.provider;
       let fallbackModel = queued.run.model;
       try {
+        // 🔧 设置全局上下文：正在执行队列任务
+        // isQueueTask = true 表示这是队列任务（不允许调用 enqueue_task）
+        setCurrentFollowupRunContext({ ...queued, isQueueTask: true });
+        
         const fallbackResult = await runWithModelFallback({
           cfg: queued.run.config,
           provider: queued.run.provider,
@@ -262,8 +268,16 @@ export function createFollowupRunner(params: {
       }
 
       await sendFollowupPayloads(finalPayloads, queued);
+
+      // 🆕 触发队列继续执行下一个任务
+      if (queued.run.sessionKey) {
+        const queueKey = queued.run.sessionKey;
+        finalizeWithFollowup(undefined, queueKey, createFollowupRunner(params));
+      }
     } finally {
       typing.markRunComplete();
+      // 🔧 清理全局上下文
+      setCurrentFollowupRunContext(null);
     }
   };
 }

@@ -62,6 +62,7 @@ export const finalizeWithFollowup = <T>(
   queueKey: string,
   runFollowupTurn: Parameters<typeof scheduleFollowupDrain>[1],
 ): T => {
+  console.log(`[finalizeWithFollowup] 🔄 Scheduling followup drain: queueKey=${queueKey}`);
   scheduleFollowupDrain(queueKey, runFollowupTurn);
   return value;
 };

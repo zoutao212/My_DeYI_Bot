@@ -34,7 +34,8 @@ import { appendUsageLine, formatResponseUsageLine } from "./agent-runner-utils.j
 import { createAudioAsVoiceBuffer, createBlockReplyPipeline } from "./block-reply-pipeline.js";
 import { resolveBlockStreamingCoalescing } from "./block-streaming.js";
 import { createFollowupRunner } from "./followup-runner.js";
-import { enqueueFollowupRun, type FollowupRun, type QueueSettings } from "./queue.js";
+import { enqueueFollowupRun, scheduleFollowupDrain, type FollowupRun, type QueueSettings } from "./queue.js";
+import { setCurrentFollowupRunContext } from "../../agents/tools/enqueue-task-tool.js";
 import { createReplyToModeFilterForChannel, resolveReplyToMode } from "./reply-threading.js";
 import { persistSessionUsageUpdate } from "./session-usage.js";
 import { incrementCompactionCount } from "./session-updates.js";
@@ -178,8 +179,15 @@ export async function runReplyAgent(params: {
     }
   }
 
-  if (isActive && (shouldFollowup || resolvedQueue.mode === "steer")) {
-    enqueueFollowupRun(queueKey, followupRun, resolvedQueue);
+  // 🔧 修复：不自动加入用户消息到队列
+  // 原因：LLM 会通过 enqueue_task 工具自己创建队列任务
+  // 如果自动加入用户消息，会导致队列中的第一个任务是用户消息，而不是 LLM 创建的任务
+  console.log(`[agent-runner] 🔍 Checking followup: shouldFollowup=${shouldFollowup}, resolvedQueue.mode=${resolvedQueue.mode}, isActive=${isActive}`);
+  
+  if (shouldFollowup || resolvedQueue.mode === "steer") {
+    // 🔧 不要自动加入用户消息！让 LLM 通过 enqueue_task 工具自己创建队列任务
+    console.log(`[agent-runner] ⚠️ Skipping user message enqueue (LLM will create queue tasks via enqueue_task tool)`);
+    
     if (activeSessionEntry && activeSessionStore && sessionKey) {
       const updatedAt = Date.now();
       activeSessionEntry.updatedAt = updatedAt;
@@ -192,11 +200,20 @@ export async function runReplyAgent(params: {
         });
       }
     }
-    typing.cleanup();
-    return undefined;
+    // 🔧 只有在 isActive 时才 cleanup typing 和 return
+    if (isActive) {
+      typing.cleanup();
+      return undefined;
+    }
+  } else {
+    console.log(`[agent-runner] ❌ Not enqueuing: shouldFollowup=${shouldFollowup}, mode=${resolvedQueue.mode}`);
   }
 
   await typingSignals.signalRunStart();
+
+  // 🔧 设置全局上下文，让 enqueue_task 工具可以访问当前的 FollowupRun
+  // isQueueTask = false 表示这不是队列任务（是用户直接发送的消息）
+  setCurrentFollowupRunContext({ ...followupRun, isQueueTask: false });
 
   activeSessionEntry = await runMemoryFlushIfNeeded({
     cfg,
@@ -510,5 +527,7 @@ export async function runReplyAgent(params: {
   } finally {
     blockReplyPipeline?.stop();
     typing.markRunComplete();
+    // 🔧 清理全局上下文
+    setCurrentFollowupRunContext(null);
   }
 }

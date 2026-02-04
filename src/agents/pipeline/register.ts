@@ -28,10 +28,28 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
     async (event, ctx) => {
       try {
         log.info("🔵 [Pipeline] before_agent_start hook triggered");
-        log.info(`🔵 [Pipeline] User message: ${event.prompt?.slice(0, 50)}...`);
+        log.info(`🔵 [Pipeline] User message: ${event.prompt?.slice(0, 150)}...`);
+        log.info(`🔵 [Pipeline] metadata.isQueueTask: ${event.metadata?.isQueueTask}`);
+        
+        // 🔧 检测是否是队列任务
+        // 关键：检查 event.metadata 中的 isQueueTask 标记
+        const isQueueTask = event.metadata?.isQueueTask === true;
+        
+        if (isQueueTask) {
+          log.info("🔵 [Pipeline] ⚠️ Detected queue task (from metadata), skipping character detection");
+          return undefined; // 不修改 prompt
+        }
+
+        // 🔧 检测是否是原始用户消息在队列中
+        const userMessage = event.prompt || "";
+        const isOriginalUserMessageInQueue = userMessage.includes("[message_id:");
+        
+        if (isOriginalUserMessageInQueue) {
+          log.info("🔵 [Pipeline] ⚠️ Detected original user message in queue, skipping modification");
+          return undefined; // 不修改 prompt
+        }
 
         // 🔧 简单的角色识别逻辑（临时实现，后续用 LLM 替换）
-        const userMessage = event.prompt || "";
         let detectedCharacter: string | undefined;
         
         // 检测是否提到栗娜

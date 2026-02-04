@@ -34,20 +34,27 @@ export async function prepareSessionManagerForRun(params: {
     (e) => e.type === "message" && (e as SessionMessageEntry).message?.role === "assistant",
   );
 
+  // 🔍 DEBUG: Log the decision
+  console.log(`[prepareSessionManagerForRun] hadSessionFile=${params.hadSessionFile}, hasHeader=${!!header}, hasAssistant=${hasAssistant}, fileEntries=${sm.fileEntries.length}`);
+
   if (!params.hadSessionFile && header) {
     header.id = params.sessionId;
     header.cwd = params.cwd;
     sm.sessionId = params.sessionId;
+    console.log(`[prepareSessionManagerForRun] Updated header for new session`);
     return;
   }
 
   if (params.hadSessionFile && header && !hasAssistant) {
     // Reset file so the first assistant flush includes header+user+assistant in order.
+    console.log(`[prepareSessionManagerForRun] ⚠️ Resetting session file (no assistant found)`);
     await fs.writeFile(params.sessionFile, "", "utf-8");
     sm.fileEntries = [header];
     sm.byId?.clear?.();
     sm.labelsById?.clear?.();
     sm.leafId = null;
     sm.flushed = false;
+  } else {
+    console.log(`[prepareSessionManagerForRun] No reset needed`);
   }
 }

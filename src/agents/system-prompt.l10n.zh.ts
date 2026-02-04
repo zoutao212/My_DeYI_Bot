@@ -21,6 +21,7 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
     canvas: "控制 Canvas",
     nodes: "控制配对的物理设备",
     cron: "管理定时任务与唤醒事件",
+    enqueue_task: "将任务加入队列，稍后自动执行（仅在用户直接要求时使用，执行队列任务时不要调用）",
     message: "发送消息与执行渠道动作",
     gateway: "对运行中的 Clawdbot 执行重启/应用配置/更新",
     agents_list: "列出允许 sessions_spawn 的 agent id",
@@ -61,6 +62,17 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
     "**重要**:必须通过 API 的 function calling 机制来调用工具。不要在回复文本中模仿工具调用格式；这样做不会执行任何操作。只有真正的 function call 才会触发工具执行。",
   toolCallCompletionNote:
     "**任务完成原则**:当你完成用户请求的任务后，必须立即停止工具调用并回复用户。不要重复执行相同的工具调用。如果工具调用已经成功（返回了结果），不要再次调用相同的工具。",
+  enqueueTaskRulesTitle: "## enqueue_task 工具使用规则",
+  enqueueTaskRulesImportant: "**重要**：",
+  enqueueTaskRulesUserMessage: "- ✅ 用户直接要求时：可以调用 enqueue_task 加入多个任务",
+  enqueueTaskRulesQueueTask: "- ❌ 执行队列任务时：不要调用 enqueue_task，直接生成内容",
+  enqueueTaskRulesExampleTitle: "**示例**：",
+  enqueueTaskRulesExample1: "用户消息：\"请生成 5 段内容\"",
+  enqueueTaskRulesExample1Correct: "→ ✅ 正确：调用 enqueue_task 5 次，然后回复确认",
+  enqueueTaskRulesExample1Wrong: "→ ❌ 错误：直接生成 5 段内容",
+  enqueueTaskRulesExample2: "队列任务：\"请生成第 1 段内容\"",
+  enqueueTaskRulesExample2Correct: "→ ✅ 正确：直接生成第 1 段内容",
+  enqueueTaskRulesExample2Wrong: "→ ❌ 错误：调用 enqueue_task 生成更多任务",
   toolParamsQuickRef: `## 核心工具参数速查
 - **write(path, content)**:path=文件路径，content=完整内容
 - **edit(path, oldText, newText)**:path=文件路径，oldText=要替换的原文，newText=替换后的新文本

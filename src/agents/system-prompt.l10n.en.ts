@@ -15,6 +15,17 @@ export type SystemPromptL10n = {
   toolCallStylePlainLanguage: string;
   toolCallApiNote: string;
   toolCallCompletionNote: string;
+  enqueueTaskRulesTitle: string;
+  enqueueTaskRulesImportant: string;
+  enqueueTaskRulesUserMessage: string;
+  enqueueTaskRulesQueueTask: string;
+  enqueueTaskRulesExampleTitle: string;
+  enqueueTaskRulesExample1: string;
+  enqueueTaskRulesExample1Correct: string;
+  enqueueTaskRulesExample1Wrong: string;
+  enqueueTaskRulesExample2: string;
+  enqueueTaskRulesExample2Correct: string;
+  enqueueTaskRulesExample2Wrong: string;
   toolParamsQuickRef: string;
   cliQuickRefTitle: string;
   cliQuickRefIntro: string;
@@ -170,6 +181,17 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
     "**IMPORTANT**: You MUST use the API's function calling mechanism to invoke tools. Do NOT mimic tool call format (like JSON argument blocks) in your reply text; doing so will NOT execute anything. Only real function calls trigger tool execution.",
   toolCallCompletionNote:
     "**Task Completion Principle**: When you have completed the user's request, you MUST stop calling tools and reply to the user immediately. Do NOT repeat the same tool calls. If a tool call has already succeeded (returned a result), do NOT call the same tool again.",
+  enqueueTaskRulesTitle: "## enqueue_task Tool Usage Rules",
+  enqueueTaskRulesImportant: "**Important**:",
+  enqueueTaskRulesUserMessage: "- ✅ When user directly requests: You can call enqueue_task to add multiple tasks",
+  enqueueTaskRulesQueueTask: "- ❌ When executing queue tasks: Do NOT call enqueue_task, generate content directly",
+  enqueueTaskRulesExampleTitle: "**Examples**:",
+  enqueueTaskRulesExample1: "User message: \"Please generate 5 pieces of content\"",
+  enqueueTaskRulesExample1Correct: "→ ✅ Correct: Call enqueue_task 5 times, then reply with confirmation",
+  enqueueTaskRulesExample1Wrong: "→ ❌ Wrong: Generate 5 pieces of content directly",
+  enqueueTaskRulesExample2: "Queue task: \"Please generate the 1st piece of content\"",
+  enqueueTaskRulesExample2Correct: "→ ✅ Correct: Generate the 1st piece of content directly",
+  enqueueTaskRulesExample2Wrong: "→ ❌ Wrong: Call enqueue_task to generate more tasks",
   toolParamsQuickRef: `## Core Tool Parameters
 - **write(path, content)**: path=file path, content=full content. Example: write({ path: "test.txt", content: "hello" })
 - **edit(path, oldText, newText)**: path=file path, oldText=exact text to replace, newText=replacement text
