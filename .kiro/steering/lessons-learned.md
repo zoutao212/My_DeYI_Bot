@@ -85,6 +85,8 @@
 | **启动脚本健康检查** | `.kiro/lessons-learned/85_启动脚本健康检查设计原则.md` |
 | **状态同步原则** | `.kiro/lessons-learned/87_状态同步原则.md` |
 | **消息重复发送** | `.kiro/lessons-learned/89_消息重复发送问题.md` |
+| **后台任务失败** | `.kiro/lessons-learned/89_消息重复发送问题.md` |
+| **队列任务角色检测** | `.kiro/lessons-learned/89_消息重复发送问题.md` |
 
 clawdbot 实际的 系统日志在 C:\Users\zouta\.clawdbot\runtimelog
 clawdbot 对话内容在 C:\Users\zouta\.clawdbot\agents\main\sessions

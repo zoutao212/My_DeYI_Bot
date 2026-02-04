@@ -31,21 +31,21 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
         log.info(`🔵 [Pipeline] User message: ${event.prompt?.slice(0, 150)}...`);
         log.info(`🔵 [Pipeline] metadata.isQueueTask: ${event.metadata?.isQueueTask}`);
         
-        // 🔧 检测是否是原始用户消息在队列中
+        // 🔧 获取用户消息
         const userMessage = event.prompt || "";
+        
+        // 🔧 检测是否是原始用户消息在队列中
         const isOriginalUserMessageInQueue = userMessage.includes("[message_id:");
         
-        if (isOriginalUserMessageInQueue) {
-          log.info("🔵 [Pipeline] ⚠️ Detected original user message in queue, skipping modification");
-          return undefined; // 不修改 prompt
-        }
-        
-        // 🔧 队列任务也需要进行角色检测！
-        // 因为队列任务的内容可能包含角色相关的关键词
+        // 🔧 检测是否是队列任务
         const isQueueTask = event.metadata?.isQueueTask === true;
         
         if (isQueueTask) {
           log.info("🔵 [Pipeline] ⚠️ Detected queue task (from metadata), will still perform character detection");
+        }
+        
+        if (isOriginalUserMessageInQueue) {
+          log.info("🔵 [Pipeline] ⚠️ Detected original user message in queue, will still perform character detection");
         }
 
         // 🔧 简单的角色识别逻辑（临时实现，后续用 LLM 替换）

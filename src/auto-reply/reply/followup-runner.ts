@@ -230,6 +230,12 @@ export function createFollowupRunner(params: {
           console.error(`[followup-runner] ❌ Sub task failed: ${subTask.id} - ${message}`);
         }
         
+        // 🔧 即使任务失败，也要触发下一个任务的执行
+        if (queued.run.sessionKey) {
+          const queueKey = queued.run.sessionKey;
+          finalizeWithFollowup(undefined, queueKey, createFollowupRunner(params));
+        }
+        
         return;
       }
 
