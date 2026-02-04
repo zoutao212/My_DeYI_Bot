@@ -13,13 +13,13 @@ export function scheduleFollowupDrain(
   key: string,
   runFollowup: (run: FollowupRun) => Promise<void>,
 ): void {
-  console.log(`[scheduleFollowupDrain] 🔍 Called: key=${key}`);
   const queue = FOLLOWUP_QUEUES.get(key);
   if (!queue || queue.draining) {
-    console.log(`[scheduleFollowupDrain] ❌ Skipped: queue=${!!queue}, draining=${queue?.draining}`);
+    // 这是正常的防重复机制，不是错误
+    // 当队列正在排空时，跳过新的排空请求
     return;
   }
-  console.log(`[scheduleFollowupDrain] ✅ Starting drain: items=${queue.items.length}`);
+  console.log(`[scheduleFollowupDrain] ✅ Starting drain: key=${key}, items=${queue.items.length}`);
   queue.draining = true;
   void (async () => {
     try {

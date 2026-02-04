@@ -62,7 +62,7 @@ export const finalizeWithFollowup = <T>(
   queueKey: string,
   runFollowupTurn: Parameters<typeof scheduleFollowupDrain>[1],
 ): T => {
-  console.log(`[finalizeWithFollowup] 🔄 Scheduling followup drain: queueKey=${queueKey}`);
+  // 尝试触发队列排空（如果队列正在排空，会自动跳过）
   scheduleFollowupDrain(queueKey, runFollowupTurn);
   return value;
 };
