@@ -269,20 +269,228 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
     input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> {
-    // 修复 payload 中的 content: null 问题（在发送前修复）
+    // 修复 payload 中的格式问题（在发送前修复）
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const isVectorengine = url.includes("vectorengine");
+    
     if (init?.body && typeof init.body === "string") {
       try {
         const bodyJson = JSON.parse(init.body);
-        if (bodyJson && typeof bodyJson === "object" && Array.isArray(bodyJson.messages)) {
+        if (bodyJson && typeof bodyJson === "object") {
           let fixed = false;
-          for (let i = 0; i < bodyJson.messages.length; i++) {
-            const msg = bodyJson.messages[i];
-            if (msg && msg.role === "assistant" && msg.content === null) {
-              msg.content = "";
-              fixed = true;
-              console.warn(`[llm-gated-fetch] 修复 content: null → "" (message[${i}])`);
+          
+          // 修复 messages：vectorengine 使用 OpenAI 格式，但有特殊要求
+          if (isVectorengine && Array.isArray(bodyJson.messages)) {
+            // 第一步：找到所有 assistant + tool 对
+            const toolCallPairs: Array<{ assistantIndex: number; toolIndex: number }> = [];
+            
+            for (let i = 0; i < bodyJson.messages.length; i++) {
+              const msg = bodyJson.messages[i];
+              if (msg.role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+                // 找到对应的 tool 消息
+                for (let j = i + 1; j < bodyJson.messages.length; j++) {
+                  if (bodyJson.messages[j].role === "tool") {
+                    toolCallPairs.push({ assistantIndex: i, toolIndex: j });
+                    break;
+                  }
+                }
+              }
+            }
+            
+            // 最后一对
+            const lastPair = toolCallPairs.length > 0 ? toolCallPairs[toolCallPairs.length - 1] : null;
+            
+            console.warn(`[llm-gated-fetch] [DEBUG] 找到 ${toolCallPairs.length} 对 tool_calls，最后一对: assistant[${lastPair?.assistantIndex}], tool[${lastPair?.toolIndex}]`);
+            
+            // 第二步：处理所有消息
+            for (let i = 0; i < bodyJson.messages.length; i++) {
+              const msg = bodyJson.messages[i];
+              
+              // 修复 1: content 数组 → 字符串
+              if (Array.isArray(msg.content)) {
+                const textParts = msg.content
+                  .filter((block: { type?: string }) => block.type === "text")
+                  .map((block: { text?: string }) => block.text || "")
+                  .join("\n");
+                
+                msg.content = textParts;
+                fixed = true;
+                console.warn(`[llm-gated-fetch] 修复 content 数组 → 字符串 (message[${i}])`);
+              }
+              
+              // 修复 2: 保持 content: null（OpenAI 标准格式）
+              if (msg.content === "") {
+                msg.content = null;
+                fixed = true;
+                console.warn(`[llm-gated-fetch] 修复 content: "" → null (message[${i}])`);
+              }
+              
+              // 修复 3: 处理 tool_calls
+              if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+                if (lastPair && i === lastPair.assistantIndex) {
+                  // 最后一次 tool_calls：转换为 Gemini 格式
+                  const contentParts = [];
+                  
+                  for (const toolCall of msg.tool_calls) {
+                    if (toolCall && toolCall.function && typeof toolCall.function === "object") {
+                      let args = toolCall.function.arguments;
+                      if (typeof args === "string") {
+                        try {
+                          args = JSON.parse(args);
+                        } catch {
+                          // 解析失败，保持字符串
+                        }
+                      }
+                      
+                      contentParts.push({
+                        functionCall: {
+                          name: toolCall.function.name,
+                          args: args || {},
+                        },
+                        thought_signature: "default",
+                      });
+                    }
+                  }
+                  
+                  if (contentParts.length > 0) {
+                    msg.content = contentParts;
+                    delete msg.tool_calls;
+                    fixed = true;
+                    console.warn(`[llm-gated-fetch] 转换 tool_calls → functionCall (Gemini 格式) (message[${i}]) [最后一次]`);
+                  }
+                } else {
+                  // 历史 tool_calls：内联到 content 中（纯文本）
+                  const toolCallsText = msg.tool_calls
+                    .map((tc: any) => `[调用工具: ${tc.function?.name || "unknown"}]`)
+                    .join("\n");
+                  
+                  if (typeof msg.content === "string") {
+                    msg.content += `\n\n${toolCallsText}`;
+                  } else if (msg.content === null) {
+                    msg.content = toolCallsText;
+                  }
+                  
+                  delete msg.tool_calls;
+                  fixed = true;
+                  console.warn(`[llm-gated-fetch] 内联 tool_calls 到 content (message[${i}]) [历史]`);
+                }
+              }
+              
+              // 修复 4: 处理 tool 消息
+              if (msg.role === "tool" && msg.tool_call_id) {
+                if (lastPair && i === lastPair.toolIndex) {
+                  // 最后一次 tool 结果：转换为 Gemini 格式的 functionResponse
+                  const toolCallId = msg.tool_call_id;
+                  const toolContent = msg.content || "(no output)";
+                  
+                  // 找到对应的 functionCall 来获取工具名称
+                  let toolName = "unknown";
+                  if (lastPair && lastPair.assistantIndex >= 0) {
+                    const assistantMsg = bodyJson.messages[lastPair.assistantIndex];
+                    if (Array.isArray(assistantMsg.content)) {
+                      for (const block of assistantMsg.content) {
+                        if (block.functionCall && block.functionCall.name) {
+                          toolName = block.functionCall.name;
+                          break;
+                        }
+                      }
+                    }
+                  }
+                  
+                  // 转换为 Gemini 格式
+                  msg.role = "function";
+                  
+                  // 解析 toolContent（可能是 JSON 字符串）
+                  let responseContent: any;
+                  if (typeof toolContent === "string") {
+                    try {
+                      responseContent = JSON.parse(toolContent);
+                    } catch {
+                      // 如果不是 JSON，包装成对象
+                      responseContent = { result: toolContent };
+                    }
+                  } else {
+                    responseContent = toolContent;
+                  }
+                  
+                  msg.parts = [
+                    {
+                      functionResponse: {
+                        name: toolName,
+                        response: responseContent,
+                      },
+                    },
+                  ];
+                  delete msg.content;
+                  delete msg.tool_call_id;
+                  fixed = true;
+                  console.warn(`[llm-gated-fetch] 转换 tool → functionResponse (Gemini 格式) (message[${i}]) [最后一次]`);
+                  console.warn(`[llm-gated-fetch] [DEBUG] 转换后: role=${msg.role}, toolName=${toolName}, parts=${JSON.stringify(msg.parts).substring(0, 200)}`);
+                } else {
+                  // 历史 tool 结果：内联到前一条 assistant 消息中
+                  if (i > 0 && bodyJson.messages[i - 1].role === "assistant") {
+                    const assistantMsg = bodyJson.messages[i - 1];
+                    const toolResult = `\n\n[工具执行结果]\n${msg.content || "(no output)"}`;
+                    
+                    if (typeof assistantMsg.content === "string") {
+                      assistantMsg.content += toolResult;
+                    } else if (assistantMsg.content === null) {
+                      assistantMsg.content = toolResult;
+                    } else if (Array.isArray(assistantMsg.content)) {
+                      // 如果 content 是数组（Gemini 格式），转换为字符串
+                      const textContent = assistantMsg.content
+                        .map((block: any) => {
+                          if (block.type === "text") return block.text;
+                          if (block.functionCall) return `[调用工具: ${block.functionCall.name}]`;
+                          return "";
+                        })
+                        .join("\n");
+                      assistantMsg.content = textContent + toolResult;
+                    }
+                    
+                    msg._shouldDelete = true;
+                    fixed = true;
+                    console.warn(`[llm-gated-fetch] 内联 tool 消息到 assistant (message[${i - 1}]) [历史]`);
+                  }
+                }
+              }
             }
           }
+          
+          // 修复 tools：vectorengine 需要 thought_signature
+          if (isVectorengine && Array.isArray(bodyJson.tools)) {
+            for (let i = 0; i < bodyJson.tools.length; i++) {
+              const tool = bodyJson.tools[i];
+              
+              // 确保 tool 有 thought_signature
+              if (tool && typeof tool === "object" && !("thought_signature" in tool)) {
+                tool.thought_signature = "default";
+                fixed = true;
+                console.warn(`[llm-gated-fetch] 添加 tool.thought_signature (tool[${i}])`);
+              }
+              
+              // 确保 tool.function 有 thought_signature
+              if (tool && typeof tool === "object" && tool.function && typeof tool.function === "object") {
+                if (!("thought_signature" in tool.function)) {
+                  tool.function.thought_signature = "default";
+                  fixed = true;
+                  console.warn(`[llm-gated-fetch] 添加 tool.function.thought_signature (tool[${i}])`);
+                }
+              }
+            }
+          }
+          
+          // 删除标记为需要删除的消息（内联后的 tool 消息）
+          if (isVectorengine && Array.isArray(bodyJson.messages)) {
+            const originalCount = bodyJson.messages.length;
+            bodyJson.messages = bodyJson.messages.filter((msg: any) => !msg._shouldDelete);
+            const deletedCount = originalCount - bodyJson.messages.length;
+            if (deletedCount > 0) {
+              console.warn(`[llm-gated-fetch] 删除了 ${deletedCount} 条内联后的 tool 消息`);
+              fixed = true;
+            }
+          }
+          
           if (fixed) {
             // 重新序列化修复后的 body
             init = { ...init, body: JSON.stringify(bodyJson) };

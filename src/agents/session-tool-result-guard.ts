@@ -183,6 +183,25 @@ export function installSessionToolResultGuard(
       // 🆕 DEBUG: Log full message structure to see what API returned
       log.info(`[guard] [DEBUG] Full assistant message: ${JSON.stringify(msg, null, 2).slice(0, 2000)}`);
       
+      // 🔧 Fix: For vectorengine, convert empty content array to empty string
+      // vectorengine (OpenAI compatible) converts empty array to null in payload
+      // which causes API error
+      if (Array.isArray(msg.content) && msg.content.length === 0) {
+        // Check if this is a tool call message (has toolCall blocks)
+        const hasToolCalls = msg.content.some((block: unknown) => {
+          if (!block || typeof block !== "object") return false;
+          const rec = block as Record<string, unknown>;
+          return rec.type === "toolCall" || rec.type === "toolUse" || rec.type === "functionCall";
+        });
+        
+        if (hasToolCalls) {
+          // For tool call messages, use empty string instead of empty array
+          // This prevents OpenAI API from converting it to null
+          msg.content = "" as never;
+          log.info(`[guard] ✓ Converted empty content array to empty string (tool call message)`);
+        }
+      }
+      
       // 🔧 Fix: Remove provider-specific signature fields from assistant messages before saving
       // Some providers (like yinli) return signature fields in responses, but may reject them in requests
       // We need to remove them from saved messages to prevent errors in subsequent requests

@@ -46,19 +46,17 @@ function shouldEnable(params: {
     return false;
   }
 
-  // 🔧 Fix: 对 vectorengine 禁用整个 patcher（包括格式转换）
-  // 原因：vectorengine 是标准的 OpenAI 兼容接口
-  // - 需要标准的 OpenAI 格式（messages, tool_calls, role: assistant）
-  // - 不需要 Gemini 格式转换（contents, functionCall, role: model）
-  // - 不需要 thought_signature
-  // 测试证明：
-  // - ✅ 标准 OpenAI 格式成功
-  // - ❌ Gemini 格式失败（报错 "field messages is required"）
+  // 对 vectorengine 禁用 Gemini 格式转换
+  // 原因：vectorengine 声称 OpenAI 兼容，但实际上不支持 Gemini 格式
+  // 后台报错："请求失败,如果多次出现，请联系客服"
   if (effectiveProvider.includes("vectorengine")) {
-    log.info(
-      `[thought_signature] Disabled for vectorengine provider (standard OpenAI format, no conversion needed)`,
-    );
+    log.debug(`[thought_signature] Disabled for vectorengine provider (use OpenAI format)`);
     return false;
+  }
+  // 所以必须启用 patcher
+  if (effectiveProvider.includes("vectorengine")) {
+    log.debug(`[thought_signature] Enabled for vectorengine provider (Gemini format + thought_signature required)`);
+    return true;
   }
 
   // 对其他 provider，默认启用 thought_signature patcher
@@ -212,11 +210,20 @@ function convertGeminiToOpenAIFormat(message: unknown): unknown {
 /**
  * 将 OpenAI 格式的 messages 转换为 Gemini 格式
  * 用于 vectorengine 等期望 Gemini 格式的混合 API
+ * 
+ * @param messages - 要转换的消息数组
+ * @param options - 转换选项
+ * @param options.markHistoryToolCalls - 是否将历史消息中的 tool call 转换为文本描述（默认 false）
  */
-function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
+function convertOpenAIToGeminiFormat(messages: unknown[], options?: {
+  markHistoryToolCalls?: boolean;
+}): unknown[] {
   // 🔧 Fix: Track pending functionCall names to fix functionResponse.name
   // Gemini format doesn't have id fields, so we match by order (FIFO)
   const pendingFunctionNames: string[] = [];
+  
+  // 🆕 Fix: 是否标记历史 tool call（转换为文本描述）
+  const markHistory = options?.markHistoryToolCalls ?? false;
 
   return messages.map((msg) => {
     if (!msg || typeof msg !== "object") return msg;
@@ -330,6 +337,33 @@ function convertOpenAIToGeminiFormat(messages: unknown[]): unknown[] {
     if (role === "assistant") {
       const toolCalls = msgRec.tool_calls;
       if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+        // 🆕 Fix: 如果是历史消息，转换为文本描述
+        if (markHistory) {
+          const toolCallDescriptions = toolCalls
+            .map((tc) => {
+              if (!tc || typeof tc !== "object") return null;
+              const tcRec = tc as Record<string, unknown>;
+              const func = tcRec.function;
+              if (!func || typeof func !== "object") return null;
+              const funcRec = func as Record<string, unknown>;
+              
+              const name = typeof funcRec.name === "string" ? funcRec.name : "unknown";
+              const argsStr = typeof funcRec.arguments === "string" ? funcRec.arguments : "{}";
+              
+              // 转换为伪代码描述
+              return `[已执行工具调用] ${name}(${argsStr})`;
+            })
+            .filter(Boolean)
+            .join("\n");
+          
+          log.debug(`[format] Converted assistant tool_calls to text description (history)`);
+          return {
+            role: "model",
+            parts: [{ text: toolCallDescriptions }],
+          };
+        }
+        
+        // 当前消息：保留完整的 functionCall 格式
         // 转换为 Gemini 格式
         const parts = toolCalls
           .map((tc) => {
