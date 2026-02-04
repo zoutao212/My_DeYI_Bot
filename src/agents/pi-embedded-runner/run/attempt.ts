@@ -613,6 +613,7 @@ export async function runEmbeddedAttempt(
         provider: params.provider,
         modelId: params.modelId,
         modelApi: params.model.api,
+        showLlmProgress: params.config?.agents?.defaults?.showLlmProgress,
       });
 
       // Force a stable streamFn reference so vitest can reliably mock @mariozechner/pi-ai.
