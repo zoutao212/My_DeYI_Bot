@@ -23,6 +23,45 @@ function formatTemplate(template: string, vars: Record<string, string>) {
   });
 }
 
+function buildTaskDecompositionSection(params: {
+  isMinimal: boolean;
+  l10n: typeof SYSTEM_PROMPT_L10N_EN;
+}) {
+  if (params.isMinimal) return [];
+  return [
+    params.l10n.taskDecompositionTitle,
+    params.l10n.taskDecompositionIntro,
+    "",
+    params.l10n.taskDecompositionWhenTitle,
+    params.l10n.taskDecompositionWhenLine1,
+    params.l10n.taskDecompositionWhenLine2,
+    params.l10n.taskDecompositionWhenLine3,
+    params.l10n.taskDecompositionWhenLine4,
+    "",
+    params.l10n.taskDecompositionHowTitle,
+    params.l10n.taskDecompositionHowLine1,
+    params.l10n.taskDecompositionHowLine2,
+    params.l10n.taskDecompositionHowLine3,
+    params.l10n.taskDecompositionHowLine4,
+    "",
+    params.l10n.taskDecompositionExampleTitle,
+    params.l10n.taskDecompositionExampleRequest,
+    params.l10n.taskDecompositionExampleDecomposition,
+    params.l10n.taskDecompositionExampleStep1,
+    params.l10n.taskDecompositionExampleStep2,
+    params.l10n.taskDecompositionExampleStep3,
+    params.l10n.taskDecompositionExampleStep4,
+    params.l10n.taskDecompositionExampleStep5,
+    params.l10n.taskDecompositionExampleReply,
+    "",
+    params.l10n.taskDecompositionRulesTitle,
+    params.l10n.taskDecompositionRulesLine1,
+    params.l10n.taskDecompositionRulesLine2,
+    params.l10n.taskDecompositionRulesLine3,
+    "",
+  ];
+}
+
 function buildSkillsSection(params: {
   skillsPrompt?: string;
   isMinimal: boolean;
@@ -364,6 +403,10 @@ export function buildAgentSystemPrompt(params: {
     readToolName,
     l10n,
   });
+  const taskDecompositionSection = buildTaskDecompositionSection({
+    isMinimal,
+    l10n,
+  });
   const memorySection = buildMemorySection({ isMinimal, availableTools, l10n });
   const docsSection = buildDocsSection({
     docsPath: params.docsPath,
@@ -451,6 +494,7 @@ export function buildAgentSystemPrompt(params: {
     l10n.cliQuickRefGatewayItems.join("\n"),
     l10n.cliQuickRefHelpHint,
     "",
+    ...taskDecompositionSection,
     ...skillsSection,
     ...memorySection,
     // Skip self-update for subagent/none modes

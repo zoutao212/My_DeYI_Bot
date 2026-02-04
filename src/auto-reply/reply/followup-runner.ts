@@ -27,6 +27,7 @@ import { incrementCompactionCount } from "./session-updates.js";
 import type { TypingController } from "./typing.js";
 import { createTypingSignaler } from "./typing-mode.js";
 import { setCurrentFollowupRunContext } from "../../agents/tools/enqueue-task-tool.js";
+import { getGlobalOrchestrator } from "../../agents/tools/enqueue-task-tool.js";
 
 export function createFollowupRunner(params: {
   opts?: GetReplyOptions;
@@ -122,6 +123,24 @@ export function createFollowupRunner(params: {
           verboseLevel: queued.run.verboseLevel,
         });
       }
+      
+      // 🔧 获取 Orchestrator 实例
+      const orchestrator = getGlobalOrchestrator();
+      const sessionId = queued.run.sessionId;
+      
+      // 🔧 尝试从任务树中找到对应的子任务
+      // 注意：只有通过 enqueue_task 创建的任务才会有对应的子任务
+      let taskTree = await orchestrator.loadTaskTree(sessionId);
+      let subTask = taskTree?.subTasks.find(
+        (task) => task.prompt === queued.prompt && task.status === "pending"
+      );
+      
+      // 🔧 如果找到了子任务，更新状态为 "active"
+      if (taskTree && subTask) {
+        console.log(`[followup-runner] 🔍 Found sub task in tree: ${subTask.id}`);
+        await orchestrator.saveTaskTree(taskTree);
+      }
+      
       let autoCompactionCompleted = false;
       let runResult: Awaited<ReturnType<typeof runEmbeddedPiAgent>>;
       let fallbackProvider = queued.run.provider;
@@ -186,9 +205,42 @@ export function createFollowupRunner(params: {
         runResult = fallbackResult.result;
         fallbackProvider = fallbackResult.provider;
         fallbackModel = fallbackResult.model;
+        
+        // 🔧 如果找到了子任务，更新状态为 "completed" 并保存输出
+        if (taskTree && subTask) {
+          const payloadArray = runResult.payloads ?? [];
+          const outputText = payloadArray.map((p) => p.text).filter(Boolean).join("\n");
+          subTask.output = outputText;
+          subTask.completedAt = Date.now();
+          subTask.status = "completed";
+          await orchestrator.saveTaskTree(taskTree);
+          console.log(`[followup-runner] ✅ Sub task completed: ${subTask.id}`);
+
+          // 🆕 添加进度提示
+          const completedCount = taskTree.subTasks.filter(t => t.status === "completed").length;
+          const totalCount = taskTree.subTasks.length;
+          const progressText = `\n\n📊 任务进度: ${completedCount}/${totalCount} 已完成`;
+          
+          // 将进度提示添加到最后一个回复中
+          if (payloadArray.length > 0) {
+            const lastPayload = payloadArray[payloadArray.length - 1];
+            if (lastPayload && lastPayload.text) {
+              lastPayload.text += progressText;
+            }
+          }
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         defaultRuntime.error?.(`Followup agent failed before reply: ${message}`);
+        
+        // 🔧 如果找到了子任务，更新状态为 "failed" 并保存错误信息
+        if (taskTree && subTask) {
+          subTask.error = message;
+          subTask.retryCount++;
+          await orchestrator.saveTaskTree(taskTree);
+          console.error(`[followup-runner] ❌ Sub task failed: ${subTask.id} - ${message}`);
+        }
+        
         return;
       }
 

@@ -9,6 +9,7 @@ import type { AnyAgentTool } from "./tools/common.js";
 import { createCronTool } from "./tools/cron-tool.js";
 import { createGatewayTool } from "./tools/gateway-tool.js";
 import { createEnqueueTaskTool } from "./tools/enqueue-task-tool.js";
+import { createShowTaskBoardTool } from "./tools/show-task-board-tool.js";
 import { createImageTool } from "./tools/image-tool.js";
 import { createMessageTool } from "./tools/message-tool.js";
 import { createNodesTool } from "./tools/nodes-tool.js";
@@ -94,6 +95,7 @@ export function createClawdbotTools(options?: {
       agentSessionKey: options?.agentSessionKey,
       config: options?.config,
     }),
+    createShowTaskBoardTool(),
     createMessageTool({
       agentAccountId: options?.agentAccountId,
       agentSessionKey: options?.agentSessionKey,

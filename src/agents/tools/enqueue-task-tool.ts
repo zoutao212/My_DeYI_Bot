@@ -5,6 +5,7 @@ import { enqueueFollowupRun, type FollowupRun } from "../../auto-reply/reply/que
 import { resolveQueueSettings } from "../../auto-reply/reply/queue/settings.js";
 import type { ClawdbotConfig } from "../../config/config.js";
 import type { SessionEntry } from "../../config/sessions.js";
+import { Orchestrator } from "../intelligent-task-decomposition/orchestrator.js";
 
 const EnqueueTaskSchema = Type.Object({
   prompt: Type.String({
@@ -32,6 +33,13 @@ type EnqueueTaskOptions = {
 let currentFollowupRunContext: FollowupRun | null = null;
 
 /**
+ * 全局 Orchestrator 实例
+ * 
+ * 用于管理任务树的持久化和恢复
+ */
+const globalOrchestrator = new Orchestrator();
+
+/**
  * 设置当前的 FollowupRun 上下文
  * 
  * 应该在 agent-runner 开始执行时调用。
@@ -47,6 +55,13 @@ export function setCurrentFollowupRunContext(followupRun: FollowupRun | null): v
  */
 export function getCurrentFollowupRunContext(): FollowupRun | null {
   return currentFollowupRunContext;
+}
+
+/**
+ * 获取全局 Orchestrator 实例
+ */
+export function getGlobalOrchestrator(): Orchestrator {
+  return globalOrchestrator;
 }
 
 /**
@@ -131,12 +146,32 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
       }
 
       try {
+        // 🔧 使用 Orchestrator 管理任务树
+        const sessionId = currentFollowupRun.run.sessionId;
+        
+        // 加载或初始化任务树
+        let taskTree = await globalOrchestrator.loadTaskTree(sessionId);
+        if (!taskTree) {
+          // 第一次调用 enqueue_task，初始化任务树
+          taskTree = await globalOrchestrator.initializeTaskTree(
+            currentFollowupRun.prompt, // 使用当前用户消息作为根任务
+            sessionId,
+          );
+          console.log(`[enqueue_task] ✅ Task tree initialized: sessionId=${sessionId}`);
+        }
+        
+        // 添加子任务到任务树
+        const subTask = await globalOrchestrator.addSubTask(taskTree, prompt, summary || prompt);
+        console.log(`[enqueue_task] ✅ Sub task added to tree: ${subTask.id} (${summary || "none"})`);
+        
         // 构建 FollowupRun
         const followupRun: FollowupRun = {
           prompt,
           summaryLine: summary,
           enqueuedAt: Date.now(),
           run: currentFollowupRun.run,
+          // 🔧 标记为队列任务，防止循环
+          isQueueTask: true,
         };
 
         // 解析队列设置
@@ -165,10 +200,33 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
           `[enqueue_task] ✅ Task enqueued: key=${agentSessionKey}, summary=${summary || "none"}`,
         );
 
+        // 🆕 生成任务看板摘要
+        const completedCount = taskTree.subTasks.filter(t => t.status === "completed").length;
+        const activeCount = taskTree.subTasks.filter(t => t.status === "active").length;
+        const pendingCount = taskTree.subTasks.filter(t => t.status === "pending").length;
+        const totalCount = taskTree.subTasks.length;
+        
+        const taskBoardSummary = `
+📋 任务看板
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 主任务: ${taskTree.rootTask}
+📝 子任务: ${totalCount} 个
+   ✅ 已完成: ${completedCount}
+   🔄 进行中: ${activeCount}
+   ⏳ 待执行: ${pendingCount}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💾 任务树保存位置: ~/.clawdbot/tasks/${sessionId}/TASK_TREE.json
+📊 查看任务看板: 使用 show_task_board 工具
+`.trim();
+
         return jsonResult({
           success: true,
-          message: `任务已加入队列${summary ? `：${summary}` : ""}`,
+          message: `任务已加入队列${summary ? `：${summary}` : ""}\n\n${taskBoardSummary}`,
           queueKey: agentSessionKey,
+          subTaskId: subTask.id,
+          taskBoardSummary,
+          taskTreePath: `~/.clawdbot/tasks/${sessionId}/TASK_TREE.json`,
         });
       } catch (err) {
         console.error(`[enqueue_task] ❌ Error:`, err);

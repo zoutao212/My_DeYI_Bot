@@ -36,6 +36,7 @@ import { resolveBlockStreamingCoalescing } from "./block-streaming.js";
 import { createFollowupRunner } from "./followup-runner.js";
 import { enqueueFollowupRun, scheduleFollowupDrain, type FollowupRun, type QueueSettings } from "./queue.js";
 import { setCurrentFollowupRunContext } from "../../agents/tools/enqueue-task-tool.js";
+import { getGlobalOrchestrator } from "../../agents/tools/enqueue-task-tool.js";
 import { createReplyToModeFilterForChannel, resolveReplyToMode } from "./reply-threading.js";
 import { persistSessionUsageUpdate } from "./session-usage.js";
 import { incrementCompactionCount } from "./session-updates.js";
@@ -210,6 +211,26 @@ export async function runReplyAgent(params: {
   }
 
   await typingSignals.signalRunStart();
+
+  // 🔧 检查是否有未完成的任务树需要恢复
+  const orchestrator = getGlobalOrchestrator();
+  const sessionId = followupRun.run.sessionId;
+  const hasUnfinished = await orchestrator.hasUnfinishedTasks(sessionId);
+  
+  if (hasUnfinished) {
+    console.log(`[agent-runner] 🔍 Found unfinished tasks for session: ${sessionId}`);
+    try {
+      const recoveredTaskTree = await orchestrator.recoverUnfinishedTasks(sessionId);
+      console.log(`[agent-runner] ✅ Task tree recovered: ${recoveredTaskTree.id}`);
+      
+      // 重新执行中断的任务
+      const interruptedTasks = await orchestrator.reexecuteInterruptedTasks(recoveredTaskTree);
+      console.log(`[agent-runner] ✅ Re-executed ${interruptedTasks.length} interrupted tasks`);
+    } catch (err) {
+      console.error(`[agent-runner] ❌ Failed to recover tasks:`, err);
+      // 继续执行，不阻塞用户消息
+    }
+  }
 
   // 🔧 设置全局上下文，让 enqueue_task 工具可以访问当前的 FollowupRun
   // isQueueTask = false 表示这不是队列任务（是用户直接发送的消息）

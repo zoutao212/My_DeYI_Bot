@@ -26,6 +26,35 @@ export type SystemPromptL10n = {
   enqueueTaskRulesExample2: string;
   enqueueTaskRulesExample2Correct: string;
   enqueueTaskRulesExample2Wrong: string;
+  taskDecompositionTitle: string;
+  taskDecompositionIntro: string;
+  taskDecompositionWhenTitle: string;
+  taskDecompositionWhenLine1: string;
+  taskDecompositionWhenLine2: string;
+  taskDecompositionWhenLine3: string;
+  taskDecompositionWhenLine4: string;
+  taskDecompositionHowTitle: string;
+  taskDecompositionHowLine1: string;
+  taskDecompositionHowLine2: string;
+  taskDecompositionHowLine3: string;
+  taskDecompositionHowLine4: string;
+  taskDecompositionExampleTitle: string;
+  taskDecompositionExampleRequest: string;
+  taskDecompositionExampleDecomposition: string;
+  taskDecompositionExampleStep1: string;
+  taskDecompositionExampleStep2: string;
+  taskDecompositionExampleStep3: string;
+  taskDecompositionExampleStep4: string;
+  taskDecompositionExampleStep5: string;
+  taskDecompositionExampleReply: string;
+  taskDecompositionRulesTitle: string;
+  taskDecompositionRulesLine1: string;
+  taskDecompositionRulesLine2: string;
+  taskDecompositionRulesLine3: string;
+  taskDecompositionStorageTitle: string;
+  taskDecompositionStorageLine1: string;
+  taskDecompositionStorageLine2: string;
+  taskDecompositionStorageLine3: string;
   toolParamsQuickRef: string;
   cliQuickRefTitle: string;
   cliQuickRefIntro: string;
@@ -141,6 +170,8 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
     canvas: "Control node canvases (present/hide/navigate/eval/snapshot/A2UI for automated UI)",
     nodes: "Control paired physical devices like phones/tablets (status/describe/pairing/notify/camera/screen/location/run)",
     cron: "Manage cron jobs and wake events",
+    enqueue_task: "Enqueue a task to be executed later (only use when user directly requests; do NOT call when executing queue tasks)",
+    show_task_board: "Display the task board for the current session, including all subtask statuses and progress",
     message: "Send messages and channel actions",
     gateway: "Restart, apply config, or run updates on the running Clawdbot process",
     agents_list: "List agent ids allowed for sessions_spawn",
@@ -192,6 +223,35 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
   enqueueTaskRulesExample2: "Queue task: \"Please generate the 1st piece of content\"",
   enqueueTaskRulesExample2Correct: "→ ✅ Correct: Generate the 1st piece of content directly",
   enqueueTaskRulesExample2Wrong: "→ ❌ Wrong: Call enqueue_task to generate more tasks",
+  taskDecompositionTitle: "## Task Decomposition",
+  taskDecompositionIntro: "When you receive a complex task, you should proactively decompose it into multiple subtasks.",
+  taskDecompositionWhenTitle: "### When should you decompose a task?",
+  taskDecompositionWhenLine1: "- ✅ Tasks involving large content generation (e.g., generating a 10,000-word article) → Decompose into multiple 2,000-word subtasks",
+  taskDecompositionWhenLine2: "- ✅ Tasks involving large data processing (e.g., summarizing a 1-million-word ebook) → Decompose into multiple chapter subtasks",
+  taskDecompositionWhenLine3: "- ✅ Tasks involving multiple steps (e.g., read file, analyze content, then generate report) → Decompose into multiple step subtasks",
+  taskDecompositionWhenLine4: "- ✅ Tasks requiring parallel processing of multiple files or data → Create a subtask for each file",
+  taskDecompositionHowTitle: "### How to decompose a task?",
+  taskDecompositionHowLine1: "1. **Analyze the task**: Understand the user's needs and identify key steps",
+  taskDecompositionHowLine2: "2. **Create subtasks**: Create a subtask for each step using the `enqueue_task` tool",
+  taskDecompositionHowLine3: "3. **Provide clear prompts**: Each subtask's prompt should be clear, specific, and executable",
+  taskDecompositionHowLine4: "4. **Provide brief summaries**: Each subtask's summary should briefly describe the task goal",
+  taskDecompositionExampleTitle: "### Example",
+  taskDecompositionExampleRequest: "**User request**: Please help me generate a 10,000-word science fiction novel",
+  taskDecompositionExampleDecomposition: "**Your decomposition**:",
+  taskDecompositionExampleStep1: "1. Call `enqueue_task`, prompt: \"Please generate words 1-2000 of the sci-fi novel, including opening and character introduction\", summary: \"Generate novel words 1-2000\"",
+  taskDecompositionExampleStep2: "2. Call `enqueue_task`, prompt: \"Please generate words 2001-4000 of the sci-fi novel, continuing story development\", summary: \"Generate novel words 2001-4000\"",
+  taskDecompositionExampleStep3: "3. Call `enqueue_task`, prompt: \"Please generate words 4001-6000 of the sci-fi novel, advancing the plot\", summary: \"Generate novel words 4001-6000\"",
+  taskDecompositionExampleStep4: "4. Call `enqueue_task`, prompt: \"Please generate words 6001-8000 of the sci-fi novel, entering the climax\", summary: \"Generate novel words 6001-8000\"",
+  taskDecompositionExampleStep5: "5. Call `enqueue_task`, prompt: \"Please generate words 8001-10000 of the sci-fi novel, completing the ending\", summary: \"Generate novel words 8001-10000\"",
+  taskDecompositionExampleReply: "6. Reply to user with confirmation",
+  taskDecompositionRulesTitle: "### Important Rules",
+  taskDecompositionRulesLine1: "- ❌ **Do NOT call `enqueue_task` when executing queue tasks**: If you are executing a queue task, do not call `enqueue_task` to create new tasks, as this will cause an infinite loop",
+  taskDecompositionRulesLine2: "- ❌ **Do NOT repeat the same tool calls**: If you find yourself repeating the same tool calls, stop and think if there's a better approach",
+  taskDecompositionRulesLine3: "- ✅ **Check task completion**: After each subtask completes, check if the output meets expectations; if not, you can create supplementary tasks",
+  taskDecompositionStorageTitle: "### Task Tree Storage Location",
+  taskDecompositionStorageLine1: "- Task trees are automatically saved to: `~/.clawdbot/tasks/{sessionId}/TASK_TREE.json`",
+  taskDecompositionStorageLine2: "- You can use the `show_task_board` tool to view a visual representation of the task tree",
+  taskDecompositionStorageLine3: "- The system automatically creates checkpoints to support recovery from interruptions",
   toolParamsQuickRef: `## Core Tool Parameters
 - **write(path, content)**: path=file path, content=full content. Example: write({ path: "test.txt", content: "hello" })
 - **edit(path, oldText, newText)**: path=file path, oldText=exact text to replace, newText=replacement text
