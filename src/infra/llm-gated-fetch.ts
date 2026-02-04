@@ -269,6 +269,20 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
     input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> {
+    // 添加 30 秒超时
+    const TIMEOUT_MS = 30000; // 30 秒
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      console.warn(`[llm-gated-fetch] ⚠️ LLM 请求超时（${TIMEOUT_MS}ms），正在中断请求...`);
+      controller.abort();
+    }, TIMEOUT_MS);
+    
+    // 合并 AbortSignal
+    const originalSignal = init?.signal;
+    const combinedSignal = originalSignal 
+      ? AbortSignal.any([originalSignal, controller.signal])
+      : controller.signal;
+    
     // 修复 payload 中的格式问题（在发送前修复）
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const isVectorengine = url.includes("vectorengine");
@@ -502,7 +516,10 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
     }
     
     try {
-      const response = await original(input, init);
+      const response = await original(input, { ...init, signal: combinedSignal });
+      
+      // 清除超时定时器
+      clearTimeout(timeoutId);
       
       // 请求成功（HTTP 状态码 2xx），清除失败计数
       if (response.ok) {
@@ -523,6 +540,40 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       
       return response;
     } catch (error) {
+      // 清除超时定时器
+      clearTimeout(timeoutId);
+      
+      // 检查是否是超时错误
+      const isTimeout = error && typeof error === "object" && "name" in error && error.name === "AbortError";
+      
+      if (isTimeout) {
+        console.error(`[llm-gated-fetch] ❌ LLM 请求超时（${TIMEOUT_MS}ms），正在重试...`);
+        
+        // 增加失败计数
+        const now = Date.now();
+        const current = attempts.get(attemptKey);
+        if (!current) {
+          attempts.set(attemptKey, { firstAtMs: now, failureCount: 1 });
+        } else {
+          attempts.set(attemptKey, { 
+            firstAtMs: current.firstAtMs, 
+            failureCount: current.failureCount + 1 
+          });
+        }
+        
+        // 检查是否超过重试次数
+        const currentAttempt = attempts.get(attemptKey);
+        if (currentAttempt && currentAttempt.failureCount > MAX_ATTEMPTS_PER_KEY) {
+          console.error(`[llm-gated-fetch] ❌ 已超过最大重试次数（${MAX_ATTEMPTS_PER_KEY}），放弃重试`);
+          throw new Error(`LLM_REQUEST_TIMEOUT: 请求超时（${TIMEOUT_MS}ms）且已超过最大重试次数`);
+        }
+        
+        // 重试
+        console.warn(`[llm-gated-fetch] 🔄 正在重试 LLM 请求（第 ${currentAttempt?.failureCount || 1} 次失败后重试）...`);
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+        return executeRequestWithRetry(attemptKey, input, init);
+      }
+      
       // 请求异常（网络错误等），增加失败计数
       const now = Date.now();
       const current = attempts.get(attemptKey);
