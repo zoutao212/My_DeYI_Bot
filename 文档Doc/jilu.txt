@@ -1,0 +1,217 @@
+找到了！问题的根源！
+
+用户消息使用的是 OpenAI 格式（content 数组），但其他消息使用的是 Gemini 格式（parts 数组）！
+
+格式混乱：
+
+用户消息：{ role: "user", content: [{ type: "text", text: "..." }] }（OpenAI 格式）
+AI 回复：{ role: "model", parts: [{ text: "...", thoughtSignature: "..." }] }（Gemini 格式）
+工具调用：{ role: "model", parts: [{ functionCall: {...}, thoughtSignature: "..." }] }（Gemini 格式）
+工具结果：{ role: "user", parts: [{ functionResponse: {...} }] }（Gemini 格式）
+这就是为什么 LLM 会"迷失"！
+
+LLM 看到的对话历史是：
+
+用户消息（OpenAI 格式）
+AI 回复（Gemini 格式，包含 thoughtSignature）
+工具调用（Gemini 格式，包含 thoughtSignature）
+工具结果（Gemini 格式）
+用户消息（OpenAI 格式）
+...
+LLM 无法理解这种混合格式！
+
+你说得对！问题不是"会话初始化"，而是"对话历史的格式混乱"！
+
+系统在构建对话历史时：
+
+用户消息使用 OpenAI 格式
+其他消息使用 Gemini 格式
+没有统一的格式
+解决方案：
+
+统一格式：所有消息都使用同一种格式（OpenAI 或 Gemini）
+移除 thoughtSignature：不要把 thinking ID 保存到对话历史中
+明确标记：每条消息都应该明确标记它的类型（用户消息、AI 回复、工具调用、工具结果）
+让我检查格式转换的代码：
+
+Searched workspace
+搜索格式转换相关的代码，找到 OpenAI 和 Gemini 格式转换的位置
+找到了！payload-validator.ts 中有格式检查，但没有格式转换。让我检查 session-tool-result-guard.ts，看看它是如何处理格式的：
+
+Read file(s)
+
+session-tool-result-guard.ts 1 - 101
+让我继续阅读这个文件，看看它如何处理格式转换：
+
+Read file(s)
+
+session-tool-result-guard.ts 100 - 251
+找到了！问题的根源！
+
+代码中有一个 convertGeminiToOpenAIFormat 函数被导入了，但从未使用！
+
+这说明：
+
+系统本来应该把 Gemini 格式转换为 OpenAI 格式
+但这个转换从未被执行
+导致对话历史中混合了两种格式
+让我检查 convertGeminiToOpenAIFormat 函数：
+
+Searched workspace
+搜索 convertGeminiToOpenAIFormat 函数的定义和使用
+函数被导入了但从未使用！让我检查这个函数的实现：
+
+Read file(s)
+
+gemini-payload-thought-signature.ts 100 - 201
+找到了！解决方案！
+
+convertGeminiToOpenAIFormat 函数已经实现了，但从未被调用！
+
+这个函数的作用是：
+
+将 role: "model" 转换为 role: "assistant"
+将 parts 转换为 content
+将 functionCall 转换为 tool_calls
+将 functionResponse 转换为 tool 消息
+修复方案：
+
+在 session-tool-result-guard.ts 中，保存消息到 session 之前，调用 convertGeminiToOpenAIFormat 进行格式转换！
+
+让我修改代码：
+
+Accepted edits to
+
+session-tool-result-guard.ts
+
+
+现在让我在保存消息之前添加格式转换：
+
+Read file(s)
+
+session-tool-result-guard.ts 250 - 351
+找到了保存消息的位置！现在让我在保存之前添加格式转换：
+
+Accepted edits to
+
+session-tool-result-guard.ts
+
+
+等等，我需要重新思考这个问题。让我先检查一下，用户消息是如何被保存的：
+
+Searched workspace
+搜索用户消息的保存逻辑，看看是谁把用户消息保存为 OpenAI 格式的
+这些都是测试代码。让我检查真正的用户消息是如何被添加到 session 的：
+
+Searched workspace
+搜索 appendMessage 的调用，看看用户消息是如何被添加的
+让我换个方式搜索：
+
+Searched workspace
+搜索 session 中用户消息的添加逻辑
+我需要找到用户消息是如何被添加到 session 的。让我检查 pi-embedded-runner 的代码：
+
+Searched workspace
+搜索用户消息的处理逻辑
+让我直接检查 
+attempt.ts
+，看看用户消息是如何被处理的：
+
+Searched workspace
+搜索 prompt 参数的处理，看看用户消息是如何被添加到 session 的
+让我搜索 effectivePrompt 是如何被使用的：
+
+Searched workspace
+搜索 effectivePrompt 的使用，看看它是如何被添加到 session 的
+找到了！activeSession.prompt(effectivePrompt) 是添加用户消息的地方！
+
+这是 pi-coding-agent 库的方法，它会把用户消息添加到 session 中。
+
+问题的根源：
+
+pi-coding-agent 库使用 OpenAI 格式保存用户消息
+但 LLM 返回的是 Gemini 格式（包含 parts、functionCall、thoughtSignature）
+系统没有统一格式，导致对话历史混合了两种格式
+解决方案：
+
+在保存 LLM 返回的消息之前，将 Gemini 格式转换为 OpenAI 格式！
+
+让我修改 session-tool-result-guard.ts，在保存消息之前进行格式转换：
+
+Accepted edits to
+
+session-tool-result-guard.ts
+
+
+等等，我需要重新思考。让我先检查一下，convertGeminiToOpenAIFormat 是否应该在这里使用。
+
+让我检查 vectorengine provider 的配置，看看它是否需要 Gemini 格式：
+
+Searched workspace
+搜索 vectorengine provider 的配置和格式要求
+找到了！问题的根源！
+
+vectorengine provider 使用 Gemini 格式！
+
+代码中有明确的注释：
+
+vectorengine uses OpenAI endpoint (/v1/chat/completions) but expects Gemini payload format
+vectorengine saves tool results in Gemini format, not OpenAI format
+所以问题不是"格式混乱"，而是"用户消息使用 OpenAI 格式，但 LLM 返回的消息使用 Gemini 格式"！
+
+解决方案：
+
+在保存用户消息时，也将其转换为 Gemini 格式！
+
+但等等，用户消息是由 pi-coding-agent 库添加的，我们无法控制它的格式。
+
+真正的解决方案：
+
+在读取 session 时，将所有消息统一转换为 Gemini 格式！
+
+让我检查 buildSessionContext 函数，看看它是如何读取 session 的：
+
+Searched workspace
+搜索 buildSessionContext 函数，看看它如何读取和处理 session 消息
+找到了！buildSessionContext 是读取 session 消息的地方！
+
+现在我明白了问题的根源：
+
+用户消息使用 OpenAI 格式（content 数组）
+LLM 返回的消息使用 Gemini 格式（parts 数组）
+buildSessionContext 返回的消息混合了两种格式
+这些混合格式的消息被发送给 LLM
+LLM 无法理解混合格式，导致行为异常
+解决方案：
+
+在 buildSessionContext 返回消息之前，将所有消息统一转换为 Gemini 格式！
+
+但是，代码中已经有一个 convertOpenAIToGeminiFormat 函数，它应该在发送给 API 之前进行转换。
+
+让我检查这个函数是否被正确调用：
+
+Read file(s)
+
+gemini-payload-thought-signature.ts 200 - 301
+好的，convertOpenAIToGeminiFormat 函数已经实现了，它会：
+
+将 OpenAI 格式的 assistant 消息转换为 Gemini 格式的 model 消息
+将 OpenAI 格式的 tool 消息转换为 Gemini 格式的 user 消息（包含 functionResponse）
+保持已经是 Gemini 格式的消息不变
+问题：这个函数在哪里被调用？
+
+让我检查它的调用位置：
+
+Read file(s)
+
+gemini-payload-thought-signature.ts 1060 - 1101
+找到了！
+
+convertOpenAIToGeminiFormat 在发送请求给 API 之前被调用（在 nextOnPayload 中）！
+
+这意味着：
+
+Session 中保存的消息是混合格式（用户消息是 OpenAI 格式，LLM 返回的消息是 Gemini 格式）
+在发送给 API 之前，所有消息被转换为 Gemini 格式
+但是，用户消息的转换可能有问题！
+让我检查 convertOpenAIToGeminiFormat 如何处理用户消息：

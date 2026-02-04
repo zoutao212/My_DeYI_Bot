@@ -140,6 +140,8 @@ export type AgentDefaultsConfig = {
   verboseDefault?: "off" | "on" | "full";
   /** Default elevated level when no /elevated directive is present. */
   elevatedDefault?: "off" | "on" | "ask" | "full";
+  /** 是否显示 LLM 运行进度提示（默认 true）*/
+  showLlmProgress?: boolean;
   /** Default block streaming level when no override is present. */
   blockStreamingDefault?: "off" | "on";
   /**

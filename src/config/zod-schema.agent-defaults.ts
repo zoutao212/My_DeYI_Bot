@@ -117,6 +117,8 @@ export const AgentDefaultsSchema = z
     elevatedDefault: z
       .union([z.literal("off"), z.literal("on"), z.literal("ask"), z.literal("full")])
       .optional(),
+    /** 是否显示 LLM 运行进度提示（默认 true）*/
+    showLlmProgress: z.boolean().optional(),
     blockStreamingDefault: z.union([z.literal("off"), z.literal("on")]).optional(),
     blockStreamingBreak: z.union([z.literal("text_end"), z.literal("message_end")]).optional(),
     blockStreamingChunk: BlockStreamingChunkSchema.optional(),

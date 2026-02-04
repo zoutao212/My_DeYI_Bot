@@ -115,7 +115,11 @@ function isAsyncIterable<T = unknown>(value: unknown): value is AsyncIterable<T>
 async function injectLlmProgress(params: {
   sessionKey?: string;
   message: string;
+  enabled?: boolean;  // 新增：是否启用进度提示
 }) {
+  // 如果明确禁用，直接返回
+  if (params.enabled === false) return;
+  
   const sessionKey = params.sessionKey?.trim();
   if (!sessionKey) return;
   try {
@@ -142,6 +146,7 @@ export function createLlmCallConsoleLogger(params: {
   provider?: string;
   modelId?: string;
   modelApi?: string | null;
+  showLlmProgress?: boolean;  // 新增：是否显示 LLM 进度提示
 }): LlmCallConsoleLogger | null {
   const env = params.env ?? process.env;
   const enabled = parseBooleanValue(env.CLAWDBOT_LLM_CALL_CONSOLE_LOG);
@@ -155,6 +160,9 @@ export function createLlmCallConsoleLogger(params: {
     modelId: params.modelId,
     modelApi: params.modelApi,
   };
+  
+  // 默认显示进度提示，除非明确设置为 false
+  const showProgress = params.showLlmProgress !== false;
 
   let seq = 0;
 
@@ -237,6 +245,7 @@ export function createLlmCallConsoleLogger(params: {
           void injectLlmProgress({
             sessionKey: base.sessionKey,
             message: `→ seq=${callSeq} model=${modelTag} api=${apiTag} bytes=${payloadBytes} runId=${base.runId ?? ""}`,
+            enabled: showProgress,
           });
 
           void appendRuntimeTrace({
@@ -295,6 +304,7 @@ export function createLlmCallConsoleLogger(params: {
         void injectLlmProgress({
           sessionKey: base.sessionKey,
           message: `[LLM] ${infoMsg}`,
+          enabled: showProgress,
         });
 
         void appendRuntimeTrace({
@@ -323,6 +333,7 @@ export function createLlmCallConsoleLogger(params: {
         void injectLlmProgress({
           sessionKey: base.sessionKey,
           message: `[LLM] ❌ 失败 · 耗时 ${(durationMs / 1000).toFixed(1)}s · ${shortError}`,
+          enabled: showProgress,
         });
 
         void appendRuntimeTrace({

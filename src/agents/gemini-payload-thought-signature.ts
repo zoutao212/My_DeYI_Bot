@@ -500,6 +500,20 @@ function convertOpenAIToGeminiFormat(messages: unknown[], options?: {
         );
       }
 
+      // 🆕 Fix: 如果是历史消息，转换为文本描述
+      if (markHistory) {
+        const resultText = typeof response === "object" && response !== null
+          ? JSON.stringify(response, null, 2)
+          : String(response);
+        
+        log.debug(`[format] Converted tool result to text description (history): ${name}`);
+        return {
+          role: "user",
+          parts: [{ text: `[工具执行结果] ${name}:\n${resultText}` }],
+        };
+      }
+
+      // 当前消息：保留完整的 functionResponse 格式
       return {
         role: "user", // Gemini 格式中，工具结果的 role 是 "user"
         parts: [
@@ -1207,8 +1221,34 @@ export function createGeminiPayloadThoughtSignaturePatcher(params: {
             
             if (Array.isArray(messages)) {
               log.info(`[format] Converting OpenAI format to Gemini format for vectorengine (${messages.length} messages)`);
-              payloadObj.messages = convertOpenAIToGeminiFormat(messages);
-              log.info(`[format] ✓ Converted to Gemini format (role: assistant → model, tool_calls → functionCall)`);
+              
+              // 🆕 Fix: 区分历史消息和当前消息
+              // 最后一条用户消息是"当前消息"，之前的都是"历史消息"
+              // 历史消息中的 tool call 会被转换为文本描述，避免 LLM 重复执行
+              
+              // 找到最后一条用户消息的索引（兼容 ES2022）
+              let lastUserIndex = -1;
+              for (let i = messages.length - 1; i >= 0; i--) {
+                const msg = messages[i] as any;
+                if (msg?.role === "user") {
+                  lastUserIndex = i;
+                  break;
+                }
+              }
+              
+              const convertedMessages = messages.map((msg, index) => {
+                // 判断是否是历史消息
+                // 如果当前消息在最后一条用户消息之前，则是历史消息
+                const isHistory = index < lastUserIndex;
+                
+                // 转换消息
+                return convertOpenAIToGeminiFormat([msg], {
+                  markHistoryToolCalls: isHistory,  // 历史消息标记 tool call
+                })[0];
+              });
+              
+              payloadObj.messages = convertedMessages;
+              log.info(`[format] ✓ Converted to Gemini format (history tool calls marked as text, current tool calls preserved)`);
             }
           }
         }
