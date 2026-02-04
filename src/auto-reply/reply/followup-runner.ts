@@ -321,6 +321,21 @@ export function createFollowupRunner(params: {
 
       await sendFollowupPayloads(finalPayloads, queued);
 
+      // 🆕 自动发送任务看板（单独的消息）
+      // 只有当存在任务树且有子任务时才发送
+      if (taskTree && taskTree.subTasks.length > 0) {
+        const { renderTaskBoardToMarkdown } = await import("../../agents/tools/show-task-board-tool.js");
+        const taskBoardMarkdown = renderTaskBoardToMarkdown(taskTree);
+        
+        // 在单独的消息中发送任务看板
+        const taskBoardPayload: ReplyPayload = {
+          text: taskBoardMarkdown,
+        };
+        
+        await sendFollowupPayloads([taskBoardPayload], queued);
+        console.log(`[followup-runner] 📋 Task board sent for session: ${sessionId}`);
+      }
+
       // 🆕 触发队列继续执行下一个任务
       if (queued.run.sessionKey) {
         const queueKey = queued.run.sessionKey;

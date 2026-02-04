@@ -48,6 +48,9 @@
 | `25_测试期望值更新方法论.md` | 测试、期望值更新、行为改变 | 测试、期望值、行为改变、降级策略 |
 | `79_历史消息Tool_Call重复执行问题.md` | 历史消息、Tool Call、重复执行、格式转换 | 历史消息、tool call、重复执行、格式转换、伪代码化、OpenAI 兼容 API、Gemini 格式、vectorengine |
 | `80_状态标志生命周期陷阱.md` | 状态标志、生命周期、全局变量 | 状态标志、生命周期、全局变量、isActive、队列任务 |
+| `85_启动脚本健康检查设计原则.md` | 启动脚本、健康检查、超时设计 | 启动脚本、健康检查、超时、进度反馈、错误处理、服务初始化、Gateway |
+| `84_工具返回值格式设计原则.md` | 工具返回值、格式化内容、前端渲染 | 工具返回值、格式化内容、Markdown、前端渲染、content 字段、text 字段、jsonResult、extractToolText |
+| `86_系统自动化与LLM主动调用的权衡.md` | 系统自动化、LLM 主动调用、设计权衡 | 系统自动化、LLM 主动调用、工具描述、约束、可靠性、灵活性、任务看板、进度提示 |
 | `81_LLM主动生成连续任务实现方法.md` | LLM 连续任务、enqueue_task、队列机制 | LLM、连续任务、enqueue_task、队列、followup |
 | `82_LLM工具调用循环检测模式.md` | LLM 循环检测、工具调用、isQueueTask | LLM、循环检测、工具调用、isQueueTask、队列任务 |
 | `83_Hook副作用检测模式.md` | Hook 副作用、消息类型、队列任务 | Hook、副作用、消息类型、队列任务、collect 模式、prependContext |

@@ -1,6 +1,5 @@
 import { Type } from "@sinclair/typebox";
 import type { AnyAgentTool } from "./common.js";
-import { jsonResult } from "./common.js";
 import { getCurrentFollowupRunContext, getGlobalOrchestrator } from "./enqueue-task-tool.js";
 
 /**
@@ -12,15 +11,25 @@ export function createShowTaskBoardTool(): AnyAgentTool {
   return {
     label: "Show Task Board",
     name: "show_task_board",
-    description: "显示当前会话的任务看板，包括所有子任务的状态和进度",
+    description: `显示当前会话的任务看板，包括所有子任务的状态和进度。
+
+⚠️ **重要规则**：
+- 系统会在每次完成子任务后**自动发送任务看板**（单独的消息）
+- 你**不需要主动调用**这个工具
+- **只有**在以下情况下才调用这个工具：
+  1. 用户明确要求"显示任务看板"、"查看任务进度"等
+  2. 用户要求"一起发送任务看板和结果"
+  3. 用户要求"独立显示任务看板"
+
+如果用户没有明确要求，请不要调用这个工具，系统会自动发送。`,
     parameters: Type.Object({}),
     execute: async (_toolCallId, _args) => {
       const currentFollowupRun = getCurrentFollowupRunContext();
       if (!currentFollowupRun) {
-        return jsonResult({
-          success: false,
-          error: "无法获取当前会话上下文",
-        });
+        return {
+          content: [{ type: "text", text: "❌ 无法获取当前会话上下文" }],
+          details: { success: false },
+        };
       }
 
       const orchestrator = getGlobalOrchestrator();
@@ -28,27 +37,34 @@ export function createShowTaskBoardTool(): AnyAgentTool {
       const taskTree = await orchestrator.loadTaskTree(sessionId);
 
       if (!taskTree) {
-        return jsonResult({
-          success: false,
-          error: "当前会话没有任务树（可能还没有使用 enqueue_task 工具创建任务）",
-        });
+        return {
+          content: [{ type: "text", text: "❌ 当前会话没有任务树（可能还没有使用 enqueue_task 工具创建任务）" }],
+          details: { success: false },
+        };
       }
 
       // 渲染任务看板
       const markdown = renderTaskBoardToMarkdown(taskTree);
 
-      return jsonResult({
-        success: true,
-        taskBoard: markdown,
-      });
+      // 直接返回 Markdown 文本，而不是包装在 JSON 中
+      // 这样前端可以直接渲染为 Markdown
+      return {
+        content: [{ type: "text", text: markdown }],
+        details: {
+          success: true,
+          taskCount: taskTree.subTasks.length,
+        },
+      };
     },
   };
 }
 
 /**
  * 渲染任务看板为 Markdown
+ * 
+ * @export 导出供 followup-runner 使用
  */
-function renderTaskBoardToMarkdown(taskTree: any): string {
+export function renderTaskBoardToMarkdown(taskTree: any): string {
   const lines: string[] = [];
 
   lines.push(`# 📋 任务看板`);

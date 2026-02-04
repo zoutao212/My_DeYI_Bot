@@ -77,9 +77,12 @@
 | **字段保留失败** | `.kiro/lessons-learned/66_字段保留原则.md` |
 | **字段在数据流中丢失** | `.kiro/lessons-learned/67_字段在数据流中丢失的调试方法论.md` |
 | **构建系统 .buildstamp 陷阱** | `.kiro/lessons-learned/68_构建系统buildstamp陷阱.md` |
+| **工具返回值格式设计** | `.kiro/lessons-learned/84_工具返回值格式设计原则.md` |
+| **系统自动化与 LLM 主动调用权衡** | `.kiro/lessons-learned/86_系统自动化与LLM主动调用的权衡.md` |
 
 | **LLM 主动生成连续任务** | `.kiro/lessons-learned/81_LLM主动生成连续任务实现方法.md` |
 | **LLM 工具调用循环检测** | `.kiro/lessons-learned/82_LLM工具调用循环检测模式.md` |
+| **启动脚本健康检查** | `.kiro/lessons-learned/85_启动脚本健康检查设计原则.md` |
 
 clawdbot 实际的 系统日志在 C:\Users\zouta\.clawdbot\runtimelog
 clawdbot 对话内容在 C:\Users\zouta\.clawdbot\agents\main\sessions
@@ -258,3 +261,10 @@ grepSearch -query "关键词" -includePattern ".kiro/lessons-learned/**/*.md"
 **版本：** v20260203_2  
 **最后更新：** 2026-02-03  
 **变更：** 新增"LLM 行为异常的完整调试流程"（14 次修复失败的深刻反思：必须看 LLM 的 thinking，检查系统提示词措辞，追踪完整数据流）
+
+
+---
+
+**版本：** v20260204_2  
+**最后更新：** 2026-02-04  
+**变更：** 新增"启动脚本健康检查设计原则"（当启动脚本健康检查超时时的设计原则：合理的超时时间、清晰的进度反馈、友好的错误处理）

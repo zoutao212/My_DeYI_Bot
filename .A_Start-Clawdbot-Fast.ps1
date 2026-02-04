@@ -103,29 +103,42 @@ try {
     Write-Host "[Start-Clawdbot] Starting Clawdbot Gateway..." -ForegroundColor Green
     Write-Host "[Start-Clawdbot] Opening a new window for gateway logs..." -ForegroundColor Gray
     
+    # 直接使用 node 运行 dist/entry.js，跳过 pnpm run clawdbot 的自动构建检测
     Start-Process powershell -ArgumentList @(
         "-NoExit",
         "-Command",
-        "cd '$RepoDir'; pnpm run clawdbot gateway run --bind loopback --port 18789 --force"
+        "cd '$RepoDir'; node dist/entry.js gateway run --bind loopback --port 18789 --force"
     )
     
     # 等待 Gateway 健康检查
     Write-Host "[Start-Clawdbot] Waiting for gateway health..." -ForegroundColor Cyan
+    Write-Host "[Start-Clawdbot] Gateway needs time to initialize (Telegram, plugins, etc.)..." -ForegroundColor Gray
     $healthy = $false
-    for ($i = 1; $i -le 15; $i++) {
+    for ($i = 1; $i -le 30; $i++) {
         Start-Sleep -Seconds 1
-        & pnpm run clawdbot gateway health --bind loopback --port 18789 2>&1 | Out-Null
+        Write-Host "." -NoNewline -ForegroundColor Gray
+        # 直接使用 node 运行 dist/entry.js，跳过 pnpm run clawdbot 的自动构建检测
+        $healthOutput = & node dist/entry.js gateway health --bind loopback --port 18789 2>&1
         if ($LASTEXITCODE -eq 0) {
             $healthy = $true
+            Write-Host ""
             break
         }
     }
+    Write-Host ""
     
     if ($healthy) {
         Write-Host "[Start-Clawdbot] Gateway is healthy!" -ForegroundColor Green
+        Write-Host "[Start-Clawdbot] Gateway is running in the other window." -ForegroundColor Gray
         Write-Host "[Start-Clawdbot] This window will close in 10 seconds..." -ForegroundColor Gray
         Start-Sleep -Seconds 10
+    } else {
+        Write-Host "[Start-Clawdbot] Gateway health check timed out after 30 seconds." -ForegroundColor Yellow
+        Write-Host "[Start-Clawdbot] Gateway may still be starting. Check the other window for details." -ForegroundColor Yellow
+        Write-Host "[Start-Clawdbot] Press any key to continue..." -ForegroundColor Gray
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
     }
+
     else {
         Write-Host "[Start-Clawdbot] ERROR: Gateway did not become healthy" -ForegroundColor Red
         Write-Host "[Start-Clawdbot] Check the Gateway window for errors" -ForegroundColor Yellow
