@@ -1301,10 +1301,42 @@ export const chatHandlers: GatewayRequestHandlers = {
           context.logGateway.warn(`webchat dispatch failed: ${formatForLog(err)}`);
         },
         deliver: async (payload, info) => {
-          if (info.kind !== "final") return;
           const text = payload.text?.trim() ?? "";
           if (!text) return;
-          finalReplyParts.push(text);
+          
+          // 🆕 处理 block 消息（例如任务看板）
+          if (info.kind === "block") {
+            // 将消息追加到 transcript
+            const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(p.sessionKey);
+            const sessionId = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
+            const appended = appendAssistantTranscriptMessage({
+              message: text,
+              sessionId,
+              storePath: latestStorePath,
+              sessionFile: latestEntry?.sessionFile,
+              createIfMissing: true,
+            });
+            
+            // 广播到 Web UI
+            if (appended.ok && appended.message) {
+              const seq = nextChatSeq({ agentRunSeq: context.agentRunSeq }, clientRunId);
+              const chatPayload = {
+                runId: clientRunId,
+                sessionKey: p.sessionKey,
+                seq,
+                state: "final" as const,
+                message: appended.message,
+              };
+              context.broadcast("chat", chatPayload);
+              context.nodeSendToSession(p.sessionKey, "chat", chatPayload);
+            }
+            return;
+          }
+          
+          // 处理 final 消息
+          if (info.kind === "final") {
+            finalReplyParts.push(text);
+          }
         },
       });
 

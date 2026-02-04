@@ -215,19 +215,8 @@ export function createFollowupRunner(params: {
           subTask.status = "completed";
           await orchestrator.saveTaskTree(taskTree);
           console.log(`[followup-runner] ✅ Sub task completed: ${subTask.id}`);
-
-          // 🆕 添加进度提示
-          const completedCount = taskTree.subTasks.filter(t => t.status === "completed").length;
-          const totalCount = taskTree.subTasks.length;
-          const progressText = `\n\n📊 任务进度: ${completedCount}/${totalCount} 已完成`;
           
-          // 将进度提示添加到最后一个回复中
-          if (payloadArray.length > 0) {
-            const lastPayload = payloadArray[payloadArray.length - 1];
-            if (lastPayload && lastPayload.text) {
-              lastPayload.text += progressText;
-            }
-          }
+          // 注意：不在这里添加进度提示，而是在后面单独发送简化的进度消息
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -321,19 +310,31 @@ export function createFollowupRunner(params: {
 
       await sendFollowupPayloads(finalPayloads, queued);
 
-      // 🆕 自动发送任务看板（单独的消息）
+      // 🆕 自动发送简化的任务进度（单独的消息）
+      console.log(`[followup-runner] 🔍 Checking task board: sessionId=${sessionId}, orchestrator=${!!orchestrator}`);
+      
+      // 重新加载任务树以获取最新状态
+      taskTree = await orchestrator.loadTaskTree(sessionId);
+      console.log(`[followup-runner] 🔍 Task tree loaded: exists=${!!taskTree}, subTasks=${taskTree?.subTasks?.length || 0}`);
+      
       // 只有当存在任务树且有子任务时才发送
       if (taskTree && taskTree.subTasks.length > 0) {
-        const { renderTaskBoardToMarkdown } = await import("../../agents/tools/show-task-board-tool.js");
-        const taskBoardMarkdown = renderTaskBoardToMarkdown(taskTree);
+        // 🆕 生成简化的进度提示（而不是完整的任务看板）
+        const completedCount = taskTree.subTasks.filter(t => t.status === "completed").length;
+        const totalCount = taskTree.subTasks.length;
+        const progressPercent = Math.round((completedCount / totalCount) * 100);
         
-        // 在单独的消息中发送任务看板
-        const taskBoardPayload: ReplyPayload = {
-          text: taskBoardMarkdown,
+        const simplifiedProgress = `📊 任务进度: ${completedCount}/${totalCount} 已完成 (${progressPercent}%)\n\n💡 提示：使用 show_task_board 工具查看完整任务看板`;
+        
+        // 在单独的消息中发送简化的进度
+        const progressPayload: ReplyPayload = {
+          text: simplifiedProgress,
         };
         
-        await sendFollowupPayloads([taskBoardPayload], queued);
-        console.log(`[followup-runner] 📋 Task board sent for session: ${sessionId}`);
+        await sendFollowupPayloads([progressPayload], queued);
+        console.log(`[followup-runner] 📋 Task progress sent for session: ${sessionId} (${completedCount}/${totalCount})`);
+      } else {
+        console.log(`[followup-runner] ⚠️ Task progress not sent: taskTree=${!!taskTree}, subTasks=${taskTree?.subTasks?.length || 0}`);
       }
 
       // 🆕 触发队列继续执行下一个任务

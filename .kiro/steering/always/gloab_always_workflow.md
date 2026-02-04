@@ -289,6 +289,56 @@ $newContent = $content -replace 'old', 'new'
 - 标题变化：`<title>xxx v3</title>`
 - 这样可以快速判断修改是否生效
 
+### 7.6 脚本文件语法验证 ⚠️ 重要
+
+**核心原则：修改脚本文件后，必须验证语法**
+
+**为什么需要？**
+- 脚本语言（PowerShell、Bash、Python 等）的语法错误只有运行时才会发现
+- 用户运行时才发现错误，浪费时间
+- 特别是在多次修改同一文件时容易出错
+
+**验证方法：**
+
+#### PowerShell 脚本
+```powershell
+# 方法 1：语法检查（推荐）
+powershell -NoProfile -Command "& { Get-Content 'script.ps1' | Out-Null; Write-Host 'Syntax OK' }"
+
+# 方法 2：使用 PSScriptAnalyzer（如果安装）
+Invoke-ScriptAnalyzer -Path 'script.ps1' -Severity Error
+```
+
+#### Bash 脚本
+```bash
+# 语法检查
+bash -n script.sh
+
+# 或使用 shellcheck（如果安装）
+shellcheck script.sh
+```
+
+#### Python 脚本
+```bash
+# 语法检查
+python -m py_compile script.py
+
+# 或使用 pylint（如果安装）
+pylint script.py
+```
+
+**何时验证？**
+- 每次修改脚本文件后
+- 特别是修改了控制流（if/else/for/while）
+- 特别是修改了函数定义或调用
+- 在提交给用户之前
+
+**常见错误：**
+- 重复的 `else` 块
+- 缺少闭合的括号或引号
+- 缩进错误（Python）
+- 变量名拼写错误
+
 
 ---
 
@@ -484,6 +534,7 @@ return manualApproveBehavior;
 
 ---
 
-**版本：** v20260129_2  
-**最后更新：** 2026-01-29  
-**变更：** 新增"配置驱动的功能开关实现流程"
+**版本：** v20260204_1  
+**最后更新：** 2026-02-04  
+**变更：** 新增"脚本文件语法验证"规则（修改脚本后必须验证语法，避免运行时错误）
+

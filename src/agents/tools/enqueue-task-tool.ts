@@ -200,32 +200,13 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
           `[enqueue_task] ✅ Task enqueued: key=${agentSessionKey}, summary=${summary || "none"}`,
         );
 
-        // 🆕 生成任务看板摘要
-        const completedCount = taskTree.subTasks.filter(t => t.status === "completed").length;
-        const activeCount = taskTree.subTasks.filter(t => t.status === "active").length;
-        const pendingCount = taskTree.subTasks.filter(t => t.status === "pending").length;
-        const totalCount = taskTree.subTasks.length;
-        
-        const taskBoardSummary = `
-📋 任务看板
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎯 主任务: ${taskTree.rootTask}
-📝 子任务: ${totalCount} 个
-   ✅ 已完成: ${completedCount}
-   🔄 进行中: ${activeCount}
-   ⏳ 待执行: ${pendingCount}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-💾 任务树保存位置: ~/.clawdbot/tasks/${sessionId}/TASK_TREE.json
-📊 查看任务看板: 使用 show_task_board 工具
-`.trim();
-
+        // 🆕 生成简洁的成功消息（不包含任务看板）
+        // 任务看板会在子任务完成后由 followup-runner 自动发送
         return jsonResult({
           success: true,
-          message: `任务已加入队列${summary ? `：${summary}` : ""}\n\n${taskBoardSummary}`,
+          message: `任务已加入队列${summary ? `：${summary}` : ""}`,
           queueKey: agentSessionKey,
           subTaskId: subTask.id,
-          taskBoardSummary,
           taskTreePath: `~/.clawdbot/tasks/${sessionId}/TASK_TREE.json`,
         });
       } catch (err) {

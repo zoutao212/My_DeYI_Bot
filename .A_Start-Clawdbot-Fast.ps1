@@ -113,8 +113,18 @@ try {
     # 等待 Gateway 健康检查
     Write-Host "[Start-Clawdbot] Waiting for gateway health..." -ForegroundColor Cyan
     Write-Host "[Start-Clawdbot] Gateway needs time to initialize (Telegram, plugins, etc.)..." -ForegroundColor Gray
+    Write-Host "[Start-Clawdbot] Waiting 5 seconds for gateway to start..." -ForegroundColor Gray
+    
+    # 先等待 5 秒，让 Gateway 有时间启动
+    for ($i = 1; $i -le 5; $i++) {
+        Start-Sleep -Seconds 1
+        Write-Host "." -NoNewline -ForegroundColor Gray
+    }
+    Write-Host ""
+    
+    # 然后开始健康检查
     $healthy = $false
-    for ($i = 1; $i -le 30; $i++) {
+    for ($i = 1; $i -le 25; $i++) {
         Start-Sleep -Seconds 1
         Write-Host "." -NoNewline -ForegroundColor Gray
         # 直接使用 node 运行 dist/entry.js，跳过 pnpm run clawdbot 的自动构建检测
@@ -137,12 +147,6 @@ try {
         Write-Host "[Start-Clawdbot] Gateway may still be starting. Check the other window for details." -ForegroundColor Yellow
         Write-Host "[Start-Clawdbot] Press any key to continue..." -ForegroundColor Gray
         $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-    }
-
-    else {
-        Write-Host "[Start-Clawdbot] ERROR: Gateway did not become healthy" -ForegroundColor Red
-        Write-Host "[Start-Clawdbot] Check the Gateway window for errors" -ForegroundColor Yellow
-        Read-Host "Press Enter to exit"
     }
 }
 finally {
