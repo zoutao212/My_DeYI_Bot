@@ -310,32 +310,8 @@ export function createFollowupRunner(params: {
 
       await sendFollowupPayloads(finalPayloads, queued);
 
-      // 🆕 自动发送简化的任务进度（单独的消息）
-      console.log(`[followup-runner] 🔍 Checking task board: sessionId=${sessionId}, orchestrator=${!!orchestrator}`);
-      
-      // 重新加载任务树以获取最新状态
-      taskTree = await orchestrator.loadTaskTree(sessionId);
-      console.log(`[followup-runner] 🔍 Task tree loaded: exists=${!!taskTree}, subTasks=${taskTree?.subTasks?.length || 0}`);
-      
-      // 只有当存在任务树且有子任务时才发送
-      if (taskTree && taskTree.subTasks.length > 0) {
-        // 🆕 生成简化的进度提示（而不是完整的任务看板）
-        const completedCount = taskTree.subTasks.filter(t => t.status === "completed").length;
-        const totalCount = taskTree.subTasks.length;
-        const progressPercent = Math.round((completedCount / totalCount) * 100);
-        
-        const simplifiedProgress = `📊 任务进度: ${completedCount}/${totalCount} 已完成 (${progressPercent}%)\n\n💡 提示：使用 show_task_board 工具查看完整任务看板`;
-        
-        // 在单独的消息中发送简化的进度
-        const progressPayload: ReplyPayload = {
-          text: simplifiedProgress,
-        };
-        
-        await sendFollowupPayloads([progressPayload], queued);
-        console.log(`[followup-runner] 📋 Task progress sent for session: ${sessionId} (${completedCount}/${totalCount})`);
-      } else {
-        console.log(`[followup-runner] ⚠️ Task progress not sent: taskTree=${!!taskTree}, subTasks=${taskTree?.subTasks?.length || 0}`);
-      }
+      // 注意：不再自动发送任务进度提示
+      // 用户可以通过调用 show_task_board 工具主动查看任务看板
 
       // 🆕 触发队列继续执行下一个任务
       if (queued.run.sessionKey) {

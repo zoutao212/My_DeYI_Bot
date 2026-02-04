@@ -133,9 +133,28 @@ export function createSessionsSpawnTool(opts?: {
       const requesterAgentId = normalizeAgentId(
         opts?.requesterAgentIdOverride ?? parseAgentSessionKey(requesterInternalKey)?.agentId,
       );
-      const targetAgentId = requestedAgentId
-        ? normalizeAgentId(requestedAgentId)
-        : requesterAgentId;
+      
+      // 🔧 智能 agentId 继承：
+      // - 如果 LLM 显式指定了 agentId，但指定的是 "main"，且父任务不是 "main"
+      //   → 使用父任务的 agentId（继承角色设定）
+      // - 否则，使用 LLM 指定的 agentId
+      const targetAgentId = (() => {
+        if (!requestedAgentId) {
+          // 没有指定 agentId，使用父任务的 agentId
+          return requesterAgentId;
+        }
+        
+        const normalized = normalizeAgentId(requestedAgentId);
+        
+        // 如果 LLM 显式指定了 "main"，但父任务不是 "main"
+        // → 这可能是 LLM 的误操作，应该继承父任务的 agentId
+        if (normalized === "main" && requesterAgentId !== "main") {
+          return requesterAgentId;
+        }
+        
+        // 否则，使用 LLM 指定的 agentId
+        return normalized;
+      })();
       if (targetAgentId !== requesterAgentId) {
         const allowAgents = resolveAgentConfig(cfg, requesterAgentId)?.subagents?.allowAgents ?? [];
         const allowAny = allowAgents.some((value) => value.trim() === "*");

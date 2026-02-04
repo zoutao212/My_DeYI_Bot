@@ -1305,7 +1305,9 @@ export const chatHandlers: GatewayRequestHandlers = {
           if (!text) return;
           
           // 🆕 处理 block 消息（例如任务看板）
-          if (info.kind === "block") {
+          // ⚠️ 只处理真正的 block 消息（例如任务看板），不要处理 LLM 生成的普通内容
+          // LLM 生成的内容会在 final 消息中处理
+          if (info.kind === "block" && text.includes("# 📋 任务看板")) {
             // 将消息追加到 transcript
             const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(p.sessionKey);
             const sessionId = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
@@ -1447,26 +1449,30 @@ export const chatHandlers: GatewayRequestHandlers = {
                 ? lastToolResultText
                 : rawReply;
 
-          const replyWithTools = appendToolSummaryToReply({
-            reply: reply || "(no output)",
-            messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
-            markerId,
-          });
+          // 🔧 禁用工具调用摘要和运行摘要（用户不希望看到这些信息）
+          // const replyWithTools = appendToolSummaryToReply({
+          //   reply: reply || "(no output)",
+          //   messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
+          //   markerId,
+          // });
 
-          const safeReplyWithTools =
-            replyWithTools && replyWithTools.includes("Connection error.")
-              ? appendToolSummaryToReply({
-                  reply: lastToolResultText || reply || "(no output)",
-                  messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
-                  markerId,
-                })
-              : replyWithTools;
+          // const safeReplyWithTools =
+          //   replyWithTools && replyWithTools.includes("Connection error.")
+          //     ? appendToolSummaryToReply({
+          //         reply: lastToolResultText || reply || "(no output)",
+          //         messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
+          //         markerId,
+          //       })
+          //     : replyWithTools;
 
-          const safeReplyWithToolsAndSummary = appendRunSummaryToReply({
-            reply: safeReplyWithTools || "(no output)",
-            messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
-            markerId,
-          });
+          // const safeReplyWithToolsAndSummary = appendRunSummaryToReply({
+          //   reply: safeReplyWithTools || "(no output)",
+          //   messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
+          //   markerId,
+          // });
+
+          // 🔧 直接使用原始回复，不添加摘要信息
+          const safeReplyWithToolsAndSummary = reply || "(no output)";
 
           const toolsForReply = extractToolSummariesForRun({
             messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
@@ -1524,7 +1530,9 @@ export const chatHandlers: GatewayRequestHandlers = {
             markerId,
           });
 
+          // 🔧 禁用工具调用摘要的追加逻辑
           if (
+            false && // 永远不执行
             summaries.length > 0 &&
             rawReply &&
             rawReply.trim() &&
