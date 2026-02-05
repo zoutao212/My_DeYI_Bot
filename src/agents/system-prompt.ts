@@ -229,6 +229,8 @@ export function buildAgentSystemPrompt(params: {
   ttsHint?: string;
   /** Controls which hardcoded sections to include. Defaults to "full". */
   promptMode?: PromptMode;
+  /** Character name (e.g., "lina"). If specified, uses full prompt even in minimal mode. */
+  characterName?: string;
   runtimeInfo?: {
     agentId?: string;
     host?: string;
@@ -272,9 +274,11 @@ export function buildAgentSystemPrompt(params: {
   const promptLanguage = params.promptLanguage ?? "en";
   const promptMode = params.promptMode ?? "full";
   
-  // 选择 l10n：minimal 模式使用精简版
+  // 选择 l10n：
+  // - 如果指定了 characterName（如 Lina），始终使用完整版（Lina 是系统的人格化化身，拥有最高权限）
+  // - 否则，minimal 模式使用精简版
   const l10n = 
-    promptMode === "minimal" && promptLanguage === "zh"
+    promptMode === "minimal" && promptLanguage === "zh" && !params.characterName
       ? SYSTEM_PROMPT_L10N_MINIMAL_ZH
       : promptLanguage === "zh"
         ? SYSTEM_PROMPT_L10N_ZH

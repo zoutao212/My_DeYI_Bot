@@ -104,6 +104,7 @@ export async function buildEmbeddedSystemPrompt(params: {
       reactionGuidance: params.reactionGuidance,
       promptMode: params.promptMode,
       promptLanguage: params.promptLanguage,
+      characterName: params.characterName, // 🆕 传递 characterName
       runtimeInfo: params.runtimeInfo,
       messageToolHints: params.messageToolHints,
       sandboxInfo: params.sandboxInfo,
@@ -143,6 +144,7 @@ export async function buildEmbeddedSystemPrompt(params: {
       reactionGuidance: params.reactionGuidance,
       promptMode: params.promptMode,
       promptLanguage: params.promptLanguage,
+      characterName: params.characterName, // 🆕 传递 characterName
       runtimeInfo: params.runtimeInfo,
       messageToolHints: params.messageToolHints,
       sandboxInfo: params.sandboxInfo,
@@ -196,6 +198,7 @@ export async function buildEmbeddedSystemPrompt(params: {
     reactionGuidance: params.reactionGuidance,
     promptMode: params.promptMode,
     promptLanguage: params.promptLanguage,
+    characterName: params.characterName, // 🆕 传递 characterName
     runtimeInfo: params.runtimeInfo,
     messageToolHints: params.messageToolHints,
     sandboxInfo: params.sandboxInfo,

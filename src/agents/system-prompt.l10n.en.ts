@@ -79,6 +79,13 @@ export type SystemPromptL10n = {
   workspaceTitle: string;
   workspaceDirLinePrefix: string;
   workspaceDirGuidance: string;
+  fileAccessTitle: string;
+  fileAccessLine1: string;
+  fileAccessLine2: string;
+  fileAccessLine3: string;
+  fileAccessLine4: string;
+  fileAccessLine5: string;
+  fileAccessExample: string;
   injectedFilesTitle: string;
   injectedFilesIntro: string;
   docsTitle: string;
@@ -155,7 +162,7 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
   toolingAvailability: "Tool availability (filtered by policy):",
   toolingCaseSensitive: "Tool names are case-sensitive. Call tools exactly as listed.",
   toolSummaries: {
-    read: "Read file contents (supports text and images; use offset/limit for large files)",
+    read: "Read file contents (supports local file paths like C:\\Users\\...\\file.txt; use offset/limit for large files)",
     write: "Create or overwrite files (auto-creates parent dirs; overwrites if exists)",
     edit: "Replace exact text in a file (oldText must match exactly including whitespace; use for surgical edits)",
     apply_patch: "Apply multi-file patches",
@@ -255,7 +262,7 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
   toolParamsQuickRef: `## Core Tool Parameters
 - **write(path, content)**: path=file path, content=full content. Example: write({ path: "test.txt", content: "hello" })
 - **edit(path, oldText, newText)**: path=file path, oldText=exact text to replace, newText=replacement text
-- **read(path, [offset], [limit])**: path=file path, offset=start line (optional), limit=line count (optional)
+- **read(path, [offset], [limit])**: path=file path (supports absolute paths like C:\\Users\\...\\file.txt), offset=start line (optional), limit=line count (optional)
 - **exec(command, [workdir], [background])**: command=shell command, workdir=working dir (optional), background=run async (optional)`,
   cliQuickRefTitle: "## Clawdbot CLI Quick Reference",
   cliQuickRefIntro: "Clawdbot is controlled via subcommands. Do not invent commands.",
@@ -293,6 +300,13 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
   workspaceDirLinePrefix: "Your working directory is:",
   workspaceDirGuidance:
     "Treat this directory as the single global workspace for file operations unless explicitly instructed otherwise.",
+  fileAccessTitle: "## File Access Capabilities",
+  fileAccessLine1: "You can use the `read` tool to read any file in the local file system (within the workspace or user-specified paths).",
+  fileAccessLine2: "- ✅ Supports absolute paths: `C:\\Users\\zouta\\clawd\\memory\\file.txt`",
+  fileAccessLine3: "- ✅ Supports relative paths: `./memory/file.txt`",
+  fileAccessLine4: "- ✅ Supports large file segmented reading: use `offset` and `limit` parameters",
+  fileAccessLine5: "- ✅ Supports multiple encodings: use `encoding` parameter (utf-8, gbk, gb2312, auto)",
+  fileAccessExample: "**Example**: `read(path=\"C:\\Users\\zouta\\clawd\\memory\\file.txt\", offset=0, limit=1000, encoding=\"auto\")`",
   injectedFilesTitle: "## Workspace Files (injected)",
   injectedFilesIntro:
     "These user-editable files are loaded by Clawdbot and included below in Project Context.",

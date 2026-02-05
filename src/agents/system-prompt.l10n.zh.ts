@@ -6,7 +6,7 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
   toolingAvailability: "可用工具:",
   toolingCaseSensitive: "工具名区分大小写。请严格按列表中的名称调用工具。",
   toolSummaries: {
-    read: "读取文件内容",
+    read: "读取文件内容（支持本地文件路径，如 C:\\Users\\...\\file.txt，可使用 offset/limit 分段读取大文件）",
     write: "创建或覆盖文件",
     edit: "精确替换文件中的文本",
     apply_patch: "应用多文件补丁",
@@ -106,7 +106,7 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
   toolParamsQuickRef: `## 核心工具参数速查
 - **write(path, content)**:path=文件路径，content=完整内容
 - **edit(path, oldText, newText)**:path=文件路径，oldText=要替换的原文，newText=替换后的新文本
-- **read(path, [offset], [limit])**:path=文件路径，offset=起始行，limit=行数
+- **read(path, [offset], [limit])**:path=文件路径（支持绝对路径如 C:\\Users\\...\\file.txt），offset=起始行，limit=行数
 - **exec(command, [workdir], [background])**:command=命令字符串，workdir=工作目录，background=是否后台`,
   cliQuickRefTitle: "## Clawdbot CLI 速查",
   cliQuickRefIntro: "Clawdbot 通过子命令控制。不要臆造命令。",
@@ -140,6 +140,13 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
   workspaceTitle: "## 工作区",
   workspaceDirLinePrefix: "你的工作目录是:",
   workspaceDirGuidance: "除非明确指示，否则把该目录视为唯一的全局文件工作区。",
+  fileAccessTitle: "## 文件访问能力",
+  fileAccessLine1: "你可以使用 `read` 工具读取本地文件系统中的任何文件（在工作区内或用户明确指定的路径）。",
+  fileAccessLine2: "- ✅ 支持绝对路径：`C:\\Users\\zouta\\clawd\\memory\\file.txt`",
+  fileAccessLine3: "- ✅ 支持相对路径：`./memory/file.txt`",
+  fileAccessLine4: "- ✅ 支持大文件分段读取：使用 `offset` 和 `limit` 参数",
+  fileAccessLine5: "- ✅ 支持多种编码：使用 `encoding` 参数（utf-8, gbk, gb2312, auto）",
+  fileAccessExample: "**示例**：`read(path=\"C:\\Users\\zouta\\clawd\\memory\\file.txt\", offset=0, limit=1000, encoding=\"auto\")`",
   injectedFilesTitle: "## 工作区文件",
   injectedFilesIntro: "这些用户可编辑文件会被 Clawdbot 加载，并包含在下方的 Project Context 中。",
   docsTitle: "## 文档",
