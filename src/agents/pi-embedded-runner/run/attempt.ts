@@ -386,6 +386,11 @@ export async function runEmbeddedAttempt(
           const entryRoles = messageEntries.slice(0, 10).map((e: any) => e.message?.role || "unknown");
           log.info(`[attempt] First 10 message entry roles: ${entryRoles.join(' → ')}`);
         }
+        // 🔍 DEBUG: Check leafId
+        log.info(`[attempt] SessionManager leafId: ${sm.leafId}`);
+        // 🔍 DEBUG: Check all entry IDs
+        const entryIds = sm.fileEntries.map((e: any) => `${e.type}:${e.id}`).join(', ');
+        log.info(`[attempt] SessionManager entry IDs: ${entryIds}`);
       }
 
       await prepareSessionManagerForRun({
@@ -665,20 +670,29 @@ export async function runEmbeddedAttempt(
           sessionId: params.sessionId,
           policy: transcriptPolicy,
         });
+        log.info(`[attempt] 🔍 After sanitizeSessionHistory: ${prior.length} messages (user: ${prior.filter(m => m.role === "user").length}, assistant: ${prior.filter(m => m.role === "assistant").length})`);
+        
         cacheTrace?.recordStage("session:sanitized", { messages: prior });
         const validatedGemini = transcriptPolicy.validateGeminiTurns
           ? validateGeminiTurns(prior)
           : prior;
+        log.info(`[attempt] 🔍 After validateGeminiTurns: ${validatedGemini.length} messages`);
+        
         const validated = transcriptPolicy.validateAnthropicTurns
           ? validateAnthropicTurns(validatedGemini)
           : validatedGemini;
+        log.info(`[attempt] 🔍 After validateAnthropicTurns: ${validated.length} messages`);
+        
         const limited = limitHistoryTurns(
           validated,
           getDmHistoryLimitFromSessionKey(params.sessionKey, params.config),
         );
+        log.info(`[attempt] 🔍 After limitHistoryTurns: ${limited.length} messages (user: ${limited.filter(m => m.role === "user").length}, assistant: ${limited.filter(m => m.role === "assistant").length})`);
+        
         cacheTrace?.recordStage("session:limited", { messages: limited });
         if (limited.length > 0) {
           activeSession.agent.replaceMessages(limited);
+          log.info(`[attempt] 🔍 After replaceMessages: activeSession.messages.length = ${activeSession.messages.length}`);
         }
 
         // 🆕 Generate session summary and inject into system prompt

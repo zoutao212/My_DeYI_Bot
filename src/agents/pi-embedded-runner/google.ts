@@ -528,12 +528,109 @@ export function applyGoogleTurnOrderingFix(params: {
   }
   const sanitized = sanitizeGoogleTurnOrdering(params.messages);
   const didPrepend = sanitized !== params.messages;
-  if (didPrepend && !hasGoogleTurnOrderingMarker(params.sessionManager)) {
+  
+  // ✅ 不再将 bootstrap 标记保存到 Session 文件
+  // bootstrap 标记只在内存中使用，用于满足 Google API 的要求
+  // 不应该保存到 Session 文件，否则会导致 LLM 认为这是"新会话"
+  if (didPrepend) {
     const warn = params.warn ?? ((message: string) => log.warn(message));
     warn(`google turn ordering fixup: prepended user bootstrap (sessionId=${params.sessionId})`);
-    markGoogleTurnOrderingMarker(params.sessionManager);
   }
+  
   return { messages: sanitized, didPrepend };
+}
+
+/**
+ * 移除 Pipeline 前缀
+ * 
+ * Pipeline 会在用户消息前添加 "🔵 [Pipeline Active] ..." 前缀
+ * 这些前缀在历史消息中是重复的，应该移除
+ */
+function stripPipelinePrefix(text: string): string {
+  // 移除 "🔵 [Pipeline Active] 动态管道已激活，使用默认系统提示词"
+  // 移除 "🔵 [Pipeline Active] 动态管道已激活，角色：xxx"
+  return text.replace(/^🔵 \[Pipeline Active\].*?\n+/s, "");
+}
+
+/**
+ * 移除重复的系统提示词
+ * 
+ * 检测并移除用户消息中重复出现的系统提示词模式
+ * 只保留第一次出现的内容
+ * 
+ * 包括：
+ * - 角色定义（SOUL.md, USER.md, 角色设定）
+ * - 工具定义（## 工具定义, ## Available Tools）
+ * - Skills 定义（## Skills, ## 技能）
+ * - 上下文文件（## 上下文文件, ## Context Files）
+ * - 运行时信息（## 运行时信息, ## Runtime Info）
+ */
+function stripSystemPromptDuplicates(text: string): string {
+  // 检测重复的系统提示词模式
+  const patterns = [
+    // 角色定义
+    /【系统人物卡.*?】.*?(?=\[message_id:|##|$)/gs,
+    /SOUL\.md.*?(?=\[message_id:|##|$)/gs,
+    /USER\.md.*?(?=\[message_id:|##|$)/gs,
+    /## 角色设定.*?(?=\[message_id:|##|$)/gs,
+    /# 角色设定.*?(?=\[message_id:|##|$)/gs,
+    /## User Identity.*?(?=\[message_id:|##|$)/gs,
+    /## 用户身份.*?(?=\[message_id:|##|$)/gs,
+    
+    // 工具定义
+    /## 工具定义.*?(?=\[message_id:|##|$)/gs,
+    /## Available Tools.*?(?=\[message_id:|##|$)/gs,
+    /## Tooling.*?(?=\[message_id:|##|$)/gs,
+    
+    // Skills 定义
+    /## Skills.*?(?=\[message_id:|##|$)/gs,
+    /## 技能.*?(?=\[message_id:|##|$)/gs,
+    /## Workspace Skills.*?(?=\[message_id:|##|$)/gs,
+    
+    // 上下文文件
+    /## 上下文文件.*?(?=\[message_id:|##|$)/gs,
+    /## Context Files.*?(?=\[message_id:|##|$)/gs,
+    /## Bootstrap Files.*?(?=\[message_id:|##|$)/gs,
+    
+    // 运行时信息
+    /## 运行时信息.*?(?=\[message_id:|##|$)/gs,
+    /## Runtime Info.*?(?=\[message_id:|##|$)/gs,
+    /## System Information.*?(?=\[message_id:|##|$)/gs,
+    
+    // 记忆系统
+    /## 记忆检索.*?(?=\[message_id:|##|$)/gs,
+    /## Memory Recall.*?(?=\[message_id:|##|$)/gs,
+    
+    // 任务分解
+    /## 任务分解.*?(?=\[message_id:|##|$)/gs,
+    /## Task Decomposition.*?(?=\[message_id:|##|$)/gs,
+    
+    // 消息系统
+    /## Messaging.*?(?=\[message_id:|##|$)/gs,
+    /## 消息发送.*?(?=\[message_id:|##|$)/gs,
+    
+    // 时间信息
+    /## Current Date & Time.*?(?=\[message_id:|##|$)/gs,
+    /## 当前日期与时间.*?(?=\[message_id:|##|$)/gs,
+  ];
+  
+  let cleaned = text;
+  for (const pattern of patterns) {
+    const matches = Array.from(text.matchAll(pattern));
+    if (matches.length > 1) {
+      // 只保留第一次出现，移除后续重复
+      let firstMatch = true;
+      cleaned = cleaned.replace(pattern, (match) => {
+        if (firstMatch) {
+          firstMatch = false;
+          return match;
+        }
+        return "";
+      });
+    }
+  }
+  
+  return cleaned;
 }
 
 export async function sanitizeSessionHistory(params: {
@@ -546,6 +643,82 @@ export async function sanitizeSessionHistory(params: {
   policy?: TranscriptPolicy;
 }): Promise<AgentMessage[]> {
   // Keep docs/reference/transcript-hygiene.md in sync with any logic changes here.
+  
+  // 🔧 Fix: Normalize user messages with object content (should be array)
+  // This must happen FIRST to ensure all messages have the correct format
+  let userContentFixedCount = 0;
+  for (let i = 0; i < params.messages.length; i++) {
+    const msg = params.messages[i];
+    const msgAny = msg as any;
+    
+    // Fix user messages with object content (should be array)
+    if (msg.role === "user" && msgAny.content && typeof msgAny.content === "object" && !Array.isArray(msgAny.content)) {
+      // Convert object to array
+      msgAny.content = [msgAny.content];
+      userContentFixedCount++;
+      log.info(`✓ Fixed user.content: object → array (message index: ${i}, sessionId: ${params.sessionId})`);
+    }
+  }
+  if (userContentFixedCount > 0) {
+    log.info(`[sanitize] Fixed ${userContentFixedCount} user messages with object content (sessionId: ${params.sessionId})`);
+  }
+  
+  // 🆕 Step 2: 清理用户消息中的 Pipeline 前缀和重复的系统提示词
+  let pipelinePrefixRemovedCount = 0;
+  let systemPromptDuplicatesRemovedCount = 0;
+  
+  for (let i = 0; i < params.messages.length; i++) {
+    const msg = params.messages[i];
+    if (msg.role === "user" && Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === "text" && typeof block.text === "string") {
+          const originalText = block.text;
+          
+          // 移除 Pipeline 前缀
+          let cleanedText = stripPipelinePrefix(block.text);
+          if (cleanedText !== originalText) {
+            pipelinePrefixRemovedCount++;
+          }
+          
+          // 移除重复的系统提示词
+          const beforeDuplicateRemoval = cleanedText;
+          cleanedText = stripSystemPromptDuplicates(cleanedText);
+          if (cleanedText !== beforeDuplicateRemoval) {
+            systemPromptDuplicatesRemovedCount++;
+          }
+          
+          // 更新 block.text
+          block.text = cleanedText;
+        }
+      }
+    }
+  }
+  
+  if (pipelinePrefixRemovedCount > 0) {
+    log.info(`[sanitize] Removed Pipeline prefix from ${pipelinePrefixRemovedCount} user messages (sessionId: ${params.sessionId})`);
+  }
+  if (systemPromptDuplicatesRemovedCount > 0) {
+    log.info(`[sanitize] Removed system prompt duplicates from ${systemPromptDuplicatesRemovedCount} user messages (sessionId: ${params.sessionId})`);
+  }
+  
+  // 🆕 Step 3: 提取系统上下文并保存到 SessionManager（三层消息结构）
+  const { extractSystemContext, hasSystemContextInSession, saveSystemContextToSession } = await import("../system-context-extractor.js");
+  
+  if (!hasSystemContextInSession(params.sessionManager)) {
+    const { systemContextContent, systemContextMetadata, cleanedMessages } = extractSystemContext(params.messages);
+    
+    if (systemContextContent && systemContextMetadata) {
+      // 保存系统上下文到 SessionManager
+      saveSystemContextToSession(params.sessionManager, systemContextContent, systemContextMetadata);
+      
+      // 使用清理后的消息
+      params.messages = cleanedMessages;
+      
+      log.info(`[sanitize] Extracted and saved system context to SessionManager (sessionId: ${params.sessionId})`);
+    }
+  } else {
+    log.debug(`[sanitize] System context already exists in SessionManager (sessionId: ${params.sessionId})`);
+  }
   
   // 🔧 Fix: Normalize assistant messages with null content (OpenAI API requirement)
   // This must happen BEFORE any other processing to ensure the fix is persisted

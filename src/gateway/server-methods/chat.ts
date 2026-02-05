@@ -110,6 +110,8 @@ function ensureTranscriptFile(params: { transcriptPath: string; sessionId: strin
   }
 }
 
+import { SessionManager } from "@mariozechner/pi-coding-agent";
+
 function appendAssistantTranscriptMessage(params: {
   message: string;
   label?: string;
@@ -140,30 +142,28 @@ function appendAssistantTranscriptMessage(params: {
     }
   }
 
-  const now = Date.now();
-  const messageId = randomUUID().slice(0, 8);
-  const labelPrefix = params.label ? `[${params.label}]\n\n` : "";
-  const messageBody: Record<string, unknown> = {
-    role: "assistant",
-    content: [{ type: "text", text: `${labelPrefix}${params.message}` }],
-    timestamp: now,
-    stopReason: "injected",
-    usage: { input: 0, output: 0, totalTokens: 0 },
-  };
-  const transcriptEntry = {
-    type: "message",
-    id: messageId,
-    timestamp: new Date(now).toISOString(),
-    message: messageBody,
-  };
-
+  // 🆕 使用 SessionManager API 插入消息（方案 2）
+  // 这样可以自动处理 parentId，保证一致性
   try {
-    fs.appendFileSync(transcriptPath, `${JSON.stringify(transcriptEntry)}\n`, "utf-8");
+    const sessionManager = SessionManager.open(transcriptPath);
+    const now = Date.now();
+    const messageId = randomUUID().slice(0, 8);
+    const labelPrefix = params.label ? `[${params.label}]\n\n` : "";
+    const messageBody: Record<string, unknown> = {
+      role: "assistant",
+      content: [{ type: "text", text: `${labelPrefix}${params.message}` }],
+      timestamp: now,
+      stopReason: "injected",
+      usage: { input: 0, output: 0, totalTokens: 0 },
+    };
+    
+    // 使用 SessionManager.appendMessage 自动设置 parentId
+    sessionManager.appendMessage(messageBody as never);
+    
+    return { ok: true, messageId, message: messageBody };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-
-  return { ok: true, messageId, message: transcriptEntry.message };
 }
 
 function nextChatSeq(context: { agentRunSeq: Map<string, number> }, runId: string) {
@@ -1472,7 +1472,8 @@ export const chatHandlers: GatewayRequestHandlers = {
           // });
 
           // 🔧 直接使用原始回复，不添加摘要信息
-          const safeReplyWithToolsAndSummary = reply || "(no output)";
+          // ⚠️ 不要使用 "(no output)" 作为默认值，避免插入无用消息
+          const safeReplyWithToolsAndSummary = reply || "";
 
           const toolsForReply = extractToolSummariesForRun({
             messages: (Array.isArray(recentMessages) ? recentMessages : []) as Record<string, unknown>[],
@@ -1565,7 +1566,8 @@ export const chatHandlers: GatewayRequestHandlers = {
             });
           }
 
-          if (safeReplyWithToolsAndSummary && finalReplyParts.length === 0) {
+          // 🔧 只插入有实际内容的消息，避免插入 "(no output)" 等无用消息
+          if (safeReplyWithToolsAndSummary && safeReplyWithToolsAndSummary.trim() && finalReplyParts.length === 0) {
             const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(p.sessionKey);
             const sessionIdForAppend = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
             const appended = appendAssistantTranscriptMessage({

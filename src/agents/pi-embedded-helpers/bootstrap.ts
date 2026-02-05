@@ -198,16 +198,26 @@ export function buildBootstrapContextFiles(
 
 export function sanitizeGoogleTurnOrdering(messages: AgentMessage[]): AgentMessage[] {
   const GOOGLE_TURN_ORDER_BOOTSTRAP_TEXT = "(session bootstrap)";
-  const first = messages[0] as { role?: unknown; content?: unknown } | undefined;
-  const role = first?.role;
-  const content = first?.content;
-  if (
-    role === "user" &&
-    typeof content === "string" &&
-    content.trim() === GOOGLE_TURN_ORDER_BOOTSTRAP_TEXT
-  ) {
+  
+  // 检查是否已经有 bootstrap 标记（避免重复插入）
+  const hasBootstrap = messages.some((msg) => {
+    const role = (msg as { role?: unknown }).role;
+    const content = (msg as { content?: unknown }).content;
+    return (
+      role === "user" &&
+      typeof content === "string" &&
+      content.trim() === GOOGLE_TURN_ORDER_BOOTSTRAP_TEXT
+    );
+  });
+  
+  if (hasBootstrap) {
     return messages;
   }
+  
+  const first = messages[0] as { role?: unknown; content?: unknown } | undefined;
+  const role = first?.role;
+  
+  // 只有当第一条消息是 assistant 时才需要插入 bootstrap
   if (role !== "assistant") return messages;
 
   // Cloud Code Assist rejects histories that begin with a model turn (tool call or text).

@@ -263,14 +263,82 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
     }
   };
 
+  // 检查错误是否可重试
+  function isRetryableError(error: unknown): boolean {
+    if (!error || typeof error !== "object") return false;
+    
+    // 检查错误消息
+    const errorMessage = "message" in error && typeof error.message === "string" 
+      ? error.message.toLowerCase() 
+      : "";
+    
+    // 不可重试的错误类型
+    const nonRetryablePatterns = [
+      "prohibited_content",      // 内容违规
+      "safety",                  // 安全策略
+      "recitation",              // 版权内容
+      "blocked",                 // 被阻止
+      "content_filter",          // 内容过滤
+      "policy_violation",        // 政策违规
+      "invalid_request_error",   // 无效请求（参数错误等）
+      "authentication_error",    // 认证错误
+    ];
+    
+    for (const pattern of nonRetryablePatterns) {
+      if (errorMessage.includes(pattern)) {
+        return false;
+      }
+    }
+    
+    // 可重试的错误类型
+    const retryablePatterns = [
+      "timeout",                 // 超时
+      "network",                 // 网络错误
+      "fetch failed",            // Fetch 失败
+      "econnreset",              // 连接重置
+      "enotfound",               // DNS 解析失败
+      "etimedout",               // 连接超时
+      "rate_limit",              // 速率限制
+      "overloaded",              // 服务器过载
+      "internal_error",          // 内部错误
+      "service_unavailable",     // 服务不可用
+    ];
+    
+    for (const pattern of retryablePatterns) {
+      if (errorMessage.includes(pattern)) {
+        return true;
+      }
+    }
+    
+    // 检查 HTTP 状态码
+    if ("status" in error && typeof error.status === "number") {
+      const status = error.status;
+      // 5xx 错误通常可重试
+      if (status >= 500 && status < 600) return true;
+      // 429 (Too Many Requests) 可重试
+      if (status === 429) return true;
+      // 4xx 错误通常不可重试
+      if (status >= 400 && status < 500) return false;
+    }
+    
+    // 默认：网络相关错误可重试
+    if ("name" in error) {
+      const errorName = String(error.name).toLowerCase();
+      if (errorName === "aborterror") return true;  // 超时导致的 abort
+      if (errorName === "typeerror") return true;   // 网络错误
+    }
+    
+    return false;
+  }
+
   // 执行请求并处理重试逻辑
   async function executeRequestWithRetry(
     attemptKey: string,
     input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> {
-    // 添加 30 秒超时
-    const TIMEOUT_MS = 30000; // 30 秒
+    // 添加 60 秒超时（大 payload 需要更长时间）
+    const TIMEOUT_MS = 60000; // 60 秒
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
       console.warn(`[llm-gated-fetch] ⚠️ LLM 请求超时（${TIMEOUT_MS}ms），正在中断请求...`);
@@ -543,38 +611,16 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       // 清除超时定时器
       clearTimeout(timeoutId);
       
-      // 检查是否是超时错误
-      const isTimeout = error && typeof error === "object" && "name" in error && error.name === "AbortError";
+      // 检查错误是否可重试
+      const canRetry = isRetryableError(error);
       
-      if (isTimeout) {
-        console.error(`[llm-gated-fetch] ❌ LLM 请求超时（${TIMEOUT_MS}ms），正在重试...`);
-        
-        // 增加失败计数
-        const now = Date.now();
-        const current = attempts.get(attemptKey);
-        if (!current) {
-          attempts.set(attemptKey, { firstAtMs: now, failureCount: 1 });
-        } else {
-          attempts.set(attemptKey, { 
-            firstAtMs: current.firstAtMs, 
-            failureCount: current.failureCount + 1 
-          });
-        }
-        
-        // 检查是否超过重试次数
-        const currentAttempt = attempts.get(attemptKey);
-        if (currentAttempt && currentAttempt.failureCount > MAX_ATTEMPTS_PER_KEY) {
-          console.error(`[llm-gated-fetch] ❌ 已超过最大重试次数（${MAX_ATTEMPTS_PER_KEY}），放弃重试`);
-          throw new Error(`LLM_REQUEST_TIMEOUT: 请求超时（${TIMEOUT_MS}ms）且已超过最大重试次数`);
-        }
-        
-        // 重试
-        console.warn(`[llm-gated-fetch] 🔄 正在重试 LLM 请求（第 ${currentAttempt?.failureCount || 1} 次失败后重试）...`);
-        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
-        return executeRequestWithRetry(attemptKey, input, init);
+      if (!canRetry) {
+        // 不可重试的错误（如内容违规），直接抛出
+        console.error("[llm-gated-fetch] ❌ 不可重试的错误，直接抛出:", error);
+        throw error;
       }
       
-      // 请求异常（网络错误等），增加失败计数
+      // 可重试的错误，增加失败计数
       const now = Date.now();
       const current = attempts.get(attemptKey);
       if (!current) {
@@ -586,26 +632,25 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
         });
       }
       
+      // 检查是否超过重试次数
+      const currentAttempt = attempts.get(attemptKey);
+      if (currentAttempt && currentAttempt.failureCount > MAX_ATTEMPTS_PER_KEY) {
+        console.error(`[llm-gated-fetch] ❌ 已超过最大重试次数（${MAX_ATTEMPTS_PER_KEY}），放弃重试`);
+        throw error;
+      }
+      
       // 记录错误类型
       if (error && typeof error === "object" && "name" in error) {
         const errorName = error.name;
-        if (errorName === "AbortError") {
-          console.warn("[llm-gated-fetch] Request aborted in executeRequestWithRetry:", error);
-        } else if (errorName === "TypeError") {
-          const errorMessage = (error as { message?: string }).message;
-          if (errorMessage && errorMessage.includes("fetch failed")) {
-            console.warn("[llm-gated-fetch] Network error (fetch failed):", error);
-          } else {
-            console.warn(`[llm-gated-fetch] Request error (${errorName}):`, error);
-          }
-        } else {
-          console.warn(`[llm-gated-fetch] Request error (${errorName}):`, error);
-        }
+        console.warn(`[llm-gated-fetch] ⚠️ 可重试的错误 (${errorName})，正在重试...`);
       } else {
-        console.warn("[llm-gated-fetch] Unknown request error:", error);
+        console.warn("[llm-gated-fetch] ⚠️ 可重试的错误，正在重试...");
       }
       
-      throw error;
+      // 重试
+      console.warn(`[llm-gated-fetch] 🔄 正在重试 LLM 请求（第 ${currentAttempt?.failureCount || 1} 次失败后重试）...`);
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+      return executeRequestWithRetry(attemptKey, input, init);
     }
   };
 

@@ -15,12 +15,16 @@ function stripThreadSuffix(value: string): string {
  * assistant responses). This reduces token usage for long-running DM sessions.
  * 
  * NEW: Preserves the first user message (task goal) to prevent task loss in long conversations.
+ * NEW: Default limit is 10 user turns if not specified.
  */
 export function limitHistoryTurns(
   messages: AgentMessage[],
   limit: number | undefined,
 ): AgentMessage[] {
-  if (!limit || limit <= 0 || messages.length === 0) return messages;
+  // 默认限制为 10 个用户轮次（如果未指定）
+  const effectiveLimit = limit !== undefined && limit > 0 ? limit : 10;
+  
+  if (messages.length === 0) return messages;
 
   // Step 1: Extract task goal (first user message)
   const taskGoalIndex = messages.findIndex(m => m.role === "user");
@@ -32,7 +36,7 @@ export function limitHistoryTurns(
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === "user") {
       userCount++;
-      if (userCount > limit) {
+      if (userCount > effectiveLimit) {
         // Step 2: If task goal would be discarded, preserve it
         const limited = messages.slice(lastUserIndex);
         

@@ -181,7 +181,19 @@ export function installSessionToolResultGuard(
       log.info(`[guard] appendMessage called: role=assistant, content=${contentType}`);
       
       // 🆕 DEBUG: Log full message structure to see what API returned
-      log.info(`[guard] [DEBUG] Full assistant message: ${JSON.stringify(msg, null, 2).slice(0, 2000)}`);
+      // Truncate textSignature to avoid log spam
+      const msgForLog = JSON.parse(JSON.stringify(msg));
+      if (Array.isArray(msgForLog.content)) {
+        for (const block of msgForLog.content) {
+          if (block && typeof block === "object" && "textSignature" in block) {
+            const sig = block.textSignature;
+            if (typeof sig === "string" && sig.length > 32) {
+              block.textSignature = `${sig.slice(0, 32)}...`;
+            }
+          }
+        }
+      }
+      log.info(`[guard] [DEBUG] Full assistant message: ${JSON.stringify(msgForLog, null, 2).slice(0, 2000)}`);
       
       // 🔧 Fix: For vectorengine, convert empty content array to empty string
       // vectorengine (OpenAI compatible) converts empty array to null in payload
@@ -205,6 +217,23 @@ export function installSessionToolResultGuard(
       // 🔧 Fix: Remove provider-specific signature fields from assistant messages before saving
       // Some providers (like yinli) return signature fields in responses, but may reject them in requests
       // We need to remove them from saved messages to prevent errors in subsequent requests
+      
+      // 🆕 Step 1: Remove message-level signature fields
+      const msgRec = msg as unknown as Record<string, unknown>;
+      if ("thoughtSignature" in msgRec) {
+        delete msgRec.thoughtSignature;
+        log.debug(`[guard] Removed thoughtSignature from message level`);
+      }
+      if ("thought_signature" in msgRec) {
+        delete msgRec.thought_signature;
+        log.debug(`[guard] Removed thought_signature from message level`);
+      }
+      if ("textSignature" in msgRec) {
+        delete msgRec.textSignature;
+        log.debug(`[guard] Removed textSignature from message level`);
+      }
+      
+      // 🆕 Step 2: Remove content-level signature fields
       if (Array.isArray(msg.content)) {
         for (const block of msg.content) {
           if (block && typeof block === "object") {
