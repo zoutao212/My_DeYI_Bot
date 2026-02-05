@@ -58,6 +58,7 @@ function buildTaskDecompositionSection(params: {
     params.l10n.taskDecompositionRulesLine1,
     params.l10n.taskDecompositionRulesLine2,
     params.l10n.taskDecompositionRulesLine3,
+    params.l10n.taskDecompositionCriticalWarning,
     "",
   ];
 }

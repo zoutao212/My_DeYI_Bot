@@ -518,6 +518,7 @@ export function applyGoogleTurnOrderingFix(params: {
   sessionManager: SessionManager;
   sessionId: string;
   warn?: (message: string) => void;
+  isQueueTask?: boolean;
 }): { messages: AgentMessage[]; didPrepend: boolean } {
   if (!isGoogleModelApi(params.modelApi)) {
     return { messages: params.messages, didPrepend: false };
@@ -526,6 +527,16 @@ export function applyGoogleTurnOrderingFix(params: {
   if (first?.role !== "assistant") {
     return { messages: params.messages, didPrepend: false };
   }
+  
+  // ⚠️ 修复：子任务执行时不添加 bootstrap 消息
+  // 原因：bootstrap 消息会干扰 LLM 的理解，导致它认为这是"新会话"
+  // 而不是一个需要执行具体工具调用的子任务
+  if (params.isQueueTask) {
+    const warn = params.warn ?? ((message: string) => log.warn(message));
+    warn(`google turn ordering fixup: skipped bootstrap for queue task (sessionId=${params.sessionId})`);
+    return { messages: params.messages, didPrepend: false };
+  }
+  
   const sanitized = sanitizeGoogleTurnOrdering(params.messages);
   const didPrepend = sanitized !== params.messages;
   
@@ -641,6 +652,7 @@ export async function sanitizeSessionHistory(params: {
   sessionManager: SessionManager;
   sessionId: string;
   policy?: TranscriptPolicy;
+  isQueueTask?: boolean;
 }): Promise<AgentMessage[]> {
   // Keep docs/reference/transcript-hygiene.md in sync with any logic changes here.
   
@@ -896,5 +908,6 @@ export async function sanitizeSessionHistory(params: {
     modelApi: params.modelApi,
     sessionManager: params.sessionManager,
     sessionId: params.sessionId,
+    isQueueTask: params.isQueueTask,
   }).messages;
 }

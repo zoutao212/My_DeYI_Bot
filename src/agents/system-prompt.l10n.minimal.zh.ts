@@ -92,6 +92,7 @@ export const SYSTEM_PROMPT_L10N_MINIMAL_ZH: SystemPromptL10n = {
   taskDecompositionRulesLine1: "",
   taskDecompositionRulesLine2: "",
   taskDecompositionRulesLine3: "",
+  taskDecompositionCriticalWarning: "",
   taskDecompositionStorageTitle: "",
   taskDecompositionStorageLine1: "",
   taskDecompositionStorageLine2: "",

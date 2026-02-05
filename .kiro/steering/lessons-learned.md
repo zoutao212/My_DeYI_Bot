@@ -92,6 +92,22 @@
 | **不可重试错误** | `.kiro/lessons-learned/90_LLM内容违规错误处理.md` |
 | **快速失败原则** | `.kiro/lessons-learned/90_LLM内容违规错误处理.md` |
 | **智能重试策略** | `.kiro/lessons-learned/90_LLM内容违规错误处理.md` |
+| **子任务角色检测** | `.kiro/lessons-learned/95_子任务角色检测导致工具调用失败.md` |
+| **角色检测场景区分** | `.kiro/lessons-learned/95_子任务角色检测导致工具调用失败.md` |
+| **系统提示词结构** | `.kiro/lessons-learned/95_子任务角色检测导致工具调用失败.md` |
+| **日志对比分析** | `.kiro/lessons-learned/96_日志对比分析法.md` |
+| **场景对比** | `.kiro/lessons-learned/96_日志对比分析法.md` |
+| **差异分析** | `.kiro/lessons-learned/96_日志对比分析法.md` |
+| **日志误导** | `.kiro/lessons-learned/96_日志对比分析法.md` |
+| **场景区分** | `.kiro/lessons-learned/97_场景区分原则.md` |
+| **场景标识** | `.kiro/lessons-learned/97_场景区分原则.md` |
+| **场景互斥** | `.kiro/lessons-learned/97_场景区分原则.md` |
+| **场景优先级** | `.kiro/lessons-learned/97_场景区分原则.md` |
+| **追根溯源** | `.kiro/lessons-learned/98_追根溯源原则_不要偷懒.md` |
+| **不要偷懒** | `.kiro/lessons-learned/98_追根溯源原则_不要偷懒.md` |
+| **绕过问题** | `.kiro/lessons-learned/98_追根溯源原则_不要偷懒.md` |
+| **解决问题** | `.kiro/lessons-learned/98_追根溯源原则_不要偷懒.md` |
+| **系统能力** | `.kiro/lessons-learned/98_追根溯源原则_不要偷懒.md` |
 
 clawdbot 实际的 系统日志在 C:\Users\zouta\.clawdbot\runtimelog
 clawdbot 对话内容在 C:\Users\zouta\.clawdbot\agents\main\sessions

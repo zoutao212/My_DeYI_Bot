@@ -232,309 +232,86 @@ inclusion: always
 
 记住：**好的工程师不是写代码最快的，而是写出问题最少的。**
 
----
+# 追根溯源原则 - 不要偷懒
 
-## 第七章：工具使用与验证 ⚠️ 关键
-
-### 7.1 工具调用的信任边界
-
-**核心原则：工具调用成功 ≠ 操作真正完成**
-
-AI 工具（如 `strReplace`、`fsWrite`、`readFile`）可能存在缓存或同步问题：
-- 工具返回"成功"只代表请求被接受
-- 不代表文件真的被修改
-- 不代表读取的是磁盘最新内容
-
-### 7.2 必须独立验证
-
-每次修改文件后，必须用独立手段验证：
-
-```powershell
-# 验证文件内容
-Get-Content "path/to/file" -Head 10 -Encoding UTF8
-
-# 搜索特定内容
-Select-String -Path "path/to/file" -Pattern "关键词" -Encoding UTF8
-
-# 检查文件大小和修改时间
-Get-Item "path/to/file" | Select Name, Length, LastWriteTime
-```
-
-### 7.3 工具失败时的备选方案
-
-如果工具调用多次失败，直接使用 PowerShell：
-
-```powershell
-# 读取文件
-$content = Get-Content $filePath -Raw -Encoding UTF8
-
-# 替换内容
-$newContent = $content -replace 'old', 'new'
-
-# 写回文件
-[System.IO.File]::WriteAllText($filePath, $newContent, [System.Text.Encoding]::UTF8)
-```
-
-### 7.4 调试时的交叉验证
-
-不要只依赖一种工具：
-- 用 `readFile` 读取后，再用 PowerShell 验证
-- 用 `strReplace` 修改后，再用 PowerShell 确认
-- 如果两者结果不一致，以 PowerShell 为准（它直接读取磁盘）
-
-### 7.5 添加可观察标记
-
-修改文件时，同时添加一个明显的标记：
-- 版本注释：`<!-- VERSION: 2026-01-02-v3 -->`
-- 标题变化：`<title>xxx v3</title>`
-- 这样可以快速判断修改是否生效
-
-### 7.6 脚本文件语法验证 ⚠️ 重要
-
-**核心原则：修改脚本文件后，必须验证语法**
-
-**为什么需要？**
-- 脚本语言（PowerShell、Bash、Python 等）的语法错误只有运行时才会发现
-- 用户运行时才发现错误，浪费时间
-- 特别是在多次修改同一文件时容易出错
-
-**验证方法：**
-
-#### PowerShell 脚本
-```powershell
-# 方法 1：语法检查（推荐）
-powershell -NoProfile -Command "& { Get-Content 'script.ps1' | Out-Null; Write-Host 'Syntax OK' }"
-
-# 方法 2：使用 PSScriptAnalyzer（如果安装）
-Invoke-ScriptAnalyzer -Path 'script.ps1' -Severity Error
-```
-
-#### Bash 脚本
-```bash
-# 语法检查
-bash -n script.sh
-
-# 或使用 shellcheck（如果安装）
-shellcheck script.sh
-```
-
-#### Python 脚本
-```bash
-# 语法检查
-python -m py_compile script.py
-
-# 或使用 pylint（如果安装）
-pylint script.py
-```
-
-**何时验证？**
-- 每次修改脚本文件后
-- 特别是修改了控制流（if/else/for/while）
-- 特别是修改了函数定义或调用
-- 在提交给用户之前
-
-**常见错误：**
-- 重复的 `else` 块
-- 缺少闭合的括号或引号
-- 缩进错误（Python）
-- 变量名拼写错误
-
+**问题**：遇到问题时，采用简单的绕过方案，而不是追根溯源解决根本问题
 
 ---
 
-## 第八章：配置驱动的功能开关实现流程 ⚠️ 重要
+## 问题描述
 
-### 8.1 触发场景
+### 错误做法（偷懒）
 
-当需要添加一个可配置的功能开关时（例如：审批机制、功能特性开关、调试模式等）。
+**场景**：子任务执行时工具调用失败
 
-**常见场景：**
-- 添加新的审批机制（exec 审批、LLM 审批等）
-- 添加新的功能特性开关（实验性功能、调试模式等）
-- 添加新的可配置行为（超时时间、重试次数等）
+**偷懒的解决方案**：
+- 禁用子任务的角色检测
+- 让子任务使用默认系统提示词
+- 绕过问题，而不是解决问题
 
-### 8.2 标准流程
+**问题**：
+- 没有追根溯源
+- 没有解决根本问题
+- 限制了系统的能力
 
-#### 步骤 1：添加配置 Schema
+### 正确做法（追根溯源）
 
-**文件：** `src/config/zod-schema.*.ts`（根据配置类型选择对应文件）
+**核心原则**：
+- **即使在子任务中使用了特定角色，也应该有基本的 toolcall 能力**
+- **Lina 是系统的化身，应该有完整的工具能力**
+- **其他角色可以给简化的工具列表，但 Lina 必须有完整的工具定义**
 
-**操作：**
-1. 使用 Zod 定义配置 schema
-2. 添加注释说明每个字段的含义和默认值
-3. 使用 `.optional()` 标记可选字段
-4. 使用 `.strict()` 确保类型安全
-
-**示例：**
-```typescript
-const LlmApprovalSchema = z
-  .object({
-    /** 是否启用 LLM 审批。默认 false（不审批，自动允许）。 */
-    enabled: z.boolean().optional(),
-    /** 是否自动批准所有请求。默认 false。 */
-    autoApprove: z.boolean().optional(),
-  })
-  .strict()
-  .optional();
-
-export const ApprovalsSchema = z
-  .object({
-    exec: ExecApprovalForwardingSchema,
-    llm: LlmApprovalSchema,
-  })
-  .strict()
-  .optional();
-```
-
-#### 步骤 2：更新类型定义
-
-**文件：** `src/config/types.*.ts`（与 schema 文件对应）
-
-**操作：**
-1. 定义 TypeScript 类型
-2. 添加 JSDoc 注释说明每个字段
-3. 确保类型与 schema 一致
-
-**示例：**
-```typescript
-export type LlmApprovalConfig = {
-  /** 是否启用 LLM 审批。默认 false（不审批，自动允许）。 */
-  enabled?: boolean;
-  /** 是否自动批准所有请求。默认 false。 */
-  autoApprove?: boolean;
-};
-
-export type ApprovalsConfig = {
-  exec?: ExecApprovalForwardingConfig;
-  llm?: LlmApprovalConfig;
-};
-```
-
-#### 步骤 3：实现逻辑
-
-**文件：** 使用配置的位置（例如：`src/gateway/server.impl.ts`）
-
-**操作：**
-1. 读取配置：`const config = cfgAtStart.xxx?.yyy;`
-2. 提取字段并设置默认值：`const enabled = config?.enabled ?? false;`
-3. 实现逻辑：根据配置值执行不同的分支
-4. 确保优先级清晰：先检查主开关，再检查子选项
-
-**示例：**
-```typescript
-const llmApprovalConfig = cfgAtStart.approvals?.llm;
-const enabled = llmApprovalConfig?.enabled ?? false;
-const autoApprove = llmApprovalConfig?.autoApprove ?? false;
-
-// 优先级：enabled > autoApprove
-if (!enabled) {
-  return { decision: "allow-once" };
-}
-
-if (autoApprove) {
-  return { decision: "allow-always" };
-}
-
-// 否则，请求用户审批
-// ...
-```
-
-#### 步骤 4：构建验证
-
-**操作：**
-1. 运行构建：`pnpm build`
-2. 验证构建成功（无错误）
-3. 验证 `dist/` 目录中的文件包含修改
-
-**验证命令：**
-```powershell
-# 构建
-pnpm build
-
-# 验证 dist 文件
-Select-String -Path "dist/xxx/yyy.js" -Pattern "关键字" -Context 2,2 -Encoding UTF8
-```
-
-#### 步骤 5：创建配置示例和文档
-
-**操作：**
-1. 创建配置示例文件（JSON 格式）
-2. 编写配置说明文档
-3. 说明每个配置选项的含义和使用场景
-4. 提供完整的使用步骤
-
-**示例：**
-```json
-{
-  "approvals": {
-    "llm": {
-      "enabled": false  // 关闭审批（推荐）
-    }
-  }
-}
-```
-
-### 8.3 质量门槛
-
-每个步骤完成后必须验证：
-
-- ✅ **Schema 定义完整**：所有字段都有注释和默认值
-- ✅ **类型定义一致**：类型与 schema 完全匹配
-- ✅ **逻辑实现正确**：配置值正确读取，优先级清晰
-- ✅ **构建验证通过**：`pnpm build` 成功，dist 文件包含修改
-- ✅ **文档完整**：配置示例、使用说明、场景说明都齐全
-
-### 8.4 常见错误
-
-1. **忘记更新类型定义** - 导致类型不匹配
-2. **默认值不合理** - 导致配置不符合预期
-3. **优先级不清晰** - 导致配置行为混乱
-4. **忘记验证 dist 文件** - 导致修改未生效
-5. **缺少配置文档** - 导致用户不知道如何使用
-
-### 8.5 配置优先级设计原则
-
-**核心原则：** 主开关优先于子选项
-
-**示例：**
-```typescript
-// ✅ 正确：先检查主开关
-if (!enabled) {
-  return defaultBehavior;
-}
-
-if (autoApprove) {
-  return autoApproveBehavior;
-}
-
-return manualApproveBehavior;
-```
-
-```typescript
-// ❌ 错误：优先级混乱
-if (autoApprove) {
-  return autoApproveBehavior;
-}
-
-if (!enabled) {
-  return defaultBehavior;
-}
-
-return manualApproveBehavior;
-```
-
-### 8.6 默认值设计原则
-
-**核心原则：** 默认值应该是最安全、最常用的选项
-
-**示例：**
-- 审批机制：默认关闭（`enabled: false`）- 不干扰用户
-- 调试模式：默认关闭（`debug: false`）- 避免性能影响
-- 超时时间：默认合理值（`timeout: 30000`）- 平衡性能和可靠性
+**正确的解决方案**：
+1. 分析为什么角色提示词会导致工具调用失败
+2. 优化角色提示词和工具定义的集成方式
+3. 确保工具定义在系统提示词的显著位置
+4. 添加日志追踪最终的系统提示词
 
 ---
 
-**版本：** v20260204_1  
-**最后更新：** 2026-02-04  
-**变更：** 新增"脚本文件语法验证"规则（修改脚本后必须验证语法，避免运行时错误）
+## 核心原则
 
+### 原则 1：不要绕过问题
+
+**错误做法**：
+```typescript
+// ❌ 错误：绕过问题
+if (isQueueTask) {
+  // 禁用角色检测，使用默认系统提示词
+  return { prependContext: "使用默认系统提示词" };
+}
+```
+
+**正确做法**：
+```typescript
+// ✅ 正确：解决问题
+if (characterName === "lina") {
+  // Lina 是系统化身，必须有完整的工具能力
+  // 确保工具定义在系统提示词的显著位置
+  return buildSystemPromptWithFullTools(characterPrompt, basePrompt);
+}
+```
+
+### 原则 2：追根溯源
+
+**问题分析流程**：
+1. **表面现象**：子任务执行时工具调用失败
+2. **直接原因**：检测到 Lina 角色
+3. **深层原因**：角色提示词可能导致 LLM 忽略工具定义
+4. **根本原因**：工具定义的位置或格式不够显著
+
+**不要停留在直接原因，要追溯到根本原因！**
+
+### 原则 3：保持系统能力
+
+**错误做法**：
+- 为了解决问题，限制系统能力
+- 禁用某些功能
+- 降低系统的灵活性
+
+**正确做法**：
+- 优化系统设计
+- 提升系统能力
+- 保持系统的灵活性
+
+---

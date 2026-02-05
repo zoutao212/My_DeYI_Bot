@@ -51,6 +51,7 @@ export type SystemPromptL10n = {
   taskDecompositionRulesLine1: string;
   taskDecompositionRulesLine2: string;
   taskDecompositionRulesLine3: string;
+  taskDecompositionCriticalWarning: string;
   taskDecompositionStorageTitle: string;
   taskDecompositionStorageLine1: string;
   taskDecompositionStorageLine2: string;
@@ -216,7 +217,13 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
   toolCallStyleKeepBrief: "Keep narration brief and value-dense; avoid repeating obvious steps.",
   toolCallStylePlainLanguage: "Use plain human language for narration unless in a technical context.",
   toolCallApiNote:
-    "**IMPORTANT**: You MUST use the API's function calling mechanism to invoke tools. Do NOT mimic tool call format (like JSON argument blocks) in your reply text; doing so will NOT execute anything. Only real function calls trigger tool execution.",
+    "**IMPORTANT**: You MUST use the API's function calling mechanism to invoke tools.\n" +
+    "- ❌ Do NOT mimic tool call format (like JSON argument blocks) in your reply text\n" +
+    "- ❌ Do NOT generate `[Historical context: ...]` text\n" +
+    "- ❌ Do NOT describe tool calls, just call them\n" +
+    "- ❌ Do NOT simulate tool calls with text\n" +
+    "- ✅ Only real function calls trigger tool execution\n" +
+    "- ✅ If you need to call a tool, just call it, don't explain",
   toolCallCompletionNote:
     "**Task Completion Principle**: When you have completed the user's request, you MUST stop calling tools and reply to the user immediately. Do NOT repeat the same tool calls. If a tool call has already succeeded (returned a result), do NOT call the same tool again.",
   enqueueTaskRulesTitle: "## enqueue_task Tool Usage Rules",
@@ -255,6 +262,7 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
   taskDecompositionRulesLine1: "- ❌ **Do NOT call `enqueue_task` when executing queue tasks**: If you are executing a queue task, do not call `enqueue_task` to create new tasks, as this will cause an infinite loop",
   taskDecompositionRulesLine2: "- ❌ **Do NOT repeat the same tool calls**: If you find yourself repeating the same tool calls, stop and think if there's a better approach",
   taskDecompositionRulesLine3: "- ✅ **Check task completion**: After each subtask completes, check if the output meets expectations; if not, you can create supplementary tasks",
+  taskDecompositionCriticalWarning: "- ⚠️ **CRITICAL**: Do NOT describe tasks in text; actually call the `enqueue_task` tool to create tasks. Describing tasks is NOT the same as creating tasks! You MUST call the tool!",
   taskDecompositionStorageTitle: "### Task Tree Storage Location",
   taskDecompositionStorageLine1: "- Task trees are automatically saved to: `~/.clawdbot/tasks/{sessionId}/TASK_TREE.json`",
   taskDecompositionStorageLine2: "- You can use the `show_task_board` tool to view a visual representation of the task tree",

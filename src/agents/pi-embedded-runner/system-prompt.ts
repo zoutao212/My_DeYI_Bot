@@ -215,7 +215,21 @@ export async function buildEmbeddedSystemPrompt(params: {
   
   // 🆕 如果有角色设定，将其注入到提示词开头
   if (characterPrompt) {
-    return `${characterPrompt}\n\n---\n\n${basePrompt}`;
+    const finalPrompt = `${characterPrompt}\n\n---\n\n${basePrompt}`;
+    
+    // 🔧 添加日志：输出最终系统提示词的长度和结构
+    log.info(`[buildEmbeddedSystemPrompt] 最终系统提示词统计:`);
+    log.info(`  - 角色提示词长度: ${characterPrompt.length} 字符`);
+    log.info(`  - 基础提示词长度: ${basePrompt.length} 字符`);
+    log.info(`  - 最终提示词长度: ${finalPrompt.length} 字符`);
+    log.info(`  - 工具数量: ${params.tools.length}`);
+    log.info(`  - 工具列表: ${params.tools.map((t) => t.name).join(", ")}`);
+    
+    // 🔧 检查工具定义是否在系统提示词中
+    const hasToolSection = basePrompt.includes("## Available Tools") || basePrompt.includes("## 可用工具");
+    log.info(`  - 包含工具定义: ${hasToolSection ? "是" : "否"}`);
+    
+    return finalPrompt;
   }
   
   return basePrompt;

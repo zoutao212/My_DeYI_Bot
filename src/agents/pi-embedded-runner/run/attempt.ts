@@ -661,6 +661,11 @@ export async function runEmbeddedAttempt(
       }
 
       try {
+        // 🔧 从全局上下文获取 isQueueTask 标记
+        const { getCurrentFollowupRunContext } = await import("../../tools/enqueue-task-tool.js");
+        const followupContext = getCurrentFollowupRunContext();
+        const isQueueTask = followupContext?.isQueueTask === true;
+        
         const prior = await sanitizeSessionHistory({
           messages: activeSession.messages,
           modelApi: params.model.api,
@@ -669,6 +674,7 @@ export async function runEmbeddedAttempt(
           sessionManager,
           sessionId: params.sessionId,
           policy: transcriptPolicy,
+          isQueueTask,  // 🆕 传递 isQueueTask 标记
         });
         log.info(`[attempt] 🔍 After sanitizeSessionHistory: ${prior.length} messages (user: ${prior.filter(m => m.role === "user").length}, assistant: ${prior.filter(m => m.role === "assistant").length})`);
         
