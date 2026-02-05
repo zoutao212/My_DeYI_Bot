@@ -29,6 +29,56 @@ import { createTypingSignaler } from "./typing-mode.js";
 import { setCurrentFollowupRunContext } from "../../agents/tools/enqueue-task-tool.js";
 import { getGlobalOrchestrator } from "../../agents/tools/enqueue-task-tool.js";
 
+/**
+ * 判断错误是否可重试
+ */
+function isRetryableError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  
+  // 不可重试的错误类型
+  const nonRetryablePatterns = [
+    "prohibited_content",      // 内容违规
+    "safety",                  // 安全策略
+    "recitation",              // 版权内容
+    "blocked",                 // 被阻止
+    "content_filter",          // 内容过滤
+    "policy_violation",        // 政策违规
+    "invalid_request_error",   // 无效请求
+    "authentication_error",    // 认证错误
+    "invalid_argument",        // 无效参数
+    "permission_denied",       // 权限拒绝
+  ];
+  
+  // 检查是否是不可重试的错误
+  for (const pattern of nonRetryablePatterns) {
+    if (message.includes(pattern)) {
+      return false;
+    }
+  }
+  
+  // 可重试的错误类型
+  const retryablePatterns = [
+    "timeout",                 // 超时
+    "network",                 // 网络错误
+    "rate_limit",              // 速率限制
+    "overloaded",              // 服务器过载
+    "internal_error",          // 内部错误
+    "503",                     // 服务不可用
+    "502",                     // 网关错误
+    "504",                     // 网关超时
+  ];
+  
+  // 检查是否是可重试的错误
+  for (const pattern of retryablePatterns) {
+    if (message.includes(pattern)) {
+      return true;
+    }
+  }
+  
+  // 默认不重试
+  return false;
+}
+
 export function createFollowupRunner(params: {
   opts?: GetReplyOptions;
   typing: TypingController;
@@ -222,18 +272,49 @@ export function createFollowupRunner(params: {
         const message = err instanceof Error ? err.message : String(err);
         defaultRuntime.error?.(`Followup agent failed before reply: ${message}`);
         
-        // 🔧 如果找到了子任务，更新状态为 "failed" 并保存错误信息
+        // 🔧 检查错误类型
+        const isRetryable = isRetryableError(err);
+        
+        // 🔧 如果找到了子任务，更新状态并保存错误信息
         if (taskTree && subTask) {
           subTask.error = message;
           subTask.retryCount++;
-          await orchestrator.saveTaskTree(taskTree);
-          console.error(`[followup-runner] ❌ Sub task failed: ${subTask.id} - ${message}`);
-        }
-        
-        // 🔧 即使任务失败，也要触发下一个任务的执行
-        if (queued.run.sessionKey) {
-          const queueKey = queued.run.sessionKey;
-          finalizeWithFollowup(undefined, queueKey, createFollowupRunner(params));
+          
+          if (isRetryable && subTask.retryCount < 3) {
+            // ✅ 可重试错误，标记为 "pending" 并重新入队
+            subTask.status = "pending";
+            await orchestrator.saveTaskTree(taskTree);
+            console.warn(`[followup-runner] ⚠️ Sub task failed (retryable), will retry: ${subTask.id} (attempt ${subTask.retryCount}/3)`);
+            
+            // 重新入队
+            if (queued.run.sessionKey) {
+              const queueKey = queued.run.sessionKey;
+              finalizeWithFollowup(undefined, queueKey, createFollowupRunner(params));
+            }
+          } else {
+            // ❌ 不可重试错误或重试次数用尽，标记为 "failed"
+            subTask.status = "failed";
+            await orchestrator.saveTaskTree(taskTree);
+            
+            // 更新任务树状态
+            const anyFailed = taskTree.subTasks.some((t) => t.status === "failed");
+            if (anyFailed) {
+              taskTree.status = "failed";
+              await orchestrator.saveTaskTree(taskTree);
+            }
+            
+            console.error(`[followup-runner] ❌ Sub task failed (non-retryable or max retries): ${subTask.id} - ${message}`);
+            
+            // ❌ 停止执行后续任务
+            console.error(`[followup-runner] ❌ Task tree failed, stopping queue: ${taskTree.id}`);
+            // 不再调用 finalizeWithFollowup，停止队列执行
+          }
+        } else {
+          // 没有找到子任务，继续执行下一个任务（保持原有行为）
+          if (queued.run.sessionKey) {
+            const queueKey = queued.run.sessionKey;
+            finalizeWithFollowup(undefined, queueKey, createFollowupRunner(params));
+          }
         }
         
         return;

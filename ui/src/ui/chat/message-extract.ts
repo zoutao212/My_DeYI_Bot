@@ -33,7 +33,7 @@ export function stripEnvelope(text: string): string {
   return text.slice(match[0].length);
 }
 
-const MAX_TEXT_LENGTH = 2000; // 最大显示长度
+const MAX_TEXT_LENGTH = 20000; // 最大显示长度（已从 2000 增加到 20000）
 
 export function extractText(message: unknown): string | null {
   const m = message as Record<string, unknown>;

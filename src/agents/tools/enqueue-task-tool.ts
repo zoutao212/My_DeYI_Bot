@@ -100,8 +100,37 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
   return {
     label: "Enqueue Task",
     name: "enqueue_task",
-    description:
-      "将任务加入队列，稍后自动执行。用于生成多段内容或执行一系列关联任务。每个任务会单独执行并回复。",
+    description: `将任务加入队列，稍后自动执行。这是一个强大的递归任务分解系统。
+
+**核心能力**：
+- 递归分解：任务可以分解成子任务，子任务可以继续分解（最多 3 层）
+- 质量评估：AI 自主评估每个阶段的质量（初始分解、子任务完成、整体完成）
+- 动态调整：根据质量评估结果动态调整任务树（continue/adjust/restart/overthrow）
+- 失败学习：从失败中学习，避免重复错误
+
+**使用场景**（必须分解）：
+1. 大量内容生成（> 5000 字）→ 每 2000-3000 字一个子任务
+2. 大量数据处理（> 100 个文件或 > 50 万字）→ 按文件/章节/主题分组
+3. 多步骤复杂任务（> 3 个步骤）→ 每个步骤一个子任务
+4. 并行处理场景 → 为每个独立单元创建子任务
+
+**重要规则**：
+- ✅ 用户直接请求时：可以调用 enqueue_task 创建多个任务
+- ❌ 执行队列任务时：不要调用 enqueue_task（除非递归分解）
+- ✅ 递归分解：如果子任务仍然太复杂（> 3000 字、> 2 步骤），可以继续分解
+
+**参数说明**：
+- prompt：任务的详细提示词，必须清晰、具体、可执行、有标准（包含上下文、要求、质量标准）
+- summary：任务的简短描述，用于任务看板显示
+
+**示例**：
+用户：请生成 10000 字的科幻小说
+→ 调用 enqueue_task 5 次，每次 2000 字，每个 prompt 包含详细要求
+→ 系统自动执行，自动评估质量，自动调整
+
+**任务树存储**：
+- 自动保存到：~/.clawdbot/tasks/{sessionId}/TASK_TREE.json
+- 支持断点恢复、版本回滚、失败学习`,
     parameters: EnqueueTaskSchema,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;

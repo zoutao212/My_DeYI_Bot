@@ -33,6 +33,7 @@ export type SystemPromptL10n = {
   taskDecompositionWhenLine2: string;
   taskDecompositionWhenLine3: string;
   taskDecompositionWhenLine4: string;
+  taskDecompositionWhenLine5: string; // 新增
   taskDecompositionHowTitle: string;
   taskDecompositionHowLine1: string;
   taskDecompositionHowLine2: string;
@@ -52,6 +53,10 @@ export type SystemPromptL10n = {
   taskDecompositionRulesLine2: string;
   taskDecompositionRulesLine3: string;
   taskDecompositionCriticalWarning: string;
+  taskDecompositionCriticalWarningLine1: string; // 新增
+  taskDecompositionCriticalWarningLine2: string; // 新增
+  taskDecompositionCriticalWarningLine3: string; // 新增
+  taskDecompositionCriticalWarningLine4: string; // 新增
   taskDecompositionStorageTitle: string;
   taskDecompositionStorageLine1: string;
   taskDecompositionStorageLine2: string;
@@ -237,36 +242,41 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
   enqueueTaskRulesExample2: "Queue task: \"Please generate the 1st piece of content\"",
   enqueueTaskRulesExample2Correct: "→ ✅ Correct: Generate the 1st piece of content directly",
   enqueueTaskRulesExample2Wrong: "→ ❌ Wrong: Call enqueue_task to generate more tasks",
-  taskDecompositionTitle: "## Task Decomposition",
-  taskDecompositionIntro: "When you receive a complex task, you should proactively decompose it into multiple subtasks.",
-  taskDecompositionWhenTitle: "### When should you decompose a task?",
-  taskDecompositionWhenLine1: "- ✅ Tasks involving large content generation (e.g., generating a 10,000-word article) → Decompose into multiple 2,000-word subtasks",
-  taskDecompositionWhenLine2: "- ✅ Tasks involving large data processing (e.g., summarizing a 1-million-word ebook) → Decompose into multiple chapter subtasks",
-  taskDecompositionWhenLine3: "- ✅ Tasks involving multiple steps (e.g., read file, analyze content, then generate report) → Decompose into multiple step subtasks",
-  taskDecompositionWhenLine4: "- ✅ Tasks requiring parallel processing of multiple files or data → Create a subtask for each file",
-  taskDecompositionHowTitle: "### How to decompose a task?",
-  taskDecompositionHowLine1: "1. **Analyze the task**: Understand the user's needs and identify key steps",
-  taskDecompositionHowLine2: "2. **Create subtasks**: Create a subtask for each step using the `enqueue_task` tool",
-  taskDecompositionHowLine3: "3. **Provide clear prompts**: Each subtask's prompt should be clear, specific, and executable",
-  taskDecompositionHowLine4: "4. **Provide brief summaries**: Each subtask's summary should briefly describe the task goal",
-  taskDecompositionExampleTitle: "### Example",
-  taskDecompositionExampleRequest: "**User request**: Please help me generate a 10,000-word science fiction novel",
-  taskDecompositionExampleDecomposition: "**Your decomposition**:",
-  taskDecompositionExampleStep1: "1. Call `enqueue_task`, prompt: \"Please generate words 1-2000 of the sci-fi novel, including opening and character introduction\", summary: \"Generate novel words 1-2000\"",
-  taskDecompositionExampleStep2: "2. Call `enqueue_task`, prompt: \"Please generate words 2001-4000 of the sci-fi novel, continuing story development\", summary: \"Generate novel words 2001-4000\"",
-  taskDecompositionExampleStep3: "3. Call `enqueue_task`, prompt: \"Please generate words 4001-6000 of the sci-fi novel, advancing the plot\", summary: \"Generate novel words 4001-6000\"",
-  taskDecompositionExampleStep4: "4. Call `enqueue_task`, prompt: \"Please generate words 6001-8000 of the sci-fi novel, entering the climax\", summary: \"Generate novel words 6001-8000\"",
-  taskDecompositionExampleStep5: "5. Call `enqueue_task`, prompt: \"Please generate words 8001-10000 of the sci-fi novel, completing the ending\", summary: \"Generate novel words 8001-10000\"",
-  taskDecompositionExampleReply: "6. Reply to user with confirmation",
-  taskDecompositionRulesTitle: "### Important Rules",
-  taskDecompositionRulesLine1: "- ❌ **Do NOT call `enqueue_task` when executing queue tasks**: If you are executing a queue task, do not call `enqueue_task` to create new tasks, as this will cause an infinite loop",
-  taskDecompositionRulesLine2: "- ❌ **Do NOT repeat the same tool calls**: If you find yourself repeating the same tool calls, stop and think if there's a better approach",
-  taskDecompositionRulesLine3: "- ✅ **Check task completion**: After each subtask completes, check if the output meets expectations; if not, you can create supplementary tasks",
-  taskDecompositionCriticalWarning: "- ⚠️ **CRITICAL**: Do NOT describe tasks in text; actually call the `enqueue_task` tool to create tasks. Describing tasks is NOT the same as creating tasks! You MUST call the tool!",
-  taskDecompositionStorageTitle: "### Task Tree Storage Location",
-  taskDecompositionStorageLine1: "- Task trees are automatically saved to: `~/.clawdbot/tasks/{sessionId}/TASK_TREE.json`",
-  taskDecompositionStorageLine2: "- You can use the `show_task_board` tool to view a visual representation of the task tree",
-  taskDecompositionStorageLine3: "- The system automatically creates checkpoints to support recovery from interruptions",
+  taskDecompositionTitle: "## Task Decomposition & Quality-Driven",
+  taskDecompositionIntro: "You have a powerful **recursive task decomposition system** that enables you to handle large complex tasks, autonomously assess quality, dynamically adjust plans, and learn from failures. This is not a simple task queue, but an intelligent, self-optimizing task management system.",
+  taskDecompositionWhenTitle: "### When should you use task decomposition?",
+  taskDecompositionWhenLine1: "**Must decompose scenarios** (mandatory):",
+  taskDecompositionWhenLine2: "- ✅ Large content generation (> 5000 words) → 2000-3000 words per subtask",
+  taskDecompositionWhenLine3: "- ✅ Large data processing (> 100 files or > 500k words) → Group by file/chapter/topic",
+  taskDecompositionWhenLine4: "- ✅ Multi-step complex tasks (> 3 clear steps) → One subtask per step",
+  taskDecompositionWhenLine5: "- ✅ Parallel processing scenarios → Create a subtask for each independent unit",
+  taskDecompositionHowTitle: "### How to use task decomposition?",
+  taskDecompositionHowLine1: "**Step 1: Analyze task** - Task scale (content volume, data volume), complexity (step count, dependencies), decomposition strategy",
+  taskDecompositionHowLine2: "**Step 2: Create task tree** - Use `enqueue_task` tool to create subtasks",
+  taskDecompositionHowLine3: "**Step 3: Provide clear prompts** - Each subtask's prompt must be: self-contained, specific, executable, with standards (including context, requirements, quality standards)",
+  taskDecompositionHowLine4: "**Step 4: Quality assessment** - System automatically triggers quality assessment after initial decomposition, subtask completion, and overall completion",
+  taskDecompositionExampleTitle: "### Example: Generate 10,000-word novel",
+  taskDecompositionExampleRequest: "**User request**: Please help me generate a 10,000-word science fiction novel about Mars colonization",
+  taskDecompositionExampleDecomposition: "**Your response**:",
+  taskDecompositionExampleStep1: "1. Call `enqueue_task`, prompt: \"Generate words 1-2000 of sci-fi novel, including opening and character introduction. Setting: 2150 Mars colony. Protagonist: Li Ming, 30-year-old engineer. Opening: Start with an accident. Style: Hard sci-fi. Word count: 1800-2200 words.\", summary: \"Novel words 1-2000\"",
+  taskDecompositionExampleStep2: "2. Call `enqueue_task`, prompt: \"Generate words 2001-4000 of sci-fi novel, continuing story development. Continue from previous, advance plot, maintain consistent style. Word count: 1800-2200 words.\", summary: \"Novel words 2001-4000\"",
+  taskDecompositionExampleStep3: "3. ... Continue creating other subtasks",
+  taskDecompositionExampleStep4: "4. Reply to user: \"Tasks have been queued, system will execute automatically. You can use show_task_board to check progress.\"",
+  taskDecompositionExampleStep5: "",
+  taskDecompositionExampleReply: "",
+  taskDecompositionRulesTitle: "### Recursive Decomposition",
+  taskDecompositionRulesLine1: "**Subtasks can be further decomposed!** When a subtask is still too complex (content > 3000 words, steps > 2, complexity high), you can continue decomposing while executing that subtask.",
+  taskDecompositionRulesLine2: "**Depth limit**: Maximum 3 levels by default to prevent infinite recursion.",
+  taskDecompositionRulesLine3: "**Intelligent judgment**: AI autonomously determines whether to continue decomposing.",
+  taskDecompositionCriticalWarning: "### Important Rules",
+  taskDecompositionCriticalWarningLine1: "- ✅ **When user directly requests**: Immediately analyze task scale, use `enqueue_task` to create subtasks, confirm to user",
+  taskDecompositionCriticalWarningLine2: "- ❌ **When executing queue tasks**: Generate content directly, do NOT call `enqueue_task` (unless recursive decomposition)",
+  taskDecompositionCriticalWarningLine3: "- ⚠️ **CRITICAL**: Do NOT describe tasks in text; actually call the `enqueue_task` tool to create tasks!",
+  taskDecompositionCriticalWarningLine4: "- ❌ **Do NOT repeat the same tool calls**: If a tool has already succeeded, do NOT call it again",
+  taskDecompositionStorageTitle: "### Quality Assessment & Failure Learning",
+  taskDecompositionStorageLine1: "**Quality assessment**: System automatically assesses quality, AI autonomously decides (continue/adjust/restart/overthrow)",
+  taskDecompositionStorageLine2: "**Failure learning**: System records failure reasons, extracts lessons, injects experience into new task trees",
+  taskDecompositionStorageLine3: "**Task tree storage**: Automatically saved to `~/.clawdbot/tasks/{sessionId}/TASK_TREE.json`, supports recovery and version rollback",
   toolParamsQuickRef: `## Core Tool Parameters
 - **write(path, content)**: path=file path, content=full content (⚠️ Overwrites entire file!)
 - **edit(path, oldText, newText)**: path=file path, oldText=exact text to replace, newText=replacement text

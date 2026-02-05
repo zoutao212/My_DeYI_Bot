@@ -2,10 +2,23 @@
  * LLM 驱动的任务分解器
  * 
  * 使用 LLM 进行智能任务拆解，提供更准确和上下文相关的子任务生成。
+ * 
+ * 🆕 增强功能：
+ * - 递归分解：支持多层嵌套的任务分解
+ * - 失败学习：从失败经验中学习并生成改进的分解方案
+ * - 复杂度估算：估算任务的复杂度和预计时长
+ * - 动态调整：根据质量评估结果生成调整方案
  */
 
 import type { SubTask, DecompositionContext } from "./types.js";
 import type { TaskDecomposer } from "./decomposer.js";
+import type { 
+  FailureRecord, 
+  QualityReviewResult, 
+  TaskTreeChange,
+  SubTask as RecursiveSubTask,
+  TaskTree
+} from "../intelligent-task-decomposition/types.js";
 
 /**
  * LLM 配置
@@ -380,6 +393,356 @@ ${feedback}
         notes: ""
       }
     ];
+  }
+
+  // ========================================
+  // 🆕 递归任务系统新增方法
+  // ========================================
+
+  /**
+   * 判断子任务是否可以继续分解
+   * 
+   * 考虑因素：
+   * 1. 当前深度是否达到最大深度限制
+   * 2. 任务描述的复杂度（长度、动词数量、文件数量）
+   * 3. 任务是否明确要求分解
+   * 
+   * @param subTask 子任务
+   * @param currentDepth 当前深度
+   * @param maxDepth 最大深度（默认 3）
+   * @returns 是否可以继续分解
+   */
+  async canDecompose(
+    subTask: RecursiveSubTask,
+    currentDepth: number,
+    maxDepth: number = 3
+  ): Promise<boolean> {
+    // 1. 检查深度限制
+    if (currentDepth >= maxDepth) {
+      return false;
+    }
+
+    // 2. 如果任务已经被标记为不可分解，直接返回 false
+    if (subTask.canDecompose === false) {
+      return false;
+    }
+
+    // 3. 使用现有的 shouldDecompose 方法判断任务复杂度
+    const shouldDecompose = await this.shouldDecompose(subTask.prompt);
+    
+    return shouldDecompose;
+  }
+
+  /**
+   * 递归分解子任务
+   * 
+   * 支持多层嵌套的任务分解，每个子任务可以继续分解成更小的子任务。
+   * 
+   * @param subTask 要分解的子任务
+   * @param context 分解上下文
+   * @param maxDepth 最大分解深度（默认 3）
+   * @param failureHistory 失败历史（可选，用于学习）
+   * @returns 分解后的子任务列表
+   */
+  async decomposeRecursively(
+    subTask: RecursiveSubTask,
+    context: DecompositionContext,
+    maxDepth: number = 3,
+    failureHistory?: FailureRecord[]
+  ): Promise<RecursiveSubTask[]> {
+    const currentDepth = subTask.depth || 0;
+
+    // 1. 检查是否可以继续分解
+    const canDecompose = await this.canDecompose(subTask, currentDepth, maxDepth);
+    if (!canDecompose) {
+      return [];
+    }
+
+    try {
+      // 2. 如果有失败历史，使用失败学习方法
+      let subTasks: SubTask[];
+      if (failureHistory && failureHistory.length > 0) {
+        subTasks = await this.decomposeWithLessons(subTask.prompt, failureHistory);
+      } else {
+        // 3. 否则使用标准分解方法
+        subTasks = await this.decompose(subTask.prompt, context);
+      }
+
+      // 4. 转换为递归子任务格式
+      const recursiveSubTasks: RecursiveSubTask[] = subTasks.map((st, index) => ({
+        id: `${subTask.id}-${index + 1}`,
+        prompt: st.description,
+        summary: st.title,
+        status: "pending",
+        retryCount: 0,
+        createdAt: Date.now(),
+        parentId: subTask.id,
+        depth: currentDepth + 1,
+        children: [],
+        dependencies: st.dependencies.map(depId => `${subTask.id}-${depId.replace('T', '')}`),
+        canDecompose: true,
+        decomposed: false,
+        qualityReviewEnabled: subTask.qualityReviewEnabled,
+        metadata: {
+          complexity: "medium",
+          priority: "medium"
+        }
+      }));
+
+      return recursiveSubTasks;
+    } catch (error) {
+      console.error("递归分解失败:", error);
+      return [];
+    }
+  }
+
+  /**
+   * 从失败经验中学习并生成改进的分解方案
+   * 
+   * 将失败历史作为上下文注入 LLM，生成避免重复错误的分解方案。
+   * 
+   * @param task 任务描述
+   * @param failureHistory 失败历史
+   * @returns 改进的子任务列表
+   */
+  async decomposeWithLessons(
+    task: string,
+    failureHistory: FailureRecord[]
+  ): Promise<SubTask[]> {
+    try {
+      // 1. 构建包含失败经验的提示词
+      const prompt = this.buildDecompositionWithLessonsPrompt(task, failureHistory);
+      
+      // 2. 调用 LLM 进行分解
+      const llmResponse = await this.callLLM(prompt);
+      
+      // 3. 解析 LLM 响应
+      const subTasks = this.parseLLMResponse(llmResponse);
+      
+      // 4. 验证子任务数量
+      if (subTasks.length < 2) {
+        return this.getDefaultDecomposition(task);
+      }
+      
+      if (subTasks.length > 8) {
+        return subTasks.slice(0, 8);
+      }
+      
+      return subTasks;
+    } catch (error) {
+      console.error("失败学习分解失败:", error);
+      return this.getDefaultDecomposition(task);
+    }
+  }
+
+  /**
+   * 根据质量评估结果生成任务树变更
+   * 
+   * 将质量评估的改进建议转换为具体的任务树变更操作。
+   * 
+   * @param taskTree 任务树
+   * @param review 质量评估结果
+   * @returns 任务树变更列表
+   */
+  async generateAdjustments(
+    taskTree: TaskTree,
+    review: QualityReviewResult
+  ): Promise<TaskTreeChange[]> {
+    try {
+      // 1. 构建生成调整方案的提示词
+      const prompt = this.buildAdjustmentPrompt(taskTree, review);
+      
+      // 2. 调用 LLM 生成调整方案
+      const llmResponse = await this.callLLM(prompt);
+      
+      // 3. 解析 LLM 响应
+      const changes = this.parseAdjustmentResponse(llmResponse);
+      
+      return changes;
+    } catch (error) {
+      console.error("生成调整方案失败:", error);
+      return [];
+    }
+  }
+
+  /**
+   * 估算任务的复杂度和预计时长
+   * 
+   * 基于任务描述和历史数据估算任务的复杂度和预计时长。
+   * 
+   * @param subTask 子任务
+   * @returns 复杂度和预计时长
+   */
+  async estimateTask(subTask: RecursiveSubTask): Promise<{
+    complexity: "low" | "medium" | "high";
+    estimatedDuration: number;
+  }> {
+    try {
+      // 1. 基于任务描述长度估算复杂度
+      const descriptionLength = subTask.prompt.length;
+      let complexity: "low" | "medium" | "high";
+      let estimatedDuration: number;
+
+      if (descriptionLength < 100) {
+        complexity = "low";
+        estimatedDuration = 5 * 60 * 1000; // 5 分钟
+      } else if (descriptionLength < 300) {
+        complexity = "medium";
+        estimatedDuration = 15 * 60 * 1000; // 15 分钟
+      } else {
+        complexity = "high";
+        estimatedDuration = 30 * 60 * 1000; // 30 分钟
+      }
+
+      // 2. 根据子任务数量调整估算
+      if (subTask.children && subTask.children.length > 0) {
+        estimatedDuration *= subTask.children.length;
+      }
+
+      return { complexity, estimatedDuration };
+    } catch (error) {
+      console.error("估算任务失败:", error);
+      return {
+        complexity: "medium",
+        estimatedDuration: 15 * 60 * 1000
+      };
+    }
+  }
+
+  // ========================================
+  // 🆕 私有辅助方法
+  // ========================================
+
+  /**
+   * 构建包含失败经验的分解提示词
+   */
+  private buildDecompositionWithLessonsPrompt(
+    task: string,
+    failureHistory: FailureRecord[]
+  ): string {
+    const lessonsStr = failureHistory
+      .map((failure, index) => {
+        return `
+失败 ${index + 1}：
+- 原因：${failure.reason}
+- 上下文：${failure.context}
+- 教训：${failure.lessons.join("; ")}
+- 改进建议：${failure.improvements.join("; ")}
+`;
+      })
+      .join("\n");
+
+    return `你是一个任务分解专家。请将以下任务拆解成 2-8 个可执行的子任务。
+
+任务描述：
+${task}
+
+⚠️ 重要：以下是之前失败的经验，请务必避免重复这些错误：
+
+${lessonsStr}
+
+请按照以下格式返回子任务列表（JSON 格式）：
+
+\`\`\`json
+[
+  {
+    "id": "T1",
+    "title": "子任务标题",
+    "description": "详细描述",
+    "dependencies": [],
+    "outputs": ["预期产出1", "预期产出2"]
+  }
+]
+\`\`\`
+
+要求：
+1. 每个子任务应该是独立可执行的
+2. 子任务之间的依赖关系要明确
+3. 子任务标题要简洁明了
+4. 子任务描述要详细具体
+5. 预期产出要明确可验证
+6. 子任务数量在 2-8 个之间
+7. **务必避免之前失败的错误**
+8. **应用失败经验中的改进建议**
+
+请只返回 JSON 数组，不要包含其他内容。`;
+  }
+
+  /**
+   * 构建生成调整方案的提示词
+   */
+  private buildAdjustmentPrompt(
+    taskTree: TaskTree,
+    review: QualityReviewResult
+  ): string {
+    const subTasksStr = taskTree.subTasks
+      .map(st => `- ${st.id}: ${st.summary} (${st.status})`)
+      .join("\n");
+
+    const findingsStr = review.findings.join("\n- ");
+    const suggestionsStr = review.suggestions.join("\n- ");
+
+    return `你是一个任务调整专家。请根据质量评估结果生成任务树调整方案。
+
+当前任务树：
+根任务：${taskTree.rootTask}
+子任务：
+${subTasksStr}
+
+质量评估结果：
+发现的问题：
+- ${findingsStr}
+
+改进建议：
+- ${suggestionsStr}
+
+请生成具体的调整方案（JSON 格式）：
+
+\`\`\`json
+[
+  {
+    "type": "add_task" | "remove_task" | "modify_task" | "move_task" | "merge_tasks" | "split_task",
+    "targetId": "目标任务 ID",
+    "before": "变更前的值（可选）",
+    "after": "变更后的值",
+    "timestamp": ${Date.now()}
+  }
+]
+\`\`\`
+
+变更类型说明：
+- add_task: 添加新任务（after 包含新任务的完整信息）
+- remove_task: 删除任务（targetId 是要删除的任务 ID）
+- modify_task: 修改任务（after 包含要修改的字段）
+- move_task: 移动任务到新的父任务（after 包含新的 parentId）
+- merge_tasks: 合并多个任务（targetId 是合并后的任务 ID，after 包含要合并的任务 ID 列表）
+- split_task: 拆分任务（targetId 是要拆分的任务 ID，after 包含拆分后的新任务列表）
+
+请只返回 JSON 数组，不要包含其他内容。`;
+  }
+
+  /**
+   * 解析调整方案响应
+   */
+  private parseAdjustmentResponse(response: string): TaskTreeChange[] {
+    try {
+      // 提取 JSON 内容
+      const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/) || 
+                       response.match(/```\s*([\s\S]*?)\s*```/) ||
+                       [null, response];
+      
+      const jsonStr = jsonMatch[1] || response;
+      const parsed = JSON.parse(jsonStr.trim());
+      
+      if (!Array.isArray(parsed)) {
+        throw new Error("LLM 响应不是数组");
+      }
+      
+      return parsed as TaskTreeChange[];
+    } catch (error) {
+      console.error("解析调整方案失败:", error);
+      return [];
+    }
   }
 }
 
