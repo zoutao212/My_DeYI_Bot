@@ -7,8 +7,8 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
   toolingCaseSensitive: "工具名区分大小写。请严格按列表中的名称调用工具。",
   toolSummaries: {
     read: "**读取本地文件**（✅ 支持绝对路径如 C:\\Users\\...\\file.txt，✅ 支持分段读取大文件，使用 offset/limit 参数）",
-    write: "创建或覆盖文件",
-    edit: "精确替换文件中的文本",
+    write: "**文件写入工具**（支持 4 种模式：1️⃣ overwrite 覆盖整个文件（默认）、2️⃣ append 追加到文件末尾、3️⃣ insert 在指定行插入内容（需要 position 参数）、4️⃣ replace 替换指定行范围（需要 startLine 和 endLine 参数）。✅ 自动创建父目录，✅ 支持多种编码格式（utf-8/gbk/gb2312 等））",
+    edit: "**精确替换文件中的文本**（推荐用于追加内容：在文件末尾添加新内容）",
     apply_patch: "应用多文件补丁",
     grep: "在文件内容中搜索模式",
     find: "按 glob 模式查找文件",
@@ -111,10 +111,29 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
   taskDecompositionStorageLine2: "- 你可以使用 `show_task_board` 工具查看任务树的可视化展示",
   taskDecompositionStorageLine3: "- 系统会自动创建检查点，支持断点恢复",
   toolParamsQuickRef: `## 核心工具参数速查
-- **write(path, content)**:path=文件路径，content=完整内容
+- **write(path, content)**:path=文件路径，content=完整内容（⚠️ 会覆盖整个文件！）
 - **edit(path, oldText, newText)**:path=文件路径，oldText=要替换的原文，newText=替换后的新文本
 - **read(path, [offset], [limit])**:path=文件路径（支持绝对路径如 C:\\Users\\...\\file.txt），offset=起始行，limit=行数
-- **exec(command, [workdir], [background])**:command=命令字符串，workdir=工作目录，background=是否后台`,
+- **exec(command, [workdir], [background])**:command=命令字符串，workdir=工作目录，background=是否后台
+
+## ⚠️ 文件写入最佳实践
+**追加内容到文件**：
+1. ✅ **推荐方式 1（使用 edit）**：
+   - 先 read 读取文件最后几行，找到文件末尾的标记（如最后一行）
+   - 使用 edit(path, oldText="最后一行内容", newText="最后一行内容\\n新内容")
+   
+2. ✅ **推荐方式 2（read + write）**：
+   - 先 read 读取整个文件内容
+   - 使用 write(path, content="旧内容\\n新内容")
+   
+3. ❌ **错误方式**：
+   - 直接 write(path, content="新内容") ← 这会覆盖整个文件！
+
+**创建新文件**：
+- 使用 write(path, content="内容") ← 这是正确的用法
+
+**完全覆盖文件**：
+- 使用 write(path, content="新内容") ← 只有在确实需要覆盖时才使用`,
   cliQuickRefTitle: "## Clawdbot CLI 速查",
   cliQuickRefIntro: "Clawdbot 通过子命令控制。不要臆造命令。",
   cliQuickRefGatewayHeader: "管理 Gateway 守护进程服务:",

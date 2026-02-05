@@ -759,18 +759,19 @@ export async function sanitizeSessionHistory(params: {
       }
     }
     
-    // Fix Gemini format functionResponse.name = "unknown" (role: "user")
-    if (msg.role === "user" && msgAny.parts) {
+    // Fix Gemini format functionResponse.name = "unknown" (role: "user" or "function")
+    // 🔧 Fix: Also handle role="function" (used by some providers)
+    if ((msg.role === "user" || (msgAny.role === "function" as any)) && msgAny.parts) {
       for (const part of msgAny.parts) {
         if (part && typeof part === "object" && part.functionResponse) {
           if (part.functionResponse.name === "unknown" && geminiToolNames.length > 0) {
             const toolName = geminiToolNames.shift()!;
             part.functionResponse.name = toolName;
-            log.info(`[sanitize] ✓ Fixed Gemini functionResponse.name: "unknown" → "${toolName}" (index=${i})`);
+            log.info(`[sanitize] ✓ Fixed Gemini functionResponse.name: "unknown" → "${toolName}" (role=${msg.role}, index=${i})`);
           } else if (geminiToolNames.length > 0) {
             // Remove from queue even if name is not "unknown"
             geminiToolNames.shift();
-            log.debug(`[sanitize] functionResponse already has name="${part.functionResponse.name}", removed from queue (index=${i})`);
+            log.debug(`[sanitize] functionResponse already has name="${part.functionResponse.name}", removed from queue (role=${msg.role}, index=${i})`);
           }
         }
       }

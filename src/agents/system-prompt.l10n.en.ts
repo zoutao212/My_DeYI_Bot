@@ -164,8 +164,8 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
   toolingCaseSensitive: "Tool names are case-sensitive. Call tools exactly as listed.",
   toolSummaries: {
     read: "Read file contents (supports local file paths like C:\\Users\\...\\file.txt; use offset/limit for large files)",
-    write: "Create or overwrite files (auto-creates parent dirs; overwrites if exists)",
-    edit: "Replace exact text in a file (oldText must match exactly including whitespace; use for surgical edits)",
+    write: "**Write content to files** (4 modes: 1️⃣ overwrite - replace entire file (default), 2️⃣ append - add to end, 3️⃣ insert - insert at line (requires position param), 4️⃣ replace - replace line range (requires startLine & endLine params). ✅ Auto-creates parent dirs, ✅ Supports multiple encodings: utf-8/gbk/gb2312/etc)",
+    edit: "**Replace exact text in a file** (recommended for appending: add new content at file end)",
     apply_patch: "Apply multi-file patches",
     grep: "Search file contents for patterns",
     find: "Find files by glob pattern",
@@ -268,10 +268,29 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
   taskDecompositionStorageLine2: "- You can use the `show_task_board` tool to view a visual representation of the task tree",
   taskDecompositionStorageLine3: "- The system automatically creates checkpoints to support recovery from interruptions",
   toolParamsQuickRef: `## Core Tool Parameters
-- **write(path, content)**: path=file path, content=full content. Example: write({ path: "test.txt", content: "hello" })
+- **write(path, content)**: path=file path, content=full content (⚠️ Overwrites entire file!)
 - **edit(path, oldText, newText)**: path=file path, oldText=exact text to replace, newText=replacement text
 - **read(path, [offset], [limit])**: path=file path (supports absolute paths like C:\\Users\\...\\file.txt), offset=start line (optional), limit=line count (optional)
-- **exec(command, [workdir], [background])**: command=shell command, workdir=working dir (optional), background=run async (optional)`,
+- **exec(command, [workdir], [background])**: command=shell command, workdir=working dir (optional), background=run async (optional)
+
+## ⚠️ File Writing Best Practices
+**To append content to a file**:
+1. ✅ **Recommended Method 1 (using edit)**:
+   - First, read the last few lines to find the end marker (e.g., last line)
+   - Use edit(path, oldText="last line content", newText="last line content\\nnew content")
+   
+2. ✅ **Recommended Method 2 (read + write)**:
+   - First, read the entire file content
+   - Use write(path, content="old content\\nnew content")
+   
+3. ❌ **Wrong Method**:
+   - Directly write(path, content="new content") ← This overwrites the entire file!
+
+**To create a new file**:
+- Use write(path, content="content") ← This is the correct usage
+
+**To completely overwrite a file**:
+- Use write(path, content="new content") ← Only use when you really need to overwrite`,
   cliQuickRefTitle: "## Clawdbot CLI Quick Reference",
   cliQuickRefIntro: "Clawdbot is controlled via subcommands. Do not invent commands.",
   cliQuickRefGatewayHeader: "To manage the Gateway daemon service (start/stop/restart):",

@@ -1,0 +1,228 @@
+import fs from "node:fs";
+import path from "node:path";
+import type { AgentToolResult } from "@mariozechner/pi-agent-core";
+import type { AnyAgentTool } from "./pi-tools.types.js";
+import { patchToolSchemaForClaudeCompatibility, normalizeToolParams } from "./pi-tools.read.js";
+
+/**
+ * Enhanced write tool with multiple modes:
+ * - overwrite: Replace entire file (default)
+ * - append: Append to end of file
+ * - insert: Insert at specific line
+ * - replace: Replace line range
+ */
+
+type WriteMode = "overwrite" | "append" | "insert" | "replace";
+type SupportedEncoding = "utf-8" | "utf8" | "gbk" | "gb2312" | "ascii" | "latin1";
+
+async function ensureParentDir(filePath: string): Promise<void> {
+  const dir = path.dirname(filePath);
+  await fs.promises.mkdir(dir, { recursive: true });
+}
+
+async function readFileLines(filePath: string, encoding: SupportedEncoding = "utf-8"): Promise<string[]> {
+  try {
+    const content = await fs.promises.readFile(filePath, { encoding: encoding as BufferEncoding });
+    return content.split("\n");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return [];
+    }
+    throw err;
+  }
+}
+
+async function writeFileLines(filePath: string, lines: string[], encoding: SupportedEncoding = "utf-8"): Promise<void> {
+  const content = lines.join("\n");
+  await fs.promises.writeFile(filePath, content, { encoding: encoding as BufferEncoding });
+}
+
+export function createEnhancedWriteTool(baseTool: AnyAgentTool): AnyAgentTool {
+  const patched = patchToolSchemaForClaudeCompatibility(baseTool);
+  
+  // Enhance schema with new parameters
+  const schema =
+    patched.parameters && typeof patched.parameters === "object"
+      ? (patched.parameters as Record<string, unknown>)
+      : {};
+  
+  const properties = schema.properties && typeof schema.properties === "object"
+    ? { ...(schema.properties as Record<string, unknown>) }
+    : {};
+  
+  // Add mode parameter
+  properties.mode = {
+    type: "string",
+    description: "Write mode: overwrite (default), append, insert, or replace",
+    enum: ["overwrite", "append", "insert", "replace"],
+  };
+  
+  // Add position parameter (for insert mode)
+  properties.position = {
+    type: "number",
+    description: "Line number to insert at (1-indexed, required for insert mode)",
+  };
+  
+  // Add startLine parameter (for replace mode)
+  properties.startLine = {
+    type: "number",
+    description: "Start line number for replacement (1-indexed, inclusive, required for replace mode)",
+  };
+  
+  // Add endLine parameter (for replace mode)
+  properties.endLine = {
+    type: "number",
+    description: "End line number for replacement (1-indexed, inclusive, required for replace mode)",
+  };
+  
+  // Add encoding parameter
+  properties.encoding = {
+    type: "string",
+    description: "File encoding (default: utf-8)",
+  };
+  
+  // Add createDirs parameter
+  properties.createDirs = {
+    type: "boolean",
+    description: "Auto-create parent directories (default: true)",
+  };
+  
+  // Update description
+  const enhancedDescription = 
+    "Write content to a file with multiple modes: " +
+    "overwrite (default, replaces entire file), " +
+    "append (adds to end), " +
+    "insert (inserts at line), " +
+    "replace (replaces line range). " +
+    "Auto-creates parent directories.";
+  
+  const enhancedSchema = {
+    ...schema,
+    properties,
+  };
+  
+  return {
+    ...patched,
+    description: enhancedDescription,
+    parameters: enhancedSchema,
+    execute: async (_toolCallId, params, _signal) => {
+      const normalized = normalizeToolParams(params);
+      const record =
+        normalized ??
+        (params && typeof params === "object" ? (params as Record<string, unknown>) : undefined);
+      
+      if (!record) {
+        throw new Error("Missing parameters for write tool");
+      }
+      
+      // Extract parameters
+      const filePath = typeof record.path === "string" ? record.path : 
+                      typeof record.file_path === "string" ? record.file_path : undefined;
+      
+      if (!filePath) {
+        throw new Error("Missing required parameter: path");
+      }
+      
+      const content = typeof record.content === "string" ? record.content : "";
+      const mode = (typeof record.mode === "string" ? record.mode : "overwrite") as WriteMode;
+      const position = typeof record.position === "number" ? record.position : undefined;
+      const startLine = typeof record.startLine === "number" ? record.startLine : undefined;
+      const endLine = typeof record.endLine === "number" ? record.endLine : undefined;
+      const encoding = (typeof record.encoding === "string" ? record.encoding : "utf-8") as SupportedEncoding;
+      const createDirs = typeof record.createDirs === "boolean" ? record.createDirs : true;
+      
+      // Validate mode-specific parameters
+      if (mode === "insert" && position === undefined) {
+        throw new Error("insert mode requires position parameter");
+      }
+      
+      if (mode === "replace" && (startLine === undefined || endLine === undefined)) {
+        throw new Error("replace mode requires startLine and endLine parameters");
+      }
+      
+      if (mode === "replace" && startLine !== undefined && endLine !== undefined && startLine > endLine) {
+        throw new Error(`Invalid line range: startLine (${startLine}) > endLine (${endLine})`);
+      }
+      
+      // Create parent directories if needed
+      if (createDirs) {
+        await ensureParentDir(filePath);
+      }
+      
+      try {
+        let resultMessage: string;
+        
+        switch (mode) {
+          case "overwrite": {
+            // Default behavior: overwrite entire file
+            await fs.promises.writeFile(filePath, content, { encoding: encoding as BufferEncoding });
+            resultMessage = `File written successfully (overwrite mode): ${filePath}`;
+            break;
+          }
+          
+          case "append": {
+            // Append to end of file
+            await fs.promises.appendFile(filePath, content, { encoding: encoding as BufferEncoding });
+            resultMessage = `Content appended successfully: ${filePath}`;
+            break;
+          }
+          
+          case "insert": {
+            // Insert at specific line
+            const lines = await readFileLines(filePath, encoding);
+            const insertPos = Math.max(0, Math.min(position! - 1, lines.length));
+            const contentLines = content.split("\n");
+            
+            // Remove trailing empty line from content if it exists
+            if (contentLines.length > 0 && contentLines[contentLines.length - 1] === "") {
+              contentLines.pop();
+            }
+            
+            lines.splice(insertPos, 0, ...contentLines);
+            await writeFileLines(filePath, lines, encoding);
+            resultMessage = `Content inserted at line ${position}: ${filePath}`;
+            break;
+          }
+          
+          case "replace": {
+            // Replace line range
+            const lines = await readFileLines(filePath, encoding);
+            const start = Math.max(0, Math.min(startLine! - 1, lines.length));
+            const end = Math.max(0, Math.min(endLine!, lines.length));
+            const deleteCount = end - start;
+            
+            const contentLines = content.split("\n");
+            
+            // Remove trailing empty line from content if it exists
+            if (contentLines.length > 0 && contentLines[contentLines.length - 1] === "") {
+              contentLines.pop();
+            }
+            
+            lines.splice(start, deleteCount, ...contentLines);
+            await writeFileLines(filePath, lines, encoding);
+            resultMessage = `Lines ${startLine}-${endLine} replaced: ${filePath}`;
+            break;
+          }
+          
+          default: {
+            throw new Error(`Invalid mode: ${mode}`);
+          }
+        }
+        
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: resultMessage,
+            },
+          ],
+          details: { filePath, mode, encoding },
+        } satisfies AgentToolResult<unknown>;
+        
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        throw new Error(`Failed to write file: ${errorMsg}`);
+      }
+    },
+  };
+}

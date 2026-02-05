@@ -17,7 +17,7 @@ export const SYSTEM_PROMPT_L10N_MINIMAL_ZH: SystemPromptL10n = {
   toolingCaseSensitive: "工具名区分大小写。",
   toolSummaries: {
     read: "读取文件",
-    write: "创建或覆盖文件",
+    write: "写入文件（支持 overwrite/append/insert/replace 四种模式）",
     edit: "精确替换文件中的文本",
     apply_patch: "应用多文件补丁",
     grep: "搜索文件内容",

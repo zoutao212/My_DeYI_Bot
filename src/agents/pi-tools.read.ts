@@ -7,6 +7,7 @@ import { detectMime } from "../media/mime.js";
 import type { AnyAgentTool } from "./pi-tools.types.js";
 import { assertSandboxPath } from "./sandbox-paths.js";
 import { sanitizeToolResultImages } from "./tool-images.js";
+import { createEnhancedWriteTool } from "./pi-tools.write.js";
 
 // NOTE(steipete): Upstream read now does file-magic MIME detection; we keep the wrapper
 // to normalize payloads and sanitize oversized images before they hit providers.
@@ -304,7 +305,8 @@ export function createSandboxedReadTool(root: string) {
 
 export function createSandboxedWriteTool(root: string) {
   const base = createWriteTool(root) as unknown as AnyAgentTool;
-  return wrapSandboxPathGuard(wrapToolParamNormalization(base, CLAUDE_PARAM_GROUPS.write), root);
+  const enhanced = createEnhancedWriteTool(base);
+  return wrapSandboxPathGuard(enhanced, root);
 }
 
 export function createSandboxedEditTool(root: string) {
@@ -352,13 +354,25 @@ export function createClawdbotReadTool(base: AnyAgentTool): AnyAgentTool {
         ? (record.encoding as SupportedEncoding)
         : "auto";
       
+      // Extract offset and limit parameters
+      const offset = typeof record?.offset === "number" ? record.offset : undefined;
+      const limit = typeof record?.limit === "number" ? record.limit : undefined;
+      
       // Check if file is a text file and encoding is specified
       const isTextFile = filePath.match(/\.(txt|md|json|xml|html|css|js|ts|py|java|c|cpp|h|hpp|sh|bat|ps1|yaml|yml|toml|ini|cfg|conf|log)$/i);
       
       if (isTextFile && encoding !== "utf-8") {
         try {
           // Read file with specified encoding
-          const content = await readFileWithEncoding(filePath, encoding);
+          let content = await readFileWithEncoding(filePath, encoding);
+          
+          // 🔧 Fix: Apply offset and limit to content
+          if (offset !== undefined || limit !== undefined) {
+            const lines = content.split("\n");
+            const startLine = offset !== undefined ? Math.max(0, offset - 1) : 0; // offset is 1-indexed
+            const endLine = limit !== undefined ? startLine + limit : lines.length;
+            content = lines.slice(startLine, endLine).join("\n");
+          }
           
           // Return as text result
           return {
@@ -368,7 +382,7 @@ export function createClawdbotReadTool(base: AnyAgentTool): AnyAgentTool {
                 text: `Read text file [${encoding}]\n\n${content}`,
               },
             ],
-            details: { encoding, filePath },
+            details: { encoding, filePath, offset, limit },
           } satisfies AgentToolResult<unknown>;
         } catch (err) {
           // Fall back to default read if encoding fails

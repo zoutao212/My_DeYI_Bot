@@ -467,6 +467,8 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
                   
                   // 找到对应的 functionCall 来获取工具名称
                   let toolName = "unknown";
+                  
+                  // 方法 1：从对应的 assistant 消息的 content 中提取（Gemini 格式）
                   if (lastPair && lastPair.assistantIndex >= 0) {
                     const assistantMsg = bodyJson.messages[lastPair.assistantIndex];
                     if (Array.isArray(assistantMsg.content)) {
@@ -477,6 +479,22 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
                         }
                       }
                     }
+                    
+                    // 方法 2：从 tool_calls 中提取（OpenAI 格式）
+                    if (toolName === "unknown" && Array.isArray(assistantMsg.tool_calls)) {
+                      for (const toolCall of assistantMsg.tool_calls) {
+                        if (toolCall && toolCall.id === toolCallId && toolCall.function && toolCall.function.name) {
+                          toolName = toolCall.function.name;
+                          console.warn(`[llm-gated-fetch] [DEBUG] 从 tool_calls 中提取工具名称: ${toolName}`);
+                          break;
+                        }
+                      }
+                    }
+                  }
+                  
+                  // 如果还是 unknown，记录警告
+                  if (toolName === "unknown") {
+                    console.error(`[llm-gated-fetch] ❌ 无法提取工具名称！tool_call_id=${toolCallId}, lastPair=${JSON.stringify(lastPair)}`);
                   }
                   
                   // 转换为 Gemini 格式
@@ -575,11 +593,20 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
           
           if (fixed) {
             // 重新序列化修复后的 body
-            init = { ...init, body: JSON.stringify(bodyJson) };
+            try {
+              const serialized = JSON.stringify(bodyJson);
+              init = { ...init, body: serialized };
+              console.warn(`[llm-gated-fetch] ✅ Body 序列化成功，长度: ${serialized.length} 字节`);
+            } catch (serializeError) {
+              console.error(`[llm-gated-fetch] ❌ Body 序列化失败:`, serializeError);
+              // 序列化失败，使用原始 body
+              console.warn(`[llm-gated-fetch] 使用原始 body（未修复）`);
+            }
           }
         }
       } catch (error) {
         // 解析失败，忽略（不是 JSON body）
+        console.warn(`[llm-gated-fetch] Body 解析失败（不是 JSON）:`, error);
       }
     }
     

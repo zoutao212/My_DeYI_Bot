@@ -37,6 +37,7 @@ import {
   patchToolSchemaForClaudeCompatibility,
   wrapToolParamNormalization,
 } from "./pi-tools.read.js";
+import { createEnhancedWriteTool } from "./pi-tools.write.js";
 import { cleanToolSchemaForGemini, normalizeToolParameters } from "./pi-tools.schema.js";
 import type { AnyAgentTool } from "./pi-tools.types.js";
 import type { SandboxContext } from "./sandbox.js";
@@ -270,11 +271,11 @@ export function createClawdbotCodingTools(options?: {
     if (tool.name === "bash" || tool.name === execToolName) return [];
     if (tool.name === "write") {
       if (sandboxRoot) return [];
-      // Wrap with param normalization for Claude Code compatibility
+      // Create enhanced write tool with multiple modes
       const writeTool = createWriteTool(workspaceRoot);
-      const normalized = wrapToolParamNormalization(writeTool, CLAUDE_PARAM_GROUPS.write);
+      const enhanced = createEnhancedWriteTool(writeTool);
       // Wrap with result fallback to ensure non-empty result (prevents LLM from repeating calls)
-      return [wrapToolWithResultFallback(normalized)];
+      return [wrapToolWithResultFallback(enhanced)];
     }
     if (tool.name === "edit") {
       if (sandboxRoot) return [];
