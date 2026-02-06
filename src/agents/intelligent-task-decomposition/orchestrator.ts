@@ -153,6 +153,14 @@ export class Orchestrator {
     }
 
     taskTree.subTasks.push(subTask);
+
+    // 🔧 不变量守卫：有 pending 子任务时，tree 不应为 completed/failed
+    // 场景：前一轮结束后 tree 被标记为 completed，新消息触发新一轮子任务时必须重置
+    if (taskTree.status === "completed" || taskTree.status === "failed") {
+      console.log(`[Orchestrator] 🔄 Tree status reset: ${taskTree.status} → active (new pending sub-task added)`);
+      taskTree.status = "active";
+    }
+
     await this.taskTreeManager.save(taskTree);
 
     console.log(`[Orchestrator] ✅ Sub task added: ${subTask.id} (${summary}) [depth=${subTask.depth}, parent=${parentId || 'none'}]`);

@@ -48,12 +48,19 @@ export function scheduleFollowupDrain(
                 const taskTree = await orchestrator.loadTaskTree(sessionId);
                 if (taskTree) {
                   // 守卫 A：任务树全局 status 已终结（兜底，兼容旧数据）
+                  // 🔧 二次校验：如果 tree 中仍有 pending 子任务，说明 status 尚未同步（addSubTask 应已修复），
+                  //    此时不应丢弃队列，而是跳过守卫让任务正常执行。
                   if (taskTree.status === "completed" || taskTree.status === "failed") {
-                    const isStale = (item: FollowupRun) => Boolean(item.subTaskId || item.isQueueTask);
-                    const staleCount = queue.items.filter(isStale).length;
-                    queue.items = queue.items.filter((item) => !isStale(item));
-                    console.log(`[drain] 🧹 Task tree already ${taskTree.status}, discarded ${staleCount} stale sub-tasks`);
-                    continue;
+                    const hasPending = taskTree.subTasks.some((t) => t.status === "pending" || t.status === "active");
+                    if (hasPending) {
+                      console.log(`[drain] ⚠️ Tree status=${taskTree.status} but ${taskTree.subTasks.filter((t) => t.status === "pending" || t.status === "active").length} pending/active sub-tasks exist, skipping guard A`);
+                    } else {
+                      const isStale = (item: FollowupRun) => Boolean(item.subTaskId || item.isQueueTask);
+                      const staleCount = queue.items.filter(isStale).length;
+                      queue.items = queue.items.filter((item) => !isStale(item));
+                      console.log(`[drain] 🧹 Task tree already ${taskTree.status}, discarded ${staleCount} stale sub-tasks`);
+                      continue;
+                    }
                   }
 
                   // 守卫 B：rootTaskId 轮次完成检查（核心守卫）
