@@ -428,9 +428,22 @@ export class Orchestrator {
       (t) => t.rootTaskId === rootTaskId && !t.metadata?.isSummaryTask,
     );
     const hasFailed = roundTasks.some((t) => t.status === "failed");
-    taskTree.status = hasFailed ? "failed" : "completed";
+
+    // 🔧 检查是否有其他轮次的 pending/active 任务
+    // 如果有，不能把整棵树标记为 completed，否则 drain Guard A/B 会误杀新任务
+    const otherPendingCount = taskTree.subTasks.filter(
+      (t) => t.rootTaskId !== rootTaskId && (t.status === "pending" || t.status === "active"),
+    ).length;
+
+    if (otherPendingCount > 0) {
+      taskTree.status = hasFailed ? "failed" : "active";
+      console.log(`[Orchestrator] 🏁 Round ${rootTaskId} done, but ${otherPendingCount} pending tasks from other rounds → tree stays ${taskTree.status}`);
+    } else {
+      taskTree.status = hasFailed ? "failed" : "completed";
+      console.log(`[Orchestrator] 🏁 Task tree marked as ${taskTree.status} (round: ${rootTaskId})`);
+    }
+
     await this.taskTreeManager.save(taskTree);
-    console.log(`[Orchestrator] 🏁 Task tree marked as ${taskTree.status} (round: ${rootTaskId})`);
   }
 
   /**

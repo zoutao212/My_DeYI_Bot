@@ -64,17 +64,29 @@ export function scheduleFollowupDrain(
                   }
 
                   // 守卫 B：rootTaskId 轮次完成检查（核心守卫）
+                  // 🔧 改进：不再批量丢弃整个 round 的队列项，
+                  //    而是逐项检查 tree 中对应子任务的实际状态，只丢弃真正完成的。
+                  //    防止新 round 子任务因继承旧 rootTaskId 而被误杀。
                   if (nextPeek.rootTaskId) {
                     if (orchestrator.isRoundCompleted(taskTree, nextPeek.rootTaskId)) {
-                      // 清理队列中同一 rootTaskId 的所有残留子任务
                       const roundId = nextPeek.rootTaskId;
                       const before = queue.items.length;
-                      queue.items = queue.items.filter((item) => item.rootTaskId !== roundId);
+                      // 只丢弃 tree 中对应子任务已 completed/failed 的队列项
+                      queue.items = queue.items.filter((item) => {
+                        if (item.rootTaskId !== roundId) return true; // 不同 round，保留
+                        if (!item.subTaskId) return false; // 无 subTaskId 且属于已完成 round，丢弃
+                        const treeTask = taskTree.subTasks.find((t) => t.id === item.subTaskId);
+                        if (!treeTask) return false; // tree 中不存在，丢弃
+                        // tree 中仍 pending/active，保留（可能是新一轮的子任务）
+                        return treeTask.status === "pending" || treeTask.status === "active";
+                      });
                       const discarded = before - queue.items.length;
-                      console.log(`[drain] 🧹 Round ${roundId} completed, discarded ${discarded} stale sub-tasks`);
-                      // 同步标记任务树状态
-                      await orchestrator.markRoundCompleted(taskTree, roundId);
-                      continue;
+                      if (discarded > 0) {
+                        console.log(`[drain] 🧹 Round ${roundId} completed, discarded ${discarded} stale sub-tasks (kept ${queue.items.length} items)`);
+                        // 同步标记任务树状态
+                        await orchestrator.markRoundCompleted(taskTree, roundId);
+                      }
+                      if (discarded > 0 || queue.items[0]?.rootTaskId === roundId) continue;
                     }
                   }
 

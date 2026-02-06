@@ -261,7 +261,15 @@ export function createFollowupRunner(params: {
                   console.log(`[followup-runner] 📋 Injecting sibling context (${siblingCtx.length} chars)`);
                 }
                 const base = queued.run.extraSystemPrompt ?? "";
-                return siblingCtx ? `${base}${siblingCtx}` : base || undefined;
+
+                // 🔧 子任务强制落盘指令：防止 LLM 偷懒只输出文本不调工具
+                const isSubTask = queued.isQueueTask && !queued.isRootTask;
+                const persistInstruction = isSubTask
+                  ? "\n\n[系统强制要求] 你正在执行一个子任务。生成的内容（尤其是长文本/创作内容）**必须**使用 `write` 工具写入文件落盘，文件名应包含任务摘要。仅在聊天中回复简短确认即可，不要把完整内容直接输出到聊天。"
+                  : "";
+
+                const combined = [base, siblingCtx, persistInstruction].filter(Boolean).join("");
+                return combined || undefined;
               })(),
               ownerNumbers: queued.run.ownerNumbers,
               enforceFinalTag: queued.run.enforceFinalTag,

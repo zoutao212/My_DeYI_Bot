@@ -262,21 +262,6 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
           });
         }
 
-        // 🆕 轮次隔离：生成或继承 rootTaskId
-        // - 新根任务 → 始终生成新的 rootTaskId
-        // - 同一轮首次 enqueue → 生成新的 rootTaskId 并存到 context
-        // - 同一轮后续 enqueue → 从 context 继承
-        // - 递归分解（子任务执行时调用 enqueue）→ 从 context 继承
-        let rootTaskId = currentFollowupRun.rootTaskId;
-        if (!rootTaskId || isNewRootTask) {
-          rootTaskId = crypto.randomUUID();
-          // 存到 context，后续同一 LLM 执行中的 enqueue 调用会继承
-          currentFollowupRun.rootTaskId = rootTaskId;
-          console.log(`[enqueue_task] 🆔 New rootTaskId generated: ${rootTaskId} (isNewRootTask=${isNewRootTask})`);
-        } else {
-          console.log(`[enqueue_task] 🆔 Inherited rootTaskId: ${rootTaskId}`);
-        }
-
         // 🔧 使用 Orchestrator 管理任务树
         const sessionId = currentFollowupRun.run.sessionId;
         
@@ -285,7 +270,7 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
           ? `${sessionId}-${Date.now()}` // 生成新的 sessionId
           : sessionId;
         
-        // 加载或初始化任务树
+        // 加载或初始化任务树（必须在 rootTaskId 确定前完成，以便检查旧 round 状态）
         let taskTree = await globalOrchestrator.loadTaskTree(targetSessionId);
         if (!taskTree) {
           // 第一次调用 enqueue_task，初始化任务树
@@ -308,6 +293,25 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
           );
           taskTree.maxDepth = adaptiveDepth;
           console.log(`[enqueue_task] 📏 Adaptive maxDepth set to ${adaptiveDepth}`);
+        }
+
+        // 🆕 轮次隔离：生成或继承 rootTaskId（在 tree 加载后执行，可检查旧 round 状态）
+        // - 新根任务 → 始终生成新的 rootTaskId
+        // - 继承的 rootTaskId 对应 round 已完成 → 生成新的（防止被 drain Guard B 误杀）
+        // - 同一轮首次 enqueue → 生成新的 rootTaskId 并存到 context
+        // - 同一轮后续 enqueue → 从 context 继承
+        let rootTaskId = currentFollowupRun.rootTaskId;
+        if (rootTaskId && !isNewRootTask && globalOrchestrator.isRoundCompleted(taskTree, rootTaskId)) {
+          console.log(`[enqueue_task] 🔄 Inherited rootTaskId ${rootTaskId} round already completed, generating new one`);
+          rootTaskId = undefined;
+        }
+        if (!rootTaskId || isNewRootTask) {
+          rootTaskId = crypto.randomUUID();
+          // 存到 context，后续同一 LLM 执行中的 enqueue 调用会继承
+          currentFollowupRun.rootTaskId = rootTaskId;
+          console.log(`[enqueue_task] 🆔 New rootTaskId generated: ${rootTaskId} (isNewRootTask=${isNewRootTask})`);
+        } else {
+          console.log(`[enqueue_task] 🆔 Inherited rootTaskId: ${rootTaskId}`);
         }
 
         // 添加子任务到任务树（携带 rootTaskId 实现轮次隔离）
