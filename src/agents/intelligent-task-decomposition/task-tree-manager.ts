@@ -185,10 +185,18 @@ export class TaskTreeManager {
       subTask.completedAt = Date.now();
     }
 
-    // 更新任务树状态
-    const allCompleted = taskTree.subTasks.every((t) => t.status === "completed");
-    const anyFailed = taskTree.subTasks.some((t) => t.status === "failed");
-    const anyActive = taskTree.subTasks.some((t) => t.status === "active");
+    // 🆕 用 rootTaskId 作用域更新任务树状态（避免多轮累积导致误判）
+    // 只看当前子任务所属轮次的子任务，排除 isSummaryTask 占位符
+    const roundId = subTask.rootTaskId;
+    const scopedTasks = roundId
+      ? taskTree.subTasks.filter(
+          (t) => t.rootTaskId === roundId && !t.metadata?.isSummaryTask,
+        )
+      : taskTree.subTasks.filter((t) => !t.metadata?.isSummaryTask);
+
+    const allCompleted = scopedTasks.length > 0 && scopedTasks.every((t) => t.status === "completed");
+    const anyFailed = scopedTasks.some((t) => t.status === "failed");
+    const anyActive = scopedTasks.some((t) => t.status === "active");
 
     if (allCompleted) {
       taskTree.status = "completed";

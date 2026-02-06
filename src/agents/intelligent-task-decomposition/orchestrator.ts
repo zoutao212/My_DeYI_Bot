@@ -113,6 +113,7 @@ export class Orchestrator {
    * @param summary 任务简短描述
    * @param parentId 父任务 ID（可选）
    * @param waitForChildren 是否等待子任务完成（可选）
+   * @param rootTaskId 轮次 ID（可选），用于隔离不同用户请求产生的子任务
    * @returns 新创建的子任务
    */
   async addSubTask(
@@ -121,6 +122,7 @@ export class Orchestrator {
     summary: string,
     parentId?: string,
     waitForChildren?: boolean,
+    rootTaskId?: string,
   ): Promise<SubTask> {
     const subTask: SubTask = {
       id: crypto.randomUUID(),
@@ -129,10 +131,11 @@ export class Orchestrator {
       status: "pending",
       retryCount: 0,
       createdAt: Date.now(),
-      parentId: parentId || null,           // 🆕 记录父任务 ID
-      children: [],                         // 🆕 初始化子任务列表
-      waitForChildren: waitForChildren,     // 🆕 是否等待子任务完成
-      depth: 0,                             // 🆕 初始化深度（后续会更新）
+      parentId: parentId || null,
+      children: [],
+      waitForChildren: waitForChildren,
+      depth: 0,
+      rootTaskId,                           // 🆕 轮次隔离 ID
     };
 
     // 🆕 计算任务深度
@@ -372,6 +375,54 @@ export class Orchestrator {
    */
   async saveTaskTree(taskTree: TaskTree): Promise<void> {
     await this.taskTreeManager.save(taskTree);
+  }
+
+  // ========================================
+  // 🆕 轮次隔离：集中式完成判定
+  // ========================================
+
+  /**
+   * 检查指定轮次是否已完成
+   * 
+   * 只检查 rootTaskId 匹配的子任务（排除 isSummaryTask 占位符）。
+   * 当该轮次所有子任务都是 completed/failed 时返回 true。
+   * 
+   * @param taskTree 任务树
+   * @param rootTaskId 轮次 ID
+   * @returns 该轮次是否已完成
+   */
+  isRoundCompleted(taskTree: TaskTree, rootTaskId: string): boolean {
+    const roundTasks = taskTree.subTasks.filter(
+      (t) => t.rootTaskId === rootTaskId && !t.metadata?.isSummaryTask,
+    );
+    if (roundTasks.length === 0) return false;
+    const allDone = roundTasks.every(
+      (t) => t.status === "completed" || t.status === "failed",
+    );
+    if (allDone) {
+      console.log(
+        `[Orchestrator] 🏁 Round ${rootTaskId} completed: ${roundTasks.length} tasks (` +
+        `${roundTasks.filter((t) => t.status === "completed").length} ok, ` +
+        `${roundTasks.filter((t) => t.status === "failed").length} failed)`,
+      );
+    }
+    return allDone;
+  }
+
+  /**
+   * 标记指定轮次为已完成，并更新任务树状态
+   * 
+   * @param taskTree 任务树
+   * @param rootTaskId 轮次 ID
+   */
+  async markRoundCompleted(taskTree: TaskTree, rootTaskId: string): Promise<void> {
+    const roundTasks = taskTree.subTasks.filter(
+      (t) => t.rootTaskId === rootTaskId && !t.metadata?.isSummaryTask,
+    );
+    const hasFailed = roundTasks.some((t) => t.status === "failed");
+    taskTree.status = hasFailed ? "failed" : "completed";
+    await this.taskTreeManager.save(taskTree);
+    console.log(`[Orchestrator] 🏁 Task tree marked as ${taskTree.status} (round: ${rootTaskId})`);
   }
 
   /**

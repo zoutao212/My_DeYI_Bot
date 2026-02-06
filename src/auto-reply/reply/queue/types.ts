@@ -125,6 +125,23 @@ export type FollowupRun = {
    * @since v2026.2.6 - 任务系统改进
    */
   subTaskId?: string;
+
+  /**
+   * 轮次 ID（用于隔离不同用户请求产生的子任务）
+   * 
+   * 同一次用户消息触发的所有子任务（包括递归分解）共享同一个 rootTaskId。
+   * 在 drain 守卫和 allDone 检查中，用于只检查当前轮次的子任务，
+   * 避免多轮累积导致 allDone 永远为 false。
+   * 
+   * 传播链：
+   * 1. 首次 enqueue_task → 生成 rootTaskId → 存到 currentFollowupRunContext
+   * 2. 后续 enqueue_task（同一 LLM 执行）→ 从 context 继承
+   * 3. 子任务执行 → followup-runner 从 queued.rootTaskId 继承
+   * 4. 递归分解 → 子任务的 enqueue_task 继承父的 rootTaskId
+   * 
+   * @since v2026.2.6 - 任务系统轮次隔离
+   */
+  rootTaskId?: string;
 };
 
 export type ResolveQueueSettingsParams = {

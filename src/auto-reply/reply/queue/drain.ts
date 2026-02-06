@@ -36,9 +36,9 @@ export function scheduleFollowupDrain(
         // collect mode 会把所有 items 合并成一个 prompt，破坏子任务的独立执行语义
         const hasQueueTasks = queue.items.some((item) => item.isQueueTask || item.subTaskId);
         if (hasQueueTasks) {
-          // 🔧 任务树完成守卫：如果任务树已经 completed/failed，丢弃残留的子任务
-          // 场景：LLM 在根任务中直接生成了所有内容并发送了 TXT，但递归分解产生的
-          // 子任务仍残留在队列中。此时任务树已标记完成，这些子任务不应再执行。
+          // 🆕 轮次完成守卫（替代旧的 3 层 ad-hoc 检查）
+          // 核心逻辑：用 rootTaskId 隔离轮次，只要当前轮次所有子任务都已 completed/failed，
+          // 就清理队列中同一轮次的所有残留子任务。
           const nextPeek = queue.items[0];
           if (nextPeek && (nextPeek.subTaskId || nextPeek.isQueueTask)) {
             try {
@@ -46,21 +46,39 @@ export function scheduleFollowupDrain(
               const sessionId = nextPeek.run?.sessionId;
               if (sessionId) {
                 const taskTree = await orchestrator.loadTaskTree(sessionId);
-                if (taskTree && (taskTree.status === "completed" || taskTree.status === "failed")) {
-                  // 任务树已终结，丢弃所有残留的子任务（含无 subTaskId 的旧版子任务）
-                  const isStale = (item: FollowupRun) => Boolean(item.subTaskId || item.isQueueTask);
-                  const staleCount = queue.items.filter(isStale).length;
-                  queue.items = queue.items.filter((item) => !isStale(item));
-                  console.log(`[drain] 🧹 Task tree already ${taskTree.status}, discarded ${staleCount} stale sub-tasks`);
-                  continue;
-                }
-                // 额外检查：如果该子任务在任务树中已经是 completed/failed，也跳过
-                if (nextPeek.subTaskId) {
-                  const subTaskInTree = taskTree?.subTasks.find((t) => t.id === nextPeek.subTaskId);
-                  if (subTaskInTree && (subTaskInTree.status === "completed" || subTaskInTree.status === "failed")) {
-                    queue.items.shift();
-                    console.log(`[drain] 🧹 Sub-task ${nextPeek.subTaskId} already ${subTaskInTree.status}, skipping`);
+                if (taskTree) {
+                  // 守卫 A：任务树全局 status 已终结（兜底，兼容旧数据）
+                  if (taskTree.status === "completed" || taskTree.status === "failed") {
+                    const isStale = (item: FollowupRun) => Boolean(item.subTaskId || item.isQueueTask);
+                    const staleCount = queue.items.filter(isStale).length;
+                    queue.items = queue.items.filter((item) => !isStale(item));
+                    console.log(`[drain] 🧹 Task tree already ${taskTree.status}, discarded ${staleCount} stale sub-tasks`);
                     continue;
+                  }
+
+                  // 守卫 B：rootTaskId 轮次完成检查（核心守卫）
+                  if (nextPeek.rootTaskId) {
+                    if (orchestrator.isRoundCompleted(taskTree, nextPeek.rootTaskId)) {
+                      // 清理队列中同一 rootTaskId 的所有残留子任务
+                      const roundId = nextPeek.rootTaskId;
+                      const before = queue.items.length;
+                      queue.items = queue.items.filter((item) => item.rootTaskId !== roundId);
+                      const discarded = before - queue.items.length;
+                      console.log(`[drain] 🧹 Round ${roundId} completed, discarded ${discarded} stale sub-tasks`);
+                      // 同步标记任务树状态
+                      await orchestrator.markRoundCompleted(taskTree, roundId);
+                      continue;
+                    }
+                  }
+
+                  // 守卫 C：单个子任务已 completed/failed，跳过（防重复执行）
+                  if (nextPeek.subTaskId) {
+                    const subTaskInTree = taskTree.subTasks.find((t) => t.id === nextPeek.subTaskId);
+                    if (subTaskInTree && (subTaskInTree.status === "completed" || subTaskInTree.status === "failed")) {
+                      queue.items.shift();
+                      console.log(`[drain] 🧹 Sub-task ${nextPeek.subTaskId} already ${subTaskInTree.status}, skipping`);
+                      continue;
+                    }
                   }
                 }
               }

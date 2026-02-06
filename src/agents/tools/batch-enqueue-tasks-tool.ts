@@ -11,6 +11,7 @@
  * - 集成 TaskGrouper 和 BatchExecutor
  */
 
+import crypto from "node:crypto";
 import { Type } from "@sinclair/typebox";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readStringParam } from "./common.js";
@@ -239,6 +240,14 @@ export function createBatchEnqueueTasksTool(options?: BatchEnqueueTasksOptions):
         // 🔧 使用 Orchestrator 管理任务树
         const sessionId = currentFollowupRun.run.sessionId;
         const orchestrator = getGlobalOrchestrator();
+
+        // 🆕 轮次隔离：生成或继承 rootTaskId
+        let rootTaskId = currentFollowupRun.rootTaskId;
+        if (!rootTaskId) {
+          rootTaskId = crypto.randomUUID();
+          currentFollowupRun.rootTaskId = rootTaskId;
+          console.log(`[batch_enqueue_tasks] \ud83c\udd94 New rootTaskId: ${rootTaskId}`);
+        }
         
         // 加载或初始化任务树
         let taskTree = await orchestrator.loadTaskTree(sessionId);
@@ -263,6 +272,7 @@ export function createBatchEnqueueTasksTool(options?: BatchEnqueueTasksOptions):
             task.summary,
             parentId,
             false, // waitForChildren = false（批量任务不等待子任务）
+            rootTaskId, // 🆕 轮次隔离
           );
           
           // 设置元数据

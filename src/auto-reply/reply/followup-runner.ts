@@ -186,11 +186,19 @@ export function createFollowupRunner(params: {
       const sessionId = queued.run.sessionId;
       
       // 🔧 尝试从任务树中找到对应的子任务
-      // 注意：只有通过 enqueue_task 创建的任务才会有对应的子任务
+      // 优先用 subTaskId 精确匹配，回退到 prompt 匹配（向后兼容）
       let taskTree = await orchestrator.loadTaskTree(sessionId);
-      let subTask = taskTree?.subTasks.find(
-        (task) => task.prompt === queued.prompt && task.status === "pending"
-      );
+      let subTask: import("../../agents/intelligent-task-decomposition/types.js").SubTask | undefined;
+      if (taskTree) {
+        if (queued.subTaskId) {
+          subTask = taskTree.subTasks.find((t) => t.id === queued.subTaskId);
+        }
+        if (!subTask) {
+          subTask = taskTree.subTasks.find(
+            (task) => task.prompt === queued.prompt && task.status === "pending",
+          );
+        }
+      }
       
       // 🔧 如果找到了子任务，更新状态为 "active"
       if (taskTree && subTask) {
@@ -215,6 +223,7 @@ export function createFollowupRunner(params: {
           isRootTask: effectiveIsRoot,     // 双保险恢复根任务语义
           isNewRootTask: isNewRoot,        // 传播 isNewRootTask 标记
           taskDepth: queued.taskDepth ?? 0, // 传播任务树深度
+          rootTaskId: queued.rootTaskId,   // 🆕 传播轮次 ID（递归分解时继承）
         });
         
         const fallbackResult = await runWithModelFallback({
@@ -335,16 +344,16 @@ export function createFollowupRunner(params: {
           await orchestrator.saveTaskTree(taskTree);
           console.log(`[followup-runner] ✅ Sub task completed: ${subTask.id}`);
           
-          // 🆕 检查任务树是否全部完成，异步归档到记忆系统
-          const allDone = taskTree.subTasks.every(
-            (t) => t.status === "completed" || t.status === "failed",
-          );
-          if (allDone) {
-            taskTree.status = taskTree.subTasks.some((t) => t.status === "failed")
-              ? "failed"
-              : "completed";
-            await orchestrator.saveTaskTree(taskTree);
-            console.log(`[followup-runner] 🏁 Task tree ${taskTree.status}: ${taskTree.id}`);
+          // 🆕 检查当前轮次是否全部完成（用 rootTaskId 隔离，不受其它轮次影响）
+          const currentRootTaskId = queued.rootTaskId ?? subTask?.rootTaskId;
+          const allDone = currentRootTaskId
+            ? orchestrator.isRoundCompleted(taskTree, currentRootTaskId)
+            : false; // 无 rootTaskId 的旧任务不做完成判定
+          if (allDone && currentRootTaskId) {
+            await orchestrator.markRoundCompleted(taskTree, currentRootTaskId);
+            console.log(`[followup-runner] 🏁 Round completed: ${currentRootTaskId} (tree: ${taskTree.id})`);
+            // 重新加载以获取最新状态
+            taskTree = (await orchestrator.loadTaskTree(sessionId)) ?? taskTree;
             
             // 异步归档（fire-and-forget，不阻塞主流程）
             try {

@@ -122,6 +122,14 @@ export interface SubTask {
   /** 是否等待子任务完成（用于递归回溯，父任务等待所有子任务完成后才执行） */
   waitForChildren?: boolean;
   
+  /** 
+   * 轮次 ID（用于隔离不同用户请求产生的子任务）
+   * 
+   * 同一次用户消息触发的所有子任务（包括递归分解）共享同一个 rootTaskId。
+   * 完成检查只看当前轮次，避免多轮累积导致 allDone 永远为 false。
+   */
+  rootTaskId?: string;
+  
   /** 是否启用质量评估（默认继承任务树设置） */
   qualityReviewEnabled?: boolean;
   
