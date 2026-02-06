@@ -199,13 +199,29 @@ export function createBatchEnqueueTasksTool(options?: BatchEnqueueTasksOptions):
         });
       }
       
-      // 🔧 检测循环：如果当前正在执行队列任务，拒绝加入新任务
+      // 🔧 循环检测（融合方案 1+2+3，与 enqueue_task 保持一致）
       const isQueueTask = currentFollowupRun.isQueueTask ?? false;
-      if (isQueueTask) {
-        console.warn("[batch_enqueue_tasks] ⚠️ Cannot enqueue tasks while executing a queue task");
+      const isCurrentRootTask = currentFollowupRun.isRootTask ?? false;
+      const isCurrentNewRoot = currentFollowupRun.isNewRootTask ?? false;
+      const currentDepth = currentFollowupRun.taskDepth ?? 0;
+      const MAX_ENQUEUE_DEPTH = 3;
+      
+      const canEnqueue = !isQueueTask || isCurrentRootTask || isCurrentNewRoot;
+      
+      // 方案 3 兜底：深度超限拒绝
+      if (canEnqueue && currentDepth >= MAX_ENQUEUE_DEPTH) {
+        console.warn(`[batch_enqueue_tasks] ⚠️ Task depth ${currentDepth} >= ${MAX_ENQUEUE_DEPTH}, refusing to enqueue (depth guard)`);
         return jsonResult({
           success: false,
-          error: `❌ 不能在执行队列任务时批量创建任务。
+          error: `❌ 任务分解深度已达上限（${currentDepth}/${MAX_ENQUEUE_DEPTH}），不能继续分解。\n\n✅ 正确做法：直接生成当前任务要求的内容。`,
+        });
+      }
+      
+      if (!canEnqueue) {
+        console.warn(`[batch_enqueue_tasks] ⚠️ Cannot enqueue tasks while executing a non-root queue task (isQueueTask=${isQueueTask}, isRootTask=${isCurrentRootTask}, isNewRootTask=${isCurrentNewRoot}, depth=${currentDepth})`);
+        return jsonResult({
+          success: false,
+          error: `❌ 不能在执行子任务时批量创建任务。
 
 ✅ 正确做法：
 1. 直接生成当前任务要求的内容
@@ -298,14 +314,19 @@ export function createBatchEnqueueTasksTool(options?: BatchEnqueueTasksOptions):
         
         let enqueuedCount = 0;
         
-        for (const task of tasks) {
+        for (let i = 0; i < tasks.length; i++) {
+          const task = tasks[i];
+          const subTaskDepth = createdTasks[i]?.depth ?? 0;
           const followupRun: FollowupRun = {
             prompt: task.prompt,
             summaryLine: task.summary,
             enqueuedAt: Date.now(),
             run: currentFollowupRun.run,
-            // 🔧 标记为队列任务，防止循环
+            // 🔧 标记为队列任务，防止循环（与 enqueue_task 保持一致）
             isQueueTask: true,
+            isRootTask: false,            // 批量子任务不是根任务
+            isNewRootTask: false,         // 批量子任务不是新根任务
+            taskDepth: subTaskDepth,      // 方案 3：记录任务树深度
           };
 
           // 加入队列

@@ -20,6 +20,7 @@ import { createSessionsSendTool } from "./tools/sessions-send-tool.js";
 import { createSessionsSpawnTool } from "./tools/sessions-spawn-tool.js";
 import { createWebFetchTool, createWebSearchTool } from "./tools/web-tools.js";
 import { createTtsTool } from "./tools/tts-tool.js";
+import { createSendFileTool } from "./tools/send-file-tool.js";
 
 export function createClawdbotTools(options?: {
   browserControlUrl?: string;
@@ -75,6 +76,11 @@ export function createClawdbotTools(options?: {
     config: options?.config,
     sandboxed: options?.sandboxed,
   });
+  const sendFileTool = options?.workspaceDir
+    ? createSendFileTool({
+        workspaceDir: options.workspaceDir,
+      })
+    : null;
   const tools: AnyAgentTool[] = [
     createBrowserTool({
       defaultControlUrl: options?.browserControlUrl,
@@ -150,6 +156,7 @@ export function createClawdbotTools(options?: {
     ...(webSearchTool ? [webSearchTool] : []),
     ...(webFetchTool ? [webFetchTool] : []),
     ...(imageTool ? [imageTool] : []),
+    ...(sendFileTool ? [sendFileTool] : []),
   ];
 
   const pluginTools = resolvePluginTools({

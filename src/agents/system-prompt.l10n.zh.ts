@@ -32,6 +32,7 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
     sessions_send: "向其他会话/子代理发送消息",
     sessions_spawn: "派生一个子代理会话",
     session_status: "显示 /status 等价的状态卡",
+    send_file: "**发送文件到用户的聊天频道**（参数：filePath=文件路径，caption=文件说明。支持 Telegram/Web 等频道，自动检测文件类型和大小。✅ 支持绝对路径和相对路径，✅ 支持文档/图片/压缩包/数据文件。使用场景：用户要求发送文件、生成文件后主动发送、任务完成后发送结果。⚠️ 只发送用户明确要求的文件，不要随意发送）",
     memory_get: "从 MEMORY.md 或 memory/*.md 安全读取片段",
     memory_search: "在 MEMORY.md + memory/*.md 中做语义检索",
     image: "使用配置的图像模型分析图片",

@@ -223,6 +223,7 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
     sessions_spawn: "Spawn a sub-agent session",
     session_status:
       "Show a /status-equivalent status card (usage + time + Reasoning/Verbose/Elevated); use for model-use questions (📊 session_status); optional per-session model override",
+    send_file: "**Send files to user's chat channel** (params: filePath=file path, caption=description. Supports Telegram/Web channels, auto-detects file type and size. ✅ Absolute and relative paths, ✅ Documents/images/archives/data files. Use when: user requests file, after generating a file, after task completion. ⚠️ Only send files explicitly requested by user)",
     image: "Analyze an image with the configured image model",
   },
   toolingFallbackIntro: "Pi lists the standard tools above. This runtime enables:",

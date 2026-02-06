@@ -1905,9 +1905,18 @@ export const chatHandlers: GatewayRequestHandlers = {
     }
     
     try {
-      // 读取目录中的所有 .txt 文件
+      // 读取目录中的所有支持的文件类型
+      const supportedExts = new Set([
+        ".txt", ".md", ".pdf", ".docx", ".xlsx",
+        ".png", ".jpg", ".jpeg", ".gif",
+        ".zip", ".tar", ".gz",
+        ".json", ".csv", ".xml",
+      ]);
       const files = fs.readdirSync(taskDir)
-        .filter(f => f.endsWith(".txt"))
+        .filter(f => {
+          const ext = path.extname(f).toLowerCase();
+          return supportedExts.has(ext);
+        })
         .map(fileName => {
           const filePath = path.join(taskDir, fileName);
           const stats = fs.statSync(filePath);
@@ -1933,78 +1942,148 @@ export const chatHandlers: GatewayRequestHandlers = {
   },
   
   /**
-   * 下载任务文件
-   * @since v20260206_1
+   * 下载文件（支持任务文件和 send_file 工具返回的绝对路径）
+   * @since v20260206_2
+   *
+   * 参数模式：
+   * 1. { filePath } - 绝对路径（来自 send_file 工具的 webFileCard.filePath）
+   * 2. { sessionId, fileName } - 任务文件（向后兼容）
    */
   "chat.file.download": async ({ params, respond, context }) => {
-    const { sessionId, fileName } = params as {
+    const { sessionId, fileName, filePath: rawFilePath } = params as {
       sessionId?: string;
       fileName?: string;
+      filePath?: string;
     };
-    
-    // 验证参数
-    if (!sessionId || !fileName) {
-      respond(false, undefined, errorShape(
-        ErrorCodes.INVALID_REQUEST,
-        "sessionId and fileName are required"
-      ));
-      return;
-    }
-    
-    // 安全检查：防止路径遍历攻击
-    const normalizedFileName = path.normalize(fileName);
-    if (normalizedFileName.includes("..") || path.isAbsolute(normalizedFileName)) {
-      respond(false, undefined, errorShape(
-        ErrorCodes.INVALID_REQUEST,
-        "Invalid file name"
-      ));
-      return;
-    }
-    
-    // 构建文件路径
-    const taskDir = path.join(
-      os.homedir(),
-      ".clawdbot",
-      "tasks",
-      sessionId,
-      "deliverables"
-    );
-    
-    const filePath = path.join(taskDir, normalizedFileName);
-    
-    // 检查文件是否存在
-    if (!fs.existsSync(filePath)) {
-      respond(false, undefined, errorShape(
-        ErrorCodes.NOT_FOUND,
-        `File not found: ${fileName}`
-      ));
-      return;
-    }
-    
-    // 检查文件大小（限制 10 MB）
-    const MAX_FILE_SIZE = 10 * 1024 * 1024;
-    try {
-      const stats = fs.statSync(filePath);
-      if (stats.size > MAX_FILE_SIZE) {
+
+    let resolvedFilePath: string;
+    let resolvedFileName: string;
+
+    if (rawFilePath && typeof rawFilePath === "string") {
+      // 模式 1：绝对路径（来自 send_file 工具）
+      resolvedFilePath = path.resolve(rawFilePath);
+
+      // 安全检查：只允许工作目录和 .clawdbot/tasks 下的文件
+      const allowedPrefixes = [
+        path.join(os.homedir(), ".clawdbot", "tasks"),
+      ];
+      // 动态获取工作目录（如果可用）
+      const cwd = process.cwd();
+      if (cwd) allowedPrefixes.push(cwd);
+
+      const isAllowed = allowedPrefixes.some((prefix) =>
+        resolvedFilePath.startsWith(prefix),
+      );
+      if (!isAllowed) {
         respond(false, undefined, errorShape(
           ErrorCodes.INVALID_REQUEST,
-          `File too large: ${stats.size} bytes (max: ${MAX_FILE_SIZE} bytes)`
+          "File path is not in an allowed directory",
         ));
         return;
       }
-      
-      // 读取文件内容
-      const content = fs.readFileSync(filePath, "utf-8");
-      respond(true, {
-        fileName,
-        content,
-        mimeType: "text/plain",
-        size: stats.size,
-      });
+
+      resolvedFileName = path.basename(resolvedFilePath);
+    } else if (sessionId && fileName) {
+      // 模式 2：任务文件（向后兼容）
+      const normalizedFileName = path.normalize(fileName);
+      if (normalizedFileName.includes("..") || path.isAbsolute(normalizedFileName)) {
+        respond(false, undefined, errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          "Invalid file name",
+        ));
+        return;
+      }
+
+      const taskDir = path.join(
+        os.homedir(),
+        ".clawdbot",
+        "tasks",
+        sessionId,
+        "deliverables",
+      );
+      resolvedFilePath = path.join(taskDir, normalizedFileName);
+      resolvedFileName = normalizedFileName;
+    } else {
+      respond(false, undefined, errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        "Either filePath or (sessionId + fileName) is required",
+      ));
+      return;
+    }
+
+    // 检查文件是否存在
+    if (!fs.existsSync(resolvedFilePath)) {
+      respond(false, undefined, errorShape(
+        ErrorCodes.NOT_FOUND,
+        `File not found: ${resolvedFileName}`,
+      ));
+      return;
+    }
+
+    // 检查文件大小（限制 100 MB）
+    const DOWNLOAD_MAX_FILE_SIZE = 100 * 1024 * 1024;
+    try {
+      const stats = fs.statSync(resolvedFilePath);
+      if (stats.size > DOWNLOAD_MAX_FILE_SIZE) {
+        respond(false, undefined, errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `File too large: ${stats.size} bytes (max: ${DOWNLOAD_MAX_FILE_SIZE} bytes)`,
+        ));
+        return;
+      }
+
+      // 根据文件类型决定读取方式
+      const ext = path.extname(resolvedFileName).toLowerCase();
+      const textExts = new Set([
+        ".txt", ".md", ".csv", ".json", ".xml", ".html", ".css", ".js", ".ts",
+        ".py", ".sh", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".log",
+      ]);
+      const isText = textExts.has(ext);
+
+      const MIME_MAP: Record<string, string> = {
+        ".txt": "text/plain",
+        ".md": "text/markdown",
+        ".pdf": "application/pdf",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".zip": "application/zip",
+        ".tar": "application/x-tar",
+        ".gz": "application/gzip",
+        ".json": "application/json",
+        ".csv": "text/csv",
+        ".xml": "application/xml",
+      };
+      const mimeType = MIME_MAP[ext] ?? "application/octet-stream";
+
+      if (isText) {
+        const content = fs.readFileSync(resolvedFilePath, "utf-8");
+        respond(true, {
+          fileName: resolvedFileName,
+          content,
+          mimeType,
+          size: stats.size,
+          encoding: "utf-8",
+        });
+      } else {
+        // 二进制文件：base64 编码
+        const buffer = fs.readFileSync(resolvedFilePath);
+        const contentBase64 = buffer.toString("base64");
+        respond(true, {
+          fileName: resolvedFileName,
+          content: contentBase64,
+          mimeType,
+          size: stats.size,
+          encoding: "base64",
+        });
+      }
     } catch (err) {
       respond(false, undefined, errorShape(
         ErrorCodes.INTERNAL_ERROR,
-        `Failed to read file: ${err instanceof Error ? err.message : String(err)}`
+        `Failed to read file: ${err instanceof Error ? err.message : String(err)}`,
       ));
     }
   },

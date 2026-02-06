@@ -196,14 +196,18 @@ export function createFollowupRunner(params: {
       let fallbackProvider = queued.run.provider;
       let fallbackModel = queued.run.model;
       try {
-        // 🔧 设置全局上下文：正在执行队列任务
-        // 检查是否是根任务
+        // 🔧 设置全局上下文（融合方案 1+2+3）
+        // 双保险：isRootTask 或 isNewRootTask 任一为 true 即视为根任务
         const isRootTask = queued.isRootTask ?? false;
+        const isNewRoot = queued.isNewRootTask ?? false;
+        const effectiveIsRoot = isRootTask || isNewRoot;
         
         setCurrentFollowupRunContext({ 
           ...queued, 
-          isQueueTask: !isRootTask,  // 🆕 根任务不标记为队列任务
-          isRootTask: isRootTask      // 🆕 保留根任务标记
+          isQueueTask: !effectiveIsRoot,  // 根任务不标记为队列任务
+          isRootTask: effectiveIsRoot,     // 双保险恢复根任务语义
+          isNewRootTask: isNewRoot,        // 传播 isNewRootTask 标记
+          taskDepth: queued.taskDepth ?? 0, // 传播任务树深度
         });
         
         const fallbackResult = await runWithModelFallback({

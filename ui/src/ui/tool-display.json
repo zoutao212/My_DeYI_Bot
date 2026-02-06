@@ -203,6 +203,12 @@
         "ban": { "label": "ban", "detailKeys": ["guildId", "userId"] }
       }
     },
+    "send_file": {
+      "icon": "paperclip",
+      "title": "Send File",
+      "label": "发送文件",
+      "detailKeys": ["filePath", "caption"]
+    },
     "slack": {
       "icon": "messageSquare",
       "title": "Slack",

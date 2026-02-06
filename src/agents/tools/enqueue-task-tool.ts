@@ -211,12 +211,32 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
         });
       }
       
-      // 🔧 检测循环：如果当前正在执行队列任务（非根任务），拒绝加入新任务
+      // 🔧 循环检测（融合方案 1+2+3）
+      // 判断维度：isQueueTask / isRootTask / isNewRootTask / taskDepth
       const isQueueTask = currentFollowupRun.isQueueTask ?? false;
-      const isRootTask = currentFollowupRun.isRootTask ?? false;
+      const isCurrentRootTask = currentFollowupRun.isRootTask ?? false;
+      const isCurrentNewRoot = currentFollowupRun.isNewRootTask ?? false;
+      const currentDepth = currentFollowupRun.taskDepth ?? 0;
+      const MAX_ENQUEUE_DEPTH = 3;
       
-      if (isQueueTask && !isRootTask) {
-        console.warn("[enqueue_task] ⚠️ Cannot enqueue task while executing a non-root queue task");
+      // 允许 enqueue 的条件（满足任一即可）：
+      // 1. 不是队列任务（用户直接发消息）
+      // 2. 是根任务（isRootTask=true）
+      // 3. 是新根任务树（isNewRootTask=true，方案 2 双保险）
+      // 4. 深度未超限（方案 3 兜底）
+      const canEnqueue = !isQueueTask || isCurrentRootTask || isCurrentNewRoot;
+      
+      // 方案 3 兜底：即使标记允许，深度超限也拒绝
+      if (canEnqueue && currentDepth >= MAX_ENQUEUE_DEPTH) {
+        console.warn(`[enqueue_task] ⚠️ Task depth ${currentDepth} >= ${MAX_ENQUEUE_DEPTH}, refusing to enqueue (depth guard)`);
+        return jsonResult({
+          success: false,
+          error: `❌ 任务分解深度已达上限（${currentDepth}/${MAX_ENQUEUE_DEPTH}），不能继续分解。\n\n✅ 正确做法：直接生成当前任务要求的内容。`,
+        });
+      }
+      
+      if (!canEnqueue) {
+        console.warn(`[enqueue_task] ⚠️ Cannot enqueue task while executing a non-root queue task (isQueueTask=${isQueueTask}, isRootTask=${isCurrentRootTask}, isNewRootTask=${isCurrentNewRoot}, depth=${currentDepth})`);
         return jsonResult({
           success: false,
           error: `❌ 不能在执行子任务时加入新任务。
@@ -275,16 +295,20 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
         );
         console.log(`[enqueue_task] ✅ Sub task added to tree: ${subTask.id} (${summary || "none"}) [parent=${parentId || "none"}, waitForChildren=${waitForChildren}, isNewRootTask=${isNewRootTask}]`);
         
-        // 构建 FollowupRun
+        // 构建 FollowupRun（融合方案 1+2+3）
+        // - isRootTask：新根任务允许分解子任务（方案 1）
+        // - isNewRootTask：显式传播，drain 时双保险恢复语义（方案 2）
+        // - taskDepth：记录入队时的深度，drain 时做兜底检查（方案 3）
+        const subTaskDepth = subTask.depth ?? 0;
         const followupRun: FollowupRun = {
           prompt,
           summaryLine: summary,
           enqueuedAt: Date.now(),
           run: currentFollowupRun.run,
-          // 🔧 标记为队列任务，防止循环
           isQueueTask: true,
-          // 🆕 标记为非根任务（子任务不能再分解）
-          isRootTask: false,
+          isRootTask: isNewRootTask,       // 方案 1：新根任务 → isRootTask=true
+          isNewRootTask: isNewRootTask,    // 方案 2：显式传播标记
+          taskDepth: subTaskDepth,          // 方案 3：记录任务树深度
         };
 
         // 解析队列设置

@@ -309,7 +309,9 @@ export function buildAgentSystemPrompt(params: {
     "sessions_list",
     "sessions_history",
     "sessions_send",
+    "sessions_spawn",
     "session_status",
+    "send_file",
     "image",
   ];
 

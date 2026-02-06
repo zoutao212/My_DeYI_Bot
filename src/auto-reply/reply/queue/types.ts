@@ -94,6 +94,24 @@ export type FollowupRun = {
    * - 子任务：根任务分解出的子任务
    */
   isRootTask?: boolean;
+
+  /**
+   * 标记这是否是通过 isNewRootTask=true 创建的新根任务树
+   * 
+   * 当 LLM 调用 enqueue_task({ isNewRootTask: true }) 时设置为 true。
+   * 在 followup-runner drain 时用于正确恢复 isRootTask 语义，
+   * 确保新根任务在被消费执行时仍然允许分解子任务。
+   */
+  isNewRootTask?: boolean;
+
+  /**
+   * 入队时记录的任务树深度（方案 3 兜底）
+   * 
+   * 用于在循环检测时做深度兜底判断：
+   * - depth=0 或 undefined：根任务级别，允许 enqueue
+   * - depth>=maxDepth(3)：禁止继续分解
+   */
+  taskDepth?: number;
 };
 
 export type ResolveQueueSettingsParams = {
