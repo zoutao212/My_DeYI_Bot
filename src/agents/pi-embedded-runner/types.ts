@@ -49,6 +49,9 @@ export type EmbeddedPiRunResult = {
   messagingToolSentTexts?: string[];
   // Messaging tool targets that successfully sent a message during the run.
   messagingToolSentTargets?: MessagingToolSend[];
+  // Tool call metadata from the agent run (tool name + optional meta string).
+  // Used by followup-runner to detect whether write/send_file tools were invoked.
+  toolMetas?: Array<{ toolName: string; meta?: string }>;
 };
 
 export type EmbeddedPiCompactResult = {

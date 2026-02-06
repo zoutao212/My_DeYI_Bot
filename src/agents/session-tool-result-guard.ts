@@ -257,8 +257,9 @@ export function installSessionToolResultGuard(
       }
       
       // 🔧 Fix: Detect pseudo tool calls in assistant text output
-      // When LLM outputs tool calls as plain text (e.g. [Historical context: ...]) instead of
-      // proper function calling, convert them to real toolCall format so agent loop executes them.
+      // When LLM outputs tool calls as plain text (e.g. JSON tool format, fake success messages)
+      // instead of proper function calling, convert them to real toolCall format so agent loop
+      // executes them. Note: [Historical context: ...] is excluded — it's referential text.
       if (Array.isArray(msg.content)) {
         const hasRealToolCalls = msg.content.some((block: unknown) => {
           if (!block || typeof block !== "object") return false;

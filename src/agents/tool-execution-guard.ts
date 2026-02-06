@@ -51,31 +51,11 @@ export interface PseudoToolCallDetectionResult {
  * 这种情况下，工具不会真正执行。
  */
 export function detectPseudoToolCall(text: string): PseudoToolCallDetectionResult {
-  // 模式 1: Historical context 格式
-  // [Historical context: a different model called tool "write" with arguments: {...}]
-  const historicalPattern = /\[Historical context:.*?called tool ["'](\w+)["'] with arguments:\s*(\{[\s\S]*?\})/i;
-  const historicalMatch = text.match(historicalPattern);
-  if (historicalMatch) {
-    try {
-      const args = JSON.parse(historicalMatch[2]);
-      return {
-        detected: true,
-        toolName: historicalMatch[1],
-        args,
-        rawMatch: historicalMatch[0],
-        suggestion: "模型以文本形式输出了工具调用，请确保使用正确的 function calling API。",
-      };
-    } catch {
-      return {
-        detected: true,
-        toolName: historicalMatch[1],
-        rawMatch: historicalMatch[0],
-        suggestion: "检测到伪工具调用文本，但参数解析失败。",
-      };
-    }
-  }
+  // 注意: 不再匹配 [Historical context: ...] 格式。
+  // 该格式是 LLM 引述历史上下文的引用性文本（通常伴随 "Do not mimic this format"），
+  // 不代表模型自身想调用工具。误匹配会导致 guard 层将引用文本转换为真正的 toolCall 执行。
 
-  // 模式 2: 直接 JSON 工具调用格式
+  // 模式 1: 直接 JSON 工具调用格式
   // {"tool": "write", "arguments": {...}}
   const jsonToolPattern = /\{[\s\S]*?"tool"\s*:\s*["'](\w+)["'][\s\S]*?"arguments"\s*:\s*(\{[\s\S]*?\})/i;
   const jsonMatch = text.match(jsonToolPattern);

@@ -317,6 +317,14 @@ export interface SubTaskMetadata {
   
   /** 实际产生的文件列表 */
   producedFiles?: string[];
+  
+  // 🆕 兜底落盘相关字段
+  
+  /** 兜底落盘文件路径（LLM 未调用 write 工具时系统自动保存） */
+  fallbackFilePath?: string;
+  
+  /** 兜底落盘原因 */
+  fallbackReason?: string;
 }
 
 /**

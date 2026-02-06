@@ -1,4 +1,7 @@
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
 import { resolveAgentModelFallbacksOverride } from "../../agents/agent-scope.js";
 import { lookupContextTokens } from "../../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
@@ -31,6 +34,7 @@ import { getGlobalOrchestrator } from "../../agents/tools/enqueue-task-tool.js";
 import { buildSiblingContext } from "../../agents/memory/pipeline-integration.js";
 import { createMemoryService } from "../../agents/memory/factory.js";
 import { DeliveryReporter } from "../../agents/intelligent-task-decomposition/delivery-reporter.js";
+import { sendFallbackFile } from "./send-fallback-file.js";
 
 /**
  * 判断错误是否可重试
@@ -287,6 +291,47 @@ export function createFollowupRunner(params: {
           subTask.completedAt = Date.now();
           subTask.status = "completed";
           
+          // 🆕 兜底落盘：检测 LLM 是否偷懒（生成了大段内容但未调用 write 工具落盘）
+          const FILE_TOOLS = new Set(["write", "send_file"]);
+          const MIN_FALLBACK_CHARS = 500;
+          const toolMetas = runResult.toolMetas ?? [];
+          const usedFileTool = toolMetas.some((m) => FILE_TOOLS.has(m.toolName));
+          
+          if (!usedFileTool && outputText.length >= MIN_FALLBACK_CHARS) {
+            try {
+              const taskDir = path.join(
+                os.homedir(), ".clawdbot", "tasks", sessionId, "fallback-outputs",
+              );
+              await fs.mkdir(taskDir, { recursive: true });
+              const safeId = (subTask.id ?? crypto.randomUUID()).replace(/[^a-zA-Z0-9_-]/g, "_");
+              const fallbackFile = path.join(taskDir, `${safeId}.txt`);
+              await fs.writeFile(fallbackFile, outputText, "utf-8");
+              console.log(
+                `[followup-runner] 📝 兜底落盘：LLM 未调用 write 工具，已自动保存 ${outputText.length} 字到 ${fallbackFile}`,
+              );
+              // 记录到子任务元数据
+              if (!subTask.metadata) subTask.metadata = {};
+              subTask.metadata.fallbackFilePath = fallbackFile;
+              subTask.metadata.fallbackReason = "LLM 未调用 write 工具，系统自动兜底落盘";
+              
+              // 🆕 立即发送兜底文件到用户的聊天频道
+              const sendResult = await sendFallbackFile({
+                filePath: fallbackFile,
+                caption: subTask.summary
+                  ? `📝 ${subTask.summary}（系统自动保存）`
+                  : `📝 子任务输出（系统自动保存）`,
+                queued,
+              });
+              if (!sendResult.ok) {
+                console.warn(
+                  `[followup-runner] ⚠️ 兜底文件发送失败 (${sendResult.method}): ${sendResult.error}`,
+                );
+              }
+            } catch (fallbackErr) {
+              console.warn(`[followup-runner] ⚠️ 兜底落盘失败: ${fallbackErr}`);
+            }
+          }
+          
           await orchestrator.saveTaskTree(taskTree);
           console.log(`[followup-runner] ✅ Sub task completed: ${subTask.id}`);
           
@@ -334,6 +379,45 @@ export function createFollowupRunner(params: {
               }
             } catch {
               // 归档失败不影响主流程
+            }
+
+            // 🆕 Step 6a: 合并兜底落盘文件并发送给用户
+            const fallbackTasks = taskTree.subTasks.filter(
+              (t) => t.status === "completed" && t.metadata?.fallbackFilePath,
+            );
+            if (fallbackTasks.length > 0) {
+              try {
+                const mergedDir = path.join(
+                  os.homedir(), ".clawdbot", "tasks", sessionId, "fallback-outputs",
+                );
+                await fs.mkdir(mergedDir, { recursive: true });
+                const mergedFile = path.join(mergedDir, "merged_output.txt");
+                const mergedContent = fallbackTasks
+                  .map((t) => t.output ?? "")
+                  .filter(Boolean)
+                  .join("\n\n---\n\n");
+                await fs.writeFile(mergedFile, mergedContent, "utf-8");
+                console.log(
+                  `[followup-runner] 📝 已合并 ${fallbackTasks.length} 个兜底落盘文件到 ${mergedFile}（${mergedContent.length} 字）`,
+                );
+                // 🆕 发送合并后的兜底文件到用户的聊天频道
+                const mergedSendResult = await sendFallbackFile({
+                  filePath: mergedFile,
+                  caption: `📝 完整输出（${fallbackTasks.length} 个子任务合并）`,
+                  queued,
+                });
+                if (!mergedSendResult.ok) {
+                  // 文件发送失败时降级为文本通知
+                  console.warn(
+                    `[followup-runner] ⚠️ 合并文件发送失败 (${mergedSendResult.method}): ${mergedSendResult.error}`,
+                  );
+                  await sendFollowupPayloads([{
+                    text: `📝 系统检测到 ${fallbackTasks.length} 个子任务的内容未被 LLM 主动落盘为文件，已自动保存到：\n${mergedFile}`,
+                  }], queued);
+                }
+              } catch (mergeErr) {
+                console.warn(`[followup-runner] ⚠️ 合并兜底落盘文件失败: ${mergeErr}`);
+              }
             }
 
             // 🆕 Step 6b: 生成并发送结构化交付报告（支持 HTML）

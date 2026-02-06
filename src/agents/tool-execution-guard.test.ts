@@ -17,14 +17,35 @@ import {
 
 describe("tool-execution-guard", () => {
   describe("detectPseudoToolCall", () => {
-    it("检测 Historical context 格式的伪工具调用", () => {
+    it("不检测 Historical context 引用性文本", () => {
       const text = `[Historical context: a different model called tool "write" with arguments: {"path": "test.md", "content": "hello"}. Do not mimic this format.]Successfully wrote 100 bytes.`;
       
       const result = detectPseudoToolCall(text);
       
+      // Historical context 是引用性文本，不应被当作伪工具调用
+      // "Successfully wrote 100 bytes." 没有路径，也不匹配伪成功消息模式
+      expect(result.detected).toBe(false);
+    });
+
+    it("不检测 Historical context 引用性文本（exec 工具）", () => {
+      const text = `[Historical context: a different model called tool "exec" with arguments: {
+  "command": "Get-ChildItem -Path . -Filter \\"*.txt\\" -Recurse"
+}. Do not mimic this format - use proper function calling.]`;
+      
+      const result = detectPseudoToolCall(text);
+      
+      expect(result.detected).toBe(false);
+    });
+
+    it("检测 Historical context 后跟完整伪成功消息", () => {
+      const text = `[Historical context: ...]Successfully wrote 1276 bytes to characters/lina/memory/core-memories.md`;
+      
+      const result = detectPseudoToolCall(text);
+      
+      // 伪成功消息模式仍应被检测
       expect(result.detected).toBe(true);
       expect(result.toolName).toBe("write");
-      expect(result.args).toEqual({ path: "test.md", content: "hello" });
+      expect(result.args?.path).toBe("characters/lina/memory/core-memories.md");
     });
 
     it("检测伪成功消息", () => {
