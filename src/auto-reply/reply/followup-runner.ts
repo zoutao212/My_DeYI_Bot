@@ -251,7 +251,14 @@ export function createFollowupRunner(params: {
               workspaceDir: queued.run.workspaceDir,
               config: queued.run.config,
               skillsSnapshot: queued.run.skillsSnapshot,
-              prompt: queued.prompt,
+              prompt: (() => {
+                // 🔧 子任务强制落盘：在 prompt 本体注入指令（用户消息级，LLM 遵从度最高）
+                const isSubTask = Boolean(queued.subTaskId);
+                if (isSubTask) {
+                  return `[⚠️ 强制规则] 你必须使用 write 工具将生成内容写入 .txt 文件（文件名含任务摘要），然后在聊天中仅回复简短确认。禁止将完整内容直接输出到聊天。\n\n${queued.prompt}`;
+                }
+                return queued.prompt;
+              })(),
               extraSystemPrompt: (() => {
                 // 🆕 子任务间上下文共享：注入已完成兄弟任务的输出摘要
                 const siblingCtx = taskTree?.subTasks
@@ -262,11 +269,10 @@ export function createFollowupRunner(params: {
                 }
                 const base = queued.run.extraSystemPrompt ?? "";
 
-                // 🔧 子任务强制落盘指令：防止 LLM 偷懒只输出文本不调工具
-                // 用 subTaskId 判断（由 enqueue_task 创建），而非 isRootTask（表示"允许递归"不代表"用户原始请求"）
+                // 🔧 子任务强制落盘（二级强化，主指令已注入 prompt 本体）
                 const isSubTask = Boolean(queued.subTaskId);
                 const persistInstruction = isSubTask
-                  ? "\n\n[系统强制要求] 你正在执行一个子任务。生成的内容（尤其是长文本/创作内容）**必须**使用 `write` 工具写入文件落盘，文件名应包含任务摘要。仅在聊天中回复简短确认即可，不要把完整内容直接输出到聊天。"
+                  ? "\n\n[SYSTEM] 子任务必须用 write 工具落盘，禁止纯文本输出。"
                   : "";
 
                 const combined = [base, siblingCtx, persistInstruction].filter(Boolean).join("");
@@ -344,6 +350,36 @@ export function createFollowupRunner(params: {
                 console.warn(
                   `[followup-runner] ⚠️ 兜底文件发送失败 (${sendResult.method}): ${sendResult.error}`,
                 );
+              }
+              // 🔧 Session 瘦身：截断 session 文件中的最后一条 assistant 消息
+              // 防止子任务输出累积导致 payload 无限膨胀 → LLM 超时
+              try {
+                const sessionFilePath = queued.run.sessionFile;
+                if (sessionFilePath) {
+                  const rawSession = await fs.readFile(sessionFilePath, "utf-8");
+                  const lines = rawSession.split("\n");
+                  // 反向查找最后一条 assistant 消息
+                  for (let i = lines.length - 1; i >= 0; i--) {
+                    const line = lines[i].trim();
+                    if (!line) continue;
+                    try {
+                      const entry = JSON.parse(line);
+                      if (entry.role === "assistant" && Array.isArray(entry.content)) {
+                        const textPart = entry.content.find((c: { type: string }) => c.type === "text");
+                        if (textPart && typeof textPart.text === "string" && textPart.text.length > 500) {
+                          const truncated = textPart.text.substring(0, 200) + `\n\n[内容已落盘到文件: ${fallbackFile}，此处截断以控制 session 大小]`;
+                          textPart.text = truncated;
+                          lines[i] = JSON.stringify(entry);
+                          await fs.writeFile(sessionFilePath, lines.join("\n"), "utf-8");
+                          console.log(`[followup-runner] ✂️ Session 瘦身：截断 assistant 消息 ${outputText.length} → ${truncated.length} 字`);
+                        }
+                        break;
+                      }
+                    } catch { /* 非 JSON 行，跳过 */ }
+                  }
+                }
+              } catch (trimErr) {
+                console.warn(`[followup-runner] ⚠️ Session 瘦身失败（不阻塞）: ${trimErr}`);
               }
             } catch (fallbackErr) {
               console.warn(`[followup-runner] ⚠️ 兜底落盘失败: ${fallbackErr}`);
