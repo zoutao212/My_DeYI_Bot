@@ -20,6 +20,10 @@ import { loadWebMedia } from "../../web/media.js";
 import { resolveTelegramVoiceSend } from "../voice.js";
 import { buildTelegramThreadParams, resolveTelegramReplyId } from "./helpers.js";
 import type { TelegramContext } from "./types.js";
+import {
+  LONG_TEXT_FILE_THRESHOLD,
+  sendTelegramLongTextFile,
+} from "../send-long-text-file.js";
 
 const PARSE_ERR_RE = /can't parse entities|parse entities|find end of the entity/i;
 const VOICE_FORBIDDEN_RE = /VOICE_MESSAGES_FORBIDDEN/;
@@ -81,7 +85,45 @@ export async function deliverReplies(params: {
         ? [reply.mediaUrl]
         : [];
     if (mediaList.length === 0) {
-      const chunks = chunkText(reply.text || "");
+      const replyText = reply.text || "";
+      // 长文本自动转 txt 文件发送：当文本超过阈值时，作为 .txt 文件发送
+      if (replyText.length > LONG_TEXT_FILE_THRESHOLD) {
+        const fileReplyToId =
+          replyToId && (replyToMode === "all" || !hasReplied) ? replyToId : undefined;
+        const result = await sendTelegramLongTextFile({
+          text: replyText,
+          chatId,
+          bot,
+          replyToMessageId: fileReplyToId,
+          messageThreadId,
+        });
+        if (result.ok) {
+          if (replyToId && !hasReplied) {
+            hasReplied = true;
+          }
+        } else {
+          // 文件发送失败时降级为分 chunk 文本发送
+          runtime.log?.(
+            `telegram: failed to send as .txt file, falling back to chunked text: ${result.error}`,
+          );
+          const chunks = chunkText(replyText);
+          for (const chunk of chunks) {
+            await sendTelegramText(bot, chatId, chunk.html, runtime, {
+              replyToMessageId:
+                replyToId && (replyToMode === "all" || !hasReplied) ? replyToId : undefined,
+              messageThreadId,
+              textMode: "html",
+              plainText: chunk.text,
+              linkPreview,
+            });
+            if (replyToId && !hasReplied) {
+              hasReplied = true;
+            }
+          }
+        }
+        continue;
+      }
+      const chunks = chunkText(replyText);
       for (const chunk of chunks) {
         await sendTelegramText(bot, chatId, chunk.html, runtime, {
           replyToMessageId:

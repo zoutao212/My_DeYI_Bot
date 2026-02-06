@@ -304,6 +304,7 @@ async function sendFileToTelegram(params: {
   const { Bot, InputFile } = await import("grammy");
   const { loadConfig } = await import("../../config/config.js");
   const { resolveTelegramAccount } = await import("../../telegram/accounts.js");
+  const { parseTelegramTarget } = await import("../../telegram/targets.js");
 
   const cfg = loadConfig();
   const account = resolveTelegramAccount({ cfg, accountId: params.accountId });
@@ -316,6 +317,9 @@ async function sendFileToTelegram(params: {
   const bot = new Bot(token);
   const file = new InputFile(params.fileBuffer, params.fileName);
 
+  // 解析 chatId，去掉 "telegram:" 等内部前缀并提取 topic ID
+  const target = parseTelegramTarget(params.chatId);
+
   const sendParams: Record<string, unknown> = {
     parse_mode: "HTML" as const,
   };
@@ -324,9 +328,11 @@ async function sendFileToTelegram(params: {
     sendParams.caption = params.caption;
   }
 
-  if (params.threadId != null) {
-    sendParams.message_thread_id = params.threadId;
+  // 优先使用调用方传入的 threadId，其次使用从 target 解析出的 messageThreadId
+  const threadId = params.threadId ?? target.messageThreadId;
+  if (threadId != null) {
+    sendParams.message_thread_id = threadId;
   }
 
-  await bot.api.sendDocument(params.chatId, file, sendParams);
+  await bot.api.sendDocument(target.chatId, file, sendParams);
 }

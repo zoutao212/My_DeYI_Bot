@@ -21,13 +21,29 @@ export function scheduleFollowupDrain(
     // 当队列正在排空时，跳过新的排空请求
     return;
   }
-  console.log(`[scheduleFollowupDrain] ✅ Starting drain: key=${key}, items=${queue.items.length}`);
+  console.log(`[scheduleFollowupDrain] ✅ Starting drain: key=${key}, items=${queue.items.length}, mode=${queue.mode}`);
   queue.draining = true;
   void (async () => {
     try {
       let forceIndividualCollect = false;
+      let drainIteration = 0;
       while (queue.items.length > 0 || queue.droppedCount > 0) {
+        drainIteration++;
+        console.log(`[drain] 🔄 Iteration ${drainIteration}: items=${queue.items.length}, droppedCount=${queue.droppedCount}, mode=${queue.mode}`);
         await waitForQueueDebounce(queue);
+
+        // 🔧 当队列中存在通过 enqueue_task 创建的子任务时，强制逐个执行
+        // collect mode 会把所有 items 合并成一个 prompt，破坏子任务的独立执行语义
+        const hasQueueTasks = queue.items.some((item) => item.isQueueTask || item.subTaskId);
+        if (hasQueueTasks) {
+          const next = queue.items.shift();
+          if (!next) { console.log(`[drain] ⚠️ queue task shift() returned undefined, breaking`); break; }
+          console.log(`[drain] ▶️ Running queue task individually: summary=${next.summaryLine || 'none'}, isQueueTask=${next.isQueueTask}, isRootTask=${next.isRootTask}, depth=${next.taskDepth}`);
+          await runFollowup(next);
+          console.log(`[drain] ✅ Queue task finished: summary=${next.summaryLine || 'none'}, remaining=${queue.items.length}`);
+          continue;
+        }
+
         if (queue.mode === "collect") {
           // Once the batch is mixed, never collect again within this drain.
           // Prevents “collect after shift” collapsing different targets.
@@ -172,13 +188,18 @@ export function scheduleFollowupDrain(
         }
 
         const next = queue.items.shift();
-        if (!next) break;
+        if (!next) { console.log(`[drain] ⚠️ queue.items.shift() returned undefined, breaking`); break; }
+        console.log(`[drain] ▶️ Running task: summary=${next.summaryLine || 'none'}, isQueueTask=${next.isQueueTask}, isRootTask=${next.isRootTask}, depth=${next.taskDepth}`);
         await runFollowup(next);
+        console.log(`[drain] ✅ Task finished: summary=${next.summaryLine || 'none'}, remaining=${queue.items.length}`);
       }
+      console.log(`[drain] 🏁 While loop exited: items=${queue.items.length}, droppedCount=${queue.droppedCount}`);
     } catch (err) {
       defaultRuntime.error?.(`followup queue drain failed for ${key}: ${String(err)}`);
+      console.error(`[drain] ❌ Drain loop crashed:`, err);
     } finally {
       queue.draining = false;
+      console.log(`[drain] 🔚 Finally: items=${queue.items.length}, droppedCount=${queue.droppedCount}`);
       if (queue.items.length === 0 && queue.droppedCount === 0) {
         FOLLOWUP_QUEUES.delete(key);
       } else {

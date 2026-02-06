@@ -583,6 +583,12 @@ export function createFollowupRunner(params: {
         const queueKey = queued.run.sessionKey;
         finalizeWithFollowup(undefined, queueKey, createFollowupRunner(params));
       }
+    } catch (outerErr) {
+      // 🔧 外层 catch：防止未捕获的异常（orchestrator 操作、payload 处理等）
+      // 泄漏到 drain 循环导致整个队列停止
+      const msg = outerErr instanceof Error ? outerErr.message : String(outerErr);
+      console.error(`[followup-runner] ❌ Unhandled error in followup runner: ${msg}`);
+      defaultRuntime.error?.(`Followup runner unhandled error: ${msg}`);
     } finally {
       typing.markRunComplete();
       // 🔧 清理全局上下文

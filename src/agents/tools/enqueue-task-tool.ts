@@ -223,8 +223,8 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
       // 1. 不是队列任务（用户直接发消息）
       // 2. 是根任务（isRootTask=true）
       // 3. 是新根任务树（isNewRootTask=true，方案 2 双保险）
-      // 4. 深度未超限（方案 3 兜底）
-      const canEnqueue = !isQueueTask || isCurrentRootTask || isCurrentNewRoot;
+      // 4. 深度未超限（方案 3 兜底 → 升级为主判据：depth < MAX 即放行）
+      const canEnqueue = !isQueueTask || isCurrentRootTask || isCurrentNewRoot || currentDepth < MAX_ENQUEUE_DEPTH;
       
       // 方案 3 兜底：即使标记允许，深度超限也拒绝
       if (canEnqueue && currentDepth >= MAX_ENQUEUE_DEPTH) {
@@ -317,10 +317,16 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
           enqueuedAt: Date.now(),
           run: currentFollowupRun.run,
           isQueueTask: true,
-          isRootTask: isNewRootTask,       // 方案 1：新根任务 → isRootTask=true
+          isRootTask: isNewRootTask || subTaskDepth < MAX_ENQUEUE_DEPTH - 1, // 方案 1+2：新根任务或浅层子任务均允许继续分解
           isNewRootTask: isNewRootTask,    // 方案 2：显式传播标记
           taskDepth: subTaskDepth,          // 方案 3：记录任务树深度
           subTaskId: subTask.id,            // 🆕 精确匹配：记录子任务 ID
+          // 🔧 继承 originating 路由信息，确保子任务回复能发送到用户的聊天频道
+          originatingChannel: currentFollowupRun.originatingChannel,
+          originatingTo: currentFollowupRun.originatingTo,
+          originatingAccountId: currentFollowupRun.originatingAccountId,
+          originatingThreadId: currentFollowupRun.originatingThreadId,
+          originatingChatType: currentFollowupRun.originatingChatType,
         };
 
         // 解析队列设置

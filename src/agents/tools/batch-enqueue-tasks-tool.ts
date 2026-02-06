@@ -206,7 +206,7 @@ export function createBatchEnqueueTasksTool(options?: BatchEnqueueTasksOptions):
       const currentDepth = currentFollowupRun.taskDepth ?? 0;
       const MAX_ENQUEUE_DEPTH = 3;
       
-      const canEnqueue = !isQueueTask || isCurrentRootTask || isCurrentNewRoot;
+      const canEnqueue = !isQueueTask || isCurrentRootTask || isCurrentNewRoot || currentDepth < MAX_ENQUEUE_DEPTH;
       
       // 方案 3 兜底：深度超限拒绝
       if (canEnqueue && currentDepth >= MAX_ENQUEUE_DEPTH) {
@@ -325,10 +325,16 @@ export function createBatchEnqueueTasksTool(options?: BatchEnqueueTasksOptions):
             run: currentFollowupRun.run,
             // 🔧 标记为队列任务，防止循环（与 enqueue_task 保持一致）
             isQueueTask: true,
-            isRootTask: false,            // 批量子任务不是根任务
+            isRootTask: subTaskDepth < MAX_ENQUEUE_DEPTH - 1, // 浅层子任务允许继续分解
             isNewRootTask: false,         // 批量子任务不是新根任务
             taskDepth: subTaskDepth,      // 方案 3：记录任务树深度
             subTaskId: subTask.id,        // 🆕 精确匹配：记录子任务 ID
+            // 🔧 继承 originating 路由信息，确保子任务回复能发送到用户的聊天频道
+            originatingChannel: currentFollowupRun.originatingChannel,
+            originatingTo: currentFollowupRun.originatingTo,
+            originatingAccountId: currentFollowupRun.originatingAccountId,
+            originatingThreadId: currentFollowupRun.originatingThreadId,
+            originatingChatType: currentFollowupRun.originatingChatType,
           };
 
           // 加入队列

@@ -24,6 +24,10 @@ import {
 import type { NormalizedOutboundPayload } from "./payloads.js";
 import { normalizeReplyPayloadsForDelivery } from "./payloads.js";
 import type { OutboundChannel } from "./targets.js";
+import {
+  LONG_TEXT_FILE_THRESHOLD,
+  sendTelegramLongTextFile,
+} from "../../telegram/send-long-text-file.js";
 
 export type { NormalizedOutboundPayload } from "./payloads.js";
 export { normalizeOutboundPayloads } from "./payloads.js";
@@ -328,6 +332,43 @@ export async function deliverOutboundPayloads(params: {
       if (payloadSummary.mediaUrls.length === 0) {
         if (isSignalChannel) {
           await sendSignalTextChunks(payloadSummary.text);
+        } else if (
+          channel === "telegram" &&
+          payloadSummary.text.length > LONG_TEXT_FILE_THRESHOLD
+        ) {
+          // Telegram 长文本自动转 txt 文件发送
+          const threadId = params.threadId;
+          const parsedThreadId =
+            threadId == null
+              ? undefined
+              : typeof threadId === "number"
+                ? threadId
+                : Number.parseInt(String(threadId), 10) || undefined;
+          const replyToId = params.replyToId;
+          const parsedReplyToId =
+            replyToId == null
+              ? undefined
+              : Number.parseInt(String(replyToId), 10) || undefined;
+          const fileResult = await sendTelegramLongTextFile({
+            text: payloadSummary.text,
+            chatId: to,
+            accountId: accountId ?? undefined,
+            replyToMessageId: parsedReplyToId,
+            messageThreadId: parsedThreadId,
+          });
+          if (fileResult.ok) {
+            results.push({
+              channel: "telegram",
+              messageId: "file",
+              chatId: to,
+            });
+          } else {
+            // 文件发送失败时降级为分 chunk 文本发送
+            console.warn(
+              `[outbound] telegram txt file send failed, falling back to chunks: ${fileResult.error}`,
+            );
+            await sendTextChunks(payloadSummary.text);
+          }
         } else {
           await sendTextChunks(payloadSummary.text);
         }
