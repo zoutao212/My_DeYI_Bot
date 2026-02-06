@@ -1,5 +1,5 @@
 ---
-name: maintain_rules
+name: maintain-rules
 description: 成长型自我创新/自我优化：从交互中提炼稳定模式，固化为“规则 + 代码地图 + Skill”，持续降低定位成本与 token 消耗。
 ---
 

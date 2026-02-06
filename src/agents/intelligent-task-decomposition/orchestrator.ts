@@ -90,7 +90,11 @@ export class Orchestrator {
     
     // 记录到任务树元数据
     if (!taskTree.metadata) {
-      taskTree.metadata = {};
+      taskTree.metadata = {
+        totalTasks: 0,
+        completedTasks: 0,
+        failedTasks: 0,
+      };
     }
     taskTree.metadata.complexityScore = score.total;
     taskTree.metadata.calculatedMaxDepth = score.recommendedMaxDepth;

@@ -249,6 +249,22 @@ export interface TaskTreeMetadata {
   
   /** 实际总时长（毫秒） */
   actualDuration?: number;
+  
+  // 🆕 任务系统改进：复杂度评分相关字段
+  
+  /** 复杂度评分（0-100） */
+  complexityScore?: number;
+  
+  /** 计算得出的最大深度（1-3） */
+  calculatedMaxDepth?: number;
+  
+  /** 评分维度详情 */
+  scoreDimensions?: {
+    promptLength: number;
+    taskType: number;
+    toolDependencies: number;
+    historicalPerformance: number;
+  };
 }
 
 /**
@@ -553,4 +569,44 @@ export interface BatchExecutionResult {
   
   /** 实际消耗的 tokens */
   actualTokens?: number;
+}
+
+// ========================================
+// 🆕 交付报告相关类型
+// ========================================
+
+/**
+ * 交付报告
+ * 
+ * 表示任务树的交付报告数据
+ */
+export interface DeliveryReport {
+  /** 根任务描述 */
+  rootTask: string;
+  
+  /** 任务列表 */
+  tasks: Array<{
+    id: string;
+    summary: string;
+    status: string;
+    result?: string;
+  }>;
+  
+  /** 统计信息 */
+  stats: {
+    total: number;
+    completed: number;
+    failed: number;
+  };
+  
+  /** 开始时间 */
+  startTime?: number;
+  
+  /** 结束时间 */
+  endTime?: number;
+  
+  /** 统计数据（兼容旧版本） */
+  statistics?: {
+    successRate: string;
+  };
 }

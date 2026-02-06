@@ -1,5 +1,5 @@
 ---
-name: project_memory_gardening
+name: project-memory-gardening
 description: 构建并维护可供 AI 快速定位代码位置的“代码地图”（入口清单、模块边界、调用链、关键词索引、定位速查表），让新对话无需全盘扫描代码库即可建立完整印象。
 ---
 

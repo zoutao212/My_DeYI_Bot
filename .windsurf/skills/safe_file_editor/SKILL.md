@@ -1,5 +1,5 @@
 ---
-name: SafeFileEditor
+name: safe-file-editor
 description: SafeFileEditor - 大型文件/规则文件“安全改写引擎”：自动备份+原子写入+Diff预览+可回放批量操作，支持按行号/关键字/锚点精确替换，支持大段代码块原样复制粘贴（--code-file），适用于突破编辑限制与快速迁移/重构。大文件手术刀。
 ---
 
