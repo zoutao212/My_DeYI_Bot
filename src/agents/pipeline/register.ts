@@ -52,7 +52,7 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
         let detectedCharacter: string | undefined;
         
         // 检测是否提到栗娜
-        if (userMessage.includes("栗娜") || userMessage.includes("lina")) {
+        if (userMessage.includes("栗娜") || userMessage.includes("琳娜") || userMessage.includes("lina")) {
           detectedCharacter = "lina";
           log.info("🔵 [Pipeline] Detected character: lina (栗娜)");
         }

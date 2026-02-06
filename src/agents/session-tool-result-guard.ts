@@ -1,10 +1,12 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { SessionManager } from "@mariozechner/pi-coding-agent";
 
+import crypto from "node:crypto";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { makeMissingToolResult } from "./session-transcript-repair.js";
 import { emitSessionTranscriptUpdate } from "../sessions/transcript-events.js";
 import { convertGeminiToOpenAIFormat } from "./gemini-payload-thought-signature.js";
+import { detectPseudoToolCall } from "./tool-execution-guard.js";
 
 const log = createSubsystemLogger("agent/guard");
 
@@ -249,6 +251,47 @@ export function installSessionToolResultGuard(
             if ("textSignature" in rec) {
               delete rec.textSignature;
               log.debug(`[guard] Removed textSignature from content block`);
+            }
+          }
+        }
+      }
+      
+      // 🔧 Fix: Detect pseudo tool calls in assistant text output
+      // When LLM outputs tool calls as plain text (e.g. [Historical context: ...]) instead of
+      // proper function calling, convert them to real toolCall format so agent loop executes them.
+      if (Array.isArray(msg.content)) {
+        const hasRealToolCalls = msg.content.some((block: unknown) => {
+          if (!block || typeof block !== "object") return false;
+          const rec = block as Record<string, unknown>;
+          return rec.type === "toolCall" || rec.type === "toolUse" || rec.type === "functionCall";
+        });
+        
+        if (!hasRealToolCalls) {
+          // Extract all text content and check for pseudo tool calls
+          const textBlocks = msg.content.filter((block: unknown) => {
+            if (!block || typeof block !== "object") return false;
+            return (block as Record<string, unknown>).type === "text";
+          }) as Array<{ type: "text"; text: string }>;
+          
+          const fullText = textBlocks.map(b => b.text).join("\n");
+          if (fullText.trim()) {
+            const pseudoResult = detectPseudoToolCall(fullText);
+            if (pseudoResult.detected && pseudoResult.toolName && pseudoResult.args) {
+              const syntheticId = `pseudo_${pseudoResult.toolName}_${crypto.randomUUID().slice(0, 8)}`;
+              log.warn(`[guard] ⚠️ Detected pseudo tool call: ${pseudoResult.toolName} → converting to real toolCall (id=${syntheticId})`);
+              log.info(`[guard] Pseudo tool call args: ${JSON.stringify(pseudoResult.args).slice(0, 500)}`);
+              
+              // Replace text content with a real toolCall block
+              msg.content = [
+                {
+                  type: "toolCall" as const,
+                  id: syntheticId,
+                  name: pseudoResult.toolName,
+                  arguments: pseudoResult.args,
+                },
+              ] as never;
+              
+              log.info(`[guard] ✅ Converted pseudo tool call to real toolCall: ${pseudoResult.toolName}`);
             }
           }
         }
