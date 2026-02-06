@@ -5,7 +5,7 @@
  */
 
 import crypto from "node:crypto";
-import type { TaskTree, SubTask, TaskTreeChange, QualityReviewResult } from "./types.js";
+import type { TaskTree, SubTask, TaskTreeChange, QualityReviewResult, TaskBatch, BatchExecutionResult, BatchExecutionOptions } from "./types.js";
 import { TaskTreeManager } from "./task-tree-manager.js";
 import { RetryManager } from "./retry-manager.js";
 import { ErrorHandler } from "./error-handler.js";
@@ -13,6 +13,10 @@ import { RecoveryManager } from "./recovery-manager.js";
 import { LLMTaskDecomposer } from "./llm-task-decomposer.js";
 import { QualityReviewer } from "./quality-reviewer.js";
 import { TaskAdjuster } from "./task-adjuster.js";
+import { FileManager } from "./file-manager.js";
+import { OutputFormatter } from "./output-formatter.js";
+import { TaskGrouper, type GroupingOptions } from "./task-grouper.js";
+import { BatchExecutor, type LLMCaller } from "./batch-executor.js";
 
 /**
  * 任务分解协调器
@@ -25,12 +29,23 @@ export class Orchestrator {
   private llmDecomposer: LLMTaskDecomposer;
   private qualityReviewer: QualityReviewer;
   private taskAdjuster: TaskAdjuster;
+  private fileManager: FileManager | null = null;
+  private outputFormatter: OutputFormatter;
+  
+  // 🆕 批量执行相关组件
+  private taskGrouper: TaskGrouper;
+  private batchExecutor: BatchExecutor | null = null;
 
-  constructor() {
+  constructor(
+    groupingOptions?: GroupingOptions,
+    batchExecutionOptions?: BatchExecutionOptions,
+    llmCaller?: LLMCaller
+  ) {
     this.taskTreeManager = new TaskTreeManager();
     this.retryManager = new RetryManager();
     this.errorHandler = new ErrorHandler();
     this.recoveryManager = new RecoveryManager(this.taskTreeManager);
+    this.outputFormatter = new OutputFormatter();
     
     // 初始化新组件（使用默认 LLM 配置）
     const llmConfig = {
@@ -40,22 +55,52 @@ export class Orchestrator {
     this.llmDecomposer = new LLMTaskDecomposer(llmConfig);
     this.qualityReviewer = new QualityReviewer(llmConfig);
     this.taskAdjuster = new TaskAdjuster(this.taskTreeManager);
+    
+    // 🆕 初始化批量执行组件
+    this.taskGrouper = new TaskGrouper(groupingOptions);
+    
+    // 如果提供了 LLM 调用器，初始化批量执行器
+    if (llmCaller) {
+      this.batchExecutor = new BatchExecutor(llmCaller, batchExecutionOptions);
+    }
   }
 
   /**
    * 初始化任务树
    */
   async initializeTaskTree(rootTask: string, sessionId: string): Promise<TaskTree> {
-    return await this.taskTreeManager.initialize(rootTask, sessionId);
+    const taskTree = await this.taskTreeManager.initialize(rootTask, sessionId);
+    
+    // 🆕 初始化文件管理器
+    this.fileManager = new FileManager(sessionId);
+    await this.fileManager.initialize();
+    
+    // 🆕 记录时间线事件
+    await this.fileManager.recordTimelineEvent(
+      "task_created",
+      sessionId,
+      `创建任务树：${rootTask}`
+    );
+    
+    return taskTree;
   }
 
   /**
    * 添加子任务到任务树
+   * 
+   * @param taskTree 任务树
+   * @param prompt 任务提示词
+   * @param summary 任务简短描述
+   * @param parentId 父任务 ID（可选）
+   * @param waitForChildren 是否等待子任务完成（可选）
+   * @returns 新创建的子任务
    */
   async addSubTask(
     taskTree: TaskTree,
     prompt: string,
     summary: string,
+    parentId?: string,
+    waitForChildren?: boolean,
   ): Promise<SubTask> {
     const subTask: SubTask = {
       id: crypto.randomUUID(),
@@ -64,12 +109,30 @@ export class Orchestrator {
       status: "pending",
       retryCount: 0,
       createdAt: Date.now(),
+      parentId: parentId || null,           // 🆕 记录父任务 ID
+      children: [],                         // 🆕 初始化子任务列表
+      waitForChildren: waitForChildren,     // 🆕 是否等待子任务完成
+      depth: 0,                             // 🆕 初始化深度（后续会更新）
     };
+
+    // 🆕 计算任务深度
+    if (parentId) {
+      const parentTask = taskTree.subTasks.find(t => t.id === parentId);
+      if (parentTask) {
+        subTask.depth = (parentTask.depth || 0) + 1;
+        
+        // 🆕 将当前任务添加到父任务的子任务列表
+        if (!parentTask.children) {
+          parentTask.children = [];
+        }
+        parentTask.children.push(subTask);
+      }
+    }
 
     taskTree.subTasks.push(subTask);
     await this.taskTreeManager.save(taskTree);
 
-    console.log(`[Orchestrator] ✅ Sub task added: ${subTask.id} (${summary})`);
+    console.log(`[Orchestrator] ✅ Sub task added: ${subTask.id} (${summary}) [depth=${subTask.depth}, parent=${parentId || 'none'}]`);
     return subTask;
   }
 
@@ -97,7 +160,124 @@ export class Orchestrator {
 
       // 更新输出和状态
       subTask.output = output;
+      subTask.completedAt = Date.now();
       await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "completed");
+
+      // 🆕 自动触发质量评估
+      if (taskTree.qualityReviewEnabled !== false) {
+        console.log(`[Orchestrator] 🔍 开始质量评估：${subTask.id}`);
+        
+        const review = await this.qualityReviewer.reviewSubTaskCompletion(
+          taskTree,
+          subTask.id
+        );
+
+        // 根据评估结果决定后续操作
+        switch (review.decision) {
+          case "continue":
+            console.log(`[Orchestrator] ✅ 质量评估通过`);
+            break;
+
+          case "adjust":
+            console.log(`[Orchestrator] ⚠️ 质量需要调整`);
+            if (review.modifications && review.modifications.length > 0) {
+              await this.adjustTaskTree(taskTree, review.modifications, false);
+            }
+            break;
+
+          case "restart":
+            console.log(`[Orchestrator] 🔄 质量不满意，需要重新执行`);
+            // 标记任务为 pending，等待重新执行
+            await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
+            subTask.retryCount++;
+            throw new Error(`质量评估不通过，需要重新执行：${review.findings.join("; ")}`);
+
+          case "overthrow":
+            console.log(`[Orchestrator] ❌ 质量严重不满意，需要推翻`);
+            throw new Error(`质量评估严重不通过：${review.findings.join("; ")}`);
+        }
+      }
+
+      // 🆕 验证文件产出（针对写作任务）
+      if (subTask.metadata?.requiresFileOutput) {
+        const hasFileOutput = await this.verifyFileOutput(taskTree, subTask);
+        
+        if (!hasFileOutput) {
+          throw new Error(
+            `任务完成但未产生文件输出。请使用 write 工具创建文件。\n` +
+            `任务要求：${subTask.prompt}\n` +
+            `当前输出：${subTask.output?.substring(0, 200)}...`
+          );
+        }
+        
+        // 🆕 发送子任务的文件到聊天频道
+        await this.sendSubTaskFiles(taskTree, subTask);
+      }
+
+      // 🆕 如果是根任务（汇总任务），生成最终交付产物
+      if (subTask.metadata?.isRootTask && subTask.metadata?.isSummaryTask) {
+        const deliverablePath = await this.generateFinalDeliverable(taskTree, subTask);
+        console.log(`[Orchestrator] ✅ 根任务汇总完成，最终产物：${deliverablePath}`);
+        
+        // 🆕 如果是写作任务，合并并发送完整文件
+        if (subTask.metadata?.requiresFileOutput && this.fileManager) {
+          try {
+            const mergedFilePath = await this.fileManager.mergeTaskOutputs(taskTree);
+            await this.sendFileToChannel(mergedFilePath, `完整输出：${taskTree.rootTask}`);
+            console.log(`[Orchestrator] ✅ 已发送完整文件到聊天频道`);
+          } catch (err) {
+            console.warn(`[Orchestrator] ⚠️ 合并或发送完整文件失败`, err);
+          }
+        }
+        
+        // 🆕 更新任务树状态为 completed
+        taskTree.status = "completed";
+        await this.taskTreeManager.save(taskTree);
+      }
+
+      // 🆕 如果是汇总任务（waitForChildren=true），生成最终交付产物
+      if (subTask.waitForChildren && subTask.children && subTask.children.length > 0) {
+        const deliverablePath = await this.generateFinalDeliverable(taskTree, subTask);
+        console.log(`[Orchestrator] ✅ 汇总任务完成，最终产物：${deliverablePath}`);
+        
+        // 🆕 如果是写作任务，合并并发送完整文件
+        if (subTask.metadata?.requiresFileOutput && this.fileManager) {
+          try {
+            const mergedFilePath = await this.fileManager.mergeTaskOutputs(taskTree);
+            await this.sendFileToChannel(mergedFilePath, `完整输出：${subTask.summary}`);
+            console.log(`[Orchestrator] ✅ 已发送完整文件到聊天频道`);
+          } catch (err) {
+            console.warn(`[Orchestrator] ⚠️ 合并或发送完整文件失败`, err);
+          }
+        }
+      }
+
+      // 🆕 保存任务输出到文件系统
+      if (this.fileManager) {
+        // 保存任务输出
+        const outputPath = await this.fileManager.saveTaskOutput(
+          subTask.id,
+          output,
+          "txt"
+        );
+
+        // 保存任务元数据
+        await this.fileManager.saveTaskMetadata(subTask);
+
+        // 记录时间线事件
+        await this.fileManager.recordTimelineEvent(
+          "task_completed",
+          subTask.id,
+          `任务完成：${subTask.summary}`
+        );
+
+        // 记录执行日志
+        await this.fileManager.logExecution(
+          `Task ${subTask.id} completed: ${subTask.summary}`
+        );
+
+        console.log(`[Orchestrator] 💾 Task output saved to: ${outputPath}`);
+      }
 
       console.log(`[Orchestrator] ✅ Sub task completed: ${subTask.id}`);
     } catch (err) {
@@ -107,6 +287,16 @@ export class Orchestrator {
       subTask.error = error.message;
       subTask.retryCount++;
       await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
+
+      // 🆕 记录失败到文件系统
+      if (this.fileManager) {
+        await this.fileManager.logFailure(subTask.id, error.message);
+        await this.fileManager.recordTimelineEvent(
+          "task_failed",
+          subTask.id,
+          `任务失败：${subTask.summary} - ${error.message}`
+        );
+      }
 
       // 记录失败日志
       await this.retryManager.logFailure(subTask, error, taskTree.id);
@@ -288,19 +478,225 @@ export class Orchestrator {
     console.log(`[Orchestrator] ✅ 任务树调整完成，应用了 ${changes.length} 个变更`);
   }
 
+  // ========================================
+  // 🆕 批量执行相关方法
+  // ========================================
+
   /**
-   * 获取可执行的子任务列表（考虑依赖关系）
+   * 设置 LLM 调用器（用于批量执行）
+   * 
+   * @param llmCaller LLM 调用器
+   * @param options 批量执行选项
+   */
+  setLLMCaller(llmCaller: LLMCaller, options?: BatchExecutionOptions): void {
+    this.batchExecutor = new BatchExecutor(llmCaller, options);
+    console.log("[Orchestrator] ✅ LLM 调用器已设置，批量执行功能已启用");
+  }
+
+  /**
+   * 批量执行多个批次
    * 
    * @param taskTree 任务树
+   * @param batches 任务批次列表
+   * @returns 批量执行结果列表
+   */
+  async executeBatches(
+    taskTree: TaskTree,
+    batches: TaskBatch[]
+  ): Promise<BatchExecutionResult[]> {
+    if (!this.batchExecutor) {
+      throw new Error("批量执行器未初始化，请先调用 setLLMCaller() 设置 LLM 调用器");
+    }
+
+    console.log(`[Orchestrator] 🚀 开始批量执行 ${batches.length} 个批次`);
+
+    const results: BatchExecutionResult[] = [];
+
+    for (const batch of batches) {
+      try {
+        // 1. 更新批次状态为 "active"
+        batch.status = "active";
+        await this.updateBatchStatus(taskTree, batch.id, "active");
+
+        // 2. 执行批次
+        const result = await this.batchExecutor.executeBatch(batch);
+        results.push(result);
+
+        // 3. 处理执行结果
+        if (result.success) {
+          // 成功：更新批次状态和任务输出
+          batch.status = "completed";
+          batch.completedAt = Date.now();
+          await this.updateBatchStatus(taskTree, batch.id, "completed");
+
+          // 将输出分配到各个任务
+          for (const [taskId, output] of result.outputs.entries()) {
+            const task = taskTree.subTasks.find(t => t.id === taskId);
+            if (task) {
+              task.output = output;
+              task.completedAt = Date.now();
+              await this.taskTreeManager.updateSubTaskStatus(taskTree, taskId, "completed");
+
+              // 🆕 保存任务输出到文件系统
+              if (this.fileManager) {
+                await this.fileManager.saveTaskOutput(taskId, output, "txt");
+                await this.fileManager.saveTaskMetadata(task);
+                await this.fileManager.recordTimelineEvent(
+                  "task_completed",
+                  taskId,
+                  `批量任务完成：${task.summary}`
+                );
+              }
+
+              console.log(`[Orchestrator] ✅ 任务 ${taskId} 完成（批量执行）`);
+            }
+          }
+
+          console.log(`[Orchestrator] ✅ 批次 ${batch.id} 执行成功，完成 ${result.outputs.size} 个任务`);
+        } else {
+          // 失败：更新批次状态和错误信息
+          batch.status = "failed";
+          batch.error = result.error;
+          await this.updateBatchStatus(taskTree, batch.id, "failed");
+
+          // 标记批次中的所有任务为失败
+          for (const task of batch.tasks) {
+            task.error = `批次执行失败: ${result.error}`;
+            await this.taskTreeManager.updateSubTaskStatus(taskTree, task.id, "failed");
+
+            // 🆕 记录失败到文件系统
+            if (this.fileManager) {
+              await this.fileManager.logFailure(task.id, result.error || "未知错误");
+              await this.fileManager.recordTimelineEvent(
+                "task_failed",
+                task.id,
+                `批量任务失败：${task.summary}`
+              );
+            }
+          }
+
+          console.error(`[Orchestrator] ❌ 批次 ${batch.id} 执行失败: ${result.error}`);
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        
+        // 更新批次状态为失败
+        batch.status = "failed";
+        batch.error = errorMessage;
+        await this.updateBatchStatus(taskTree, batch.id, "failed");
+
+        // 标记批次中的所有任务为失败
+        for (const task of batch.tasks) {
+          task.error = `批次执行异常: ${errorMessage}`;
+          await this.taskTreeManager.updateSubTaskStatus(taskTree, task.id, "failed");
+        }
+
+        console.error(`[Orchestrator] ❌ 批次 ${batch.id} 执行异常: ${errorMessage}`);
+
+        // 记录错误结果
+        results.push({
+          batchId: batch.id,
+          success: false,
+          outputs: new Map(),
+          error: errorMessage,
+          duration: 0,
+        });
+      }
+    }
+
+    console.log(`[Orchestrator] ✅ 批量执行完成，成功 ${results.filter(r => r.success).length}/${batches.length} 个批次`);
+    return results;
+  }
+
+  /**
+   * 更新批次状态
+   * 
+   * @param taskTree 任务树
+   * @param batchId 批次 ID
+   * @param status 新状态
+   */
+  private async updateBatchStatus(
+    taskTree: TaskTree,
+    batchId: string,
+    status: "pending" | "active" | "completed" | "failed"
+  ): Promise<void> {
+    // 初始化 batches 数组（如果不存在）
+    if (!taskTree.batches) {
+      taskTree.batches = [];
+    }
+
+    // 查找批次
+    const batch = taskTree.batches.find(b => b.id === batchId);
+    if (batch) {
+      batch.status = status;
+      
+      // 如果是完成状态，记录完成时间
+      if (status === "completed") {
+        batch.completedAt = Date.now();
+      }
+    }
+
+    // 保存任务树
+    await this.taskTreeManager.save(taskTree);
+  }
+
+  /**
+   * 获取可执行的子任务列表（考虑依赖关系和父子关系）
+   * 
+   * 🆕 支持批量执行：返回的任务可以被分组为批次
+   * 🆕 支持自动汇总：当所有子任务完成后，自动触发父任务的汇总执行
+   * 
+   * @param taskTree 任务树
+   * @param enableBatching 是否启用批量执行（默认 false）
    * @returns 可执行的子任务列表（按优先级排序）
    */
-  getExecutableTasks(taskTree: TaskTree): SubTask[] {
+  getExecutableTasks(taskTree: TaskTree, enableBatching: boolean = false): SubTask[] {
     const executableTasks: SubTask[] = [];
 
     for (const subTask of taskTree.subTasks) {
       // 1. 检查任务状态（只有 pending 状态的任务可以执行）
       if (subTask.status !== "pending") {
         continue;
+      }
+
+      // 🆕 2. 如果是根任务，检查所有非根任务是否完成
+      if (subTask.metadata?.isRootTask) {
+        const allNonRootTasksCompleted = taskTree.subTasks
+          .filter(t => !t.metadata?.isRootTask)
+          .every(t => t.status === "completed");
+
+        if (!allNonRootTasksCompleted) {
+          console.log(`[Orchestrator] ⏳ Root task waiting for all sub-tasks to complete`);
+          continue;
+        }
+
+        // 🆕 3. 收集所有子任务的输出
+        const childOutputs = taskTree.subTasks
+          .filter(t => !t.metadata?.isRootTask && t.output && t.output.length > 0)
+          .map(t => `### ${t.summary}\n\n${t.output}`);
+
+        if (childOutputs.length > 0) {
+          console.log(`[Orchestrator] 📥 Injecting ${childOutputs.length} child outputs into root task`);
+          
+          // 🆕 4. 修改根任务的 prompt，添加汇总指令
+          subTask.prompt = `${subTask.prompt}
+
+## 子任务输出
+
+以下是所有子任务的输出结果，请将它们汇总整合为一个完整的、连贯的最终产物：
+
+${childOutputs.join("\n\n---\n\n")}
+
+## 汇总要求
+
+1. **整合内容**: 将所有子任务的输出整合为一个完整的文档
+2. **保持连贯**: 确保内容逻辑连贯，过渡自然
+3. **统一风格**: 统一文风、格式和术语
+4. **生成文件**: 将最终产物保存为 txt 或 md 文件
+5. **质量检查**: 确保内容完整、准确、符合要求
+
+请立即执行汇总任务，并生成最终交付文件。`;
+        }
       }
 
       // 2. 检查依赖关系（所有依赖的任务都必须已完成）
@@ -315,17 +711,103 @@ export class Orchestrator {
         }
       }
 
-      // 3. 添加到可执行任务列表
+      // 🆕 3. 检查子任务是否全部完成（递归回溯的核心逻辑）
+      if (subTask.waitForChildren && subTask.children && subTask.children.length > 0) {
+        const allChildrenCompleted = subTask.children.every(child => {
+          return child.status === "completed";
+        });
+
+        if (!allChildrenCompleted) {
+          console.log(`[Orchestrator] ⏳ Task ${subTask.id} waiting for children to complete`);
+          continue; // 子任务未完成,跳过父任务
+        }
+
+        // 🆕 4. 将子任务输出注入到父任务的 prompt 中（汇总任务）
+        const childOutputs = subTask.children
+          .filter(child => child.output && child.output.length > 0)
+          .map(child => {
+            return `### ${child.summary}\n\n${child.output}`;
+          });
+
+        if (childOutputs.length > 0) {
+          console.log(`[Orchestrator] 📥 Injecting ${childOutputs.length} child outputs into task ${subTask.id}`);
+          
+          // 🆕 修改父任务的 prompt，添加汇总指令
+          subTask.prompt = `${subTask.prompt}
+
+## 子任务输出
+
+以下是所有子任务的输出结果，请将它们汇总整合为一个完整的、连贯的最终产物：
+
+${childOutputs.join("\n\n---\n\n")}
+
+## 汇总要求
+
+1. **整合内容**: 将所有子任务的输出整合为一个完整的文档
+2. **保持连贯**: 确保内容逻辑连贯，过渡自然
+3. **统一风格**: 统一文风、格式和术语
+4. **生成文件**: 将最终产物保存为 txt 或 md 文件
+5. **质量检查**: 确保内容完整、准确、符合要求
+
+请立即执行汇总任务，并生成最终交付文件。`;
+
+          // 🆕 标记父任务为"需要汇总"
+          if (!subTask.metadata) {
+            subTask.metadata = {};
+          }
+          subTask.metadata.isSummaryTask = true;
+        }
+      }
+
+      // 5. 添加到可执行任务列表
       executableTasks.push(subTask);
     }
 
-    // 4. 按优先级排序（high > medium > low）
+    // 6. 按优先级排序（high > medium > low）
     executableTasks.sort((a, b) => {
       const priorityOrder = { high: 3, medium: 2, low: 1 };
       const aPriority = priorityOrder[a.metadata?.priority || "medium"];
       const bPriority = priorityOrder[b.metadata?.priority || "medium"];
       return bPriority - aPriority;
     });
+
+    // 🆕 7. 如果启用批量执行，创建批次并记录到任务树
+    if (enableBatching && executableTasks.length > 0) {
+      const batches = this.taskGrouper.groupTasks(taskTree, executableTasks);
+      
+      if (batches.length > 0) {
+        console.log(`[Orchestrator] 📦 创建了 ${batches.length} 个批次，包含 ${batches.reduce((sum, b) => sum + b.tasks.length, 0)} 个任务`);
+        
+        // 初始化 batches 数组（如果不存在）
+        if (!taskTree.batches) {
+          taskTree.batches = [];
+        }
+        
+        // 将批次添加到任务树
+        for (const batch of batches) {
+          // 检查批次是否已存在
+          const existingBatch = taskTree.batches.find(b => b.id === batch.id);
+          if (!existingBatch) {
+            taskTree.batches.push(batch);
+          }
+          
+          // 更新任务的批次信息
+          for (let i = 0; i < batch.tasks.length; i++) {
+            const task = batch.tasks[i];
+            if (!task.metadata) {
+              task.metadata = {};
+            }
+            task.metadata.batchId = batch.id;
+            task.metadata.batchIndex = i;
+          }
+        }
+        
+        // 保存任务树（异步操作，但不阻塞返回）
+        this.taskTreeManager.save(taskTree).catch(err => {
+          console.error(`[Orchestrator] ❌ 保存任务树失败: ${err}`);
+        });
+      }
+    }
 
     return executableTasks;
   }
@@ -343,6 +825,364 @@ export class Orchestrator {
     await this.taskTreeManager.modifySubTask(taskTree, subTaskId, {
       decomposed: true
     });
+  }
+
+  /**
+   * 生成最终交付产物
+   * 
+   * @param taskTree 任务树
+   * @param subTask 汇总任务
+   * @returns 交付文件路径
+   */
+  async generateFinalDeliverable(
+    taskTree: TaskTree,
+    subTask: SubTask
+  ): Promise<string> {
+    if (!this.fileManager) {
+      throw new Error("FileManager 未初始化");
+    }
+
+    // 1. 确定文件格式（根据内容长度和类型）
+    const format = subTask.output && subTask.output.length > 10000 ? "md" : "txt";
+
+    // 2. 保存最终产物
+    const filepath = await this.fileManager.saveTaskOutput(
+      subTask.id,
+      subTask.output || "",
+      format
+    );
+
+    // 3. 生成交付报告
+    const report = this.outputFormatter.formatRecursiveCompletion(
+      subTask,
+      subTask.children || [],
+      filepath
+    );
+
+    // 4. 保存交付报告
+    await this.fileManager.saveTaskOutput(
+      `${subTask.id}-report`,
+      report,
+      "md"
+    );
+
+    // 5. 记录时间线事件
+    await this.fileManager.recordTimelineEvent(
+      "final_deliverable_generated",
+      subTask.id,
+      `最终交付产物已生成：${filepath}`
+    );
+
+    console.log(`[Orchestrator] 📦 最终交付产物已生成：${filepath}`);
+    return filepath;
+  }
+
+  /**
+   * 验证任务是否产生了文件输出
+   * 
+   * 🆕 用于检查写作任务是否真正创建了文件
+   * 
+   * @param taskTree 任务树
+   * @param subTask 子任务
+   * @returns 是否有文件输出
+   */
+  private async verifyFileOutput(
+    taskTree: TaskTree,
+    subTask: SubTask
+  ): Promise<boolean> {
+    if (!this.fileManager) {
+      console.warn(`[Orchestrator] ⚠️ FileManager 未初始化，跳过文件产出验证`);
+      return true; // 如果 FileManager 未初始化，假设验证通过
+    }
+
+    // 1. 检查任务目录下的 artifacts 目录
+    const { join } = await import("node:path");
+    const { readdir } = await import("node:fs/promises");
+    
+    const artifactsDir = join(
+      this.fileManager.getTaskTreePath(),
+      "tasks",
+      subTask.id,
+      "artifacts"
+    );
+
+    try {
+      const files = await readdir(artifactsDir);
+      
+      // 过滤掉隐藏文件和临时文件
+      const validFiles = files.filter(file => 
+        !file.startsWith(".") && 
+        !file.endsWith(".tmp") &&
+        (file.endsWith(".txt") || 
+         file.endsWith(".md") || 
+         file.endsWith(".doc") || 
+         file.endsWith(".docx") ||
+         file.endsWith(".pdf"))
+      );
+
+      if (validFiles.length > 0) {
+        console.log(`[Orchestrator] ✅ 任务 ${subTask.id} 产生了 ${validFiles.length} 个文件：${validFiles.join(", ")}`);
+        
+        // 🆕 将文件列表记录到任务元数据
+        if (!subTask.metadata) {
+          subTask.metadata = {};
+        }
+        subTask.metadata.producedFiles = validFiles;
+        
+        return true;
+      }
+
+      console.warn(`[Orchestrator] ⚠️ 任务 ${subTask.id} 未产生文件输出`);
+      return false;
+    } catch (err) {
+      // artifacts 目录不存在，说明没有文件产出
+      console.warn(`[Orchestrator] ⚠️ 任务 ${subTask.id} 的 artifacts 目录不存在`);
+      return false;
+    }
+  }
+
+  /**
+   * 发送子任务的文件到聊天频道
+   * 
+   * 🆕 用于在子任务完成后，将产生的文件发送给用户
+   * 
+   * @param taskTree 任务树
+   * @param subTask 子任务
+   */
+  private async sendSubTaskFiles(
+    taskTree: TaskTree,
+    subTask: SubTask
+  ): Promise<void> {
+    if (!subTask.metadata?.producedFiles || subTask.metadata.producedFiles.length === 0) {
+      return;
+    }
+
+    const { join } = await import("node:path");
+    
+    for (const fileName of subTask.metadata.producedFiles) {
+      const filePath = join(
+        this.fileManager!.getTaskTreePath(),
+        "tasks",
+        subTask.id,
+        "artifacts",
+        fileName
+      );
+      
+      try {
+        // 🆕 发送文件到聊天频道
+        await this.sendFileToChannel(filePath, `子任务完成：${subTask.summary}`);
+        console.log(`[Orchestrator] ✅ 已发送文件到聊天频道：${fileName}`);
+      } catch (err) {
+        console.warn(`[Orchestrator] ⚠️ 发送文件失败：${fileName}`, err);
+      }
+    }
+  }
+
+  /**
+   * 发送文件到聊天频道
+   * 
+   * 🆕 用于将文件发送给用户（支持 Telegram、Web 等频道）
+   * 
+   * @param filePath 文件路径
+   * @param caption 文件说明
+   */
+  private async sendFileToChannel(
+    filePath: string,
+    caption: string
+  ): Promise<void> {
+    console.log(`[Orchestrator] 📤 准备发送文件：${filePath}`);
+    console.log(`[Orchestrator] 📝 文件说明：${caption}`);
+    
+    try {
+      // 🆕 从全局上下文获取当前的 FollowupRun
+      const { getCurrentFollowupRunContext } = await import("../tools/enqueue-task-tool.js");
+      const currentFollowupRun = getCurrentFollowupRunContext();
+      
+      if (!currentFollowupRun) {
+        console.warn("[Orchestrator] ⚠️ 无法发送文件：currentFollowupRun 未设置");
+        return;
+      }
+      
+      const { originatingChannel, originatingTo, originatingAccountId, originatingThreadId } = currentFollowupRun;
+      
+      if (!originatingChannel || !originatingTo) {
+        console.warn("[Orchestrator] ⚠️ 无法发送文件：originatingChannel 或 originatingTo 未设置");
+        return;
+      }
+      
+      // 🆕 根据频道类型发送文件
+      if (originatingChannel === "telegram") {
+        await this.sendFileToTelegram(
+          originatingTo,
+          filePath,
+          caption,
+          originatingAccountId,
+          originatingThreadId as number | undefined,
+        );
+      } else {
+        console.warn(`[Orchestrator] ⚠️ 不支持的频道类型: ${originatingChannel}`);
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] ⚠️ 发送文件失败`, err);
+      // 如果发送失败，记录错误，让用户手动下载
+    }
+  }
+
+  /**
+   * 发送文件到 Telegram
+   * 
+   * 🆕 使用 Telegram Bot API 发送本地文件
+   * 
+   * @param chatId Telegram 聊天 ID
+   * @param filePath 文件路径
+   * @param caption 文件说明
+   * @param accountId 账号 ID（可选）
+   * @param threadId 话题 ID（可选）
+   */
+  private async sendFileToTelegram(
+    chatId: string,
+    filePath: string,
+    caption: string,
+    accountId?: string,
+    threadId?: number,
+  ): Promise<void> {
+    try {
+      // 🆕 读取文件内容
+      const { readFile } = await import("node:fs/promises");
+      const { basename } = await import("node:path");
+      
+      const fileBuffer = await readFile(filePath);
+      const fileName = basename(filePath);
+      
+      // 🆕 创建 InputFile
+      const { InputFile } = await import("grammy");
+      const file = new InputFile(fileBuffer, fileName);
+      
+      // 🆕 获取 Telegram Bot 实例
+      const { Bot } = await import("grammy");
+      const { loadConfig } = await import("../../config/config.js");
+      const { resolveTelegramAccount } = await import("../../telegram/accounts.js");
+      
+      const cfg = loadConfig();
+      const account = resolveTelegramAccount({ cfg, accountId });
+      const token = account.token;
+      
+      if (!token) {
+        throw new Error("Telegram token 未配置");
+      }
+      
+      const bot = new Bot(token);
+      
+      // 🆕 发送文件
+      const params: Record<string, unknown> = {
+        caption,
+        parse_mode: "HTML" as const,
+      };
+      
+      if (threadId != null) {
+        params.message_thread_id = threadId;
+      }
+      
+      await bot.api.sendDocument(chatId, file, params);
+      
+      console.log(`[Orchestrator] ✅ 文件已发送到 Telegram: ${fileName}`);
+    } catch (err) {
+      console.error("[Orchestrator] ❌ 发送文件到 Telegram 失败:", err);
+      throw err;
+    }
+  }
+
+  /**
+   * 获取任务树中的所有批次
+   * 
+   * @param taskTree 任务树
+   * @returns 批次列表
+   */
+  getBatches(taskTree: TaskTree): TaskBatch[] {
+    return taskTree.batches || [];
+  }
+
+  /**
+   * 获取待执行的批次
+   * 
+   * @param taskTree 任务树
+   * @returns 待执行的批次列表
+   */
+  getPendingBatches(taskTree: TaskTree): TaskBatch[] {
+    if (!taskTree.batches) {
+      return [];
+    }
+
+    return taskTree.batches.filter(batch => 
+      batch.status === "pending" || batch.status === undefined
+    );
+  }
+
+  /**
+   * 获取批次统计信息
+   * 
+   * @param taskTree 任务树
+   * @returns 批次统计信息
+   */
+  getBatchStatistics(taskTree: TaskTree): {
+    total: number;
+    pending: number;
+    active: number;
+    completed: number;
+    failed: number;
+  } {
+    const batches = taskTree.batches || [];
+    
+    return {
+      total: batches.length,
+      pending: batches.filter(b => b.status === "pending" || b.status === undefined).length,
+      active: batches.filter(b => b.status === "active").length,
+      completed: batches.filter(b => b.status === "completed").length,
+      failed: batches.filter(b => b.status === "failed").length,
+    };
+  }
+
+  /**
+   * 检查任务树是否全部完成，并触发整体质量评估
+   * 
+   * @param taskTree 任务树
+   * @returns 是否全部完成且通过质量评估
+   */
+  async checkAndReviewCompletion(taskTree: TaskTree): Promise<boolean> {
+    // 1. 检查是否所有任务都已完成
+    const allCompleted = taskTree.subTasks.every(t => t.status === "completed");
+    
+    if (!allCompleted) {
+      return false;
+    }
+
+    // 2. 触发整体质量评估
+    if (taskTree.qualityReviewEnabled !== false) {
+      console.log(`[Orchestrator] 🔍 开始整体质量评估`);
+      
+      const review = await this.qualityReviewer.reviewOverallCompletion(taskTree);
+
+      // 根据评估结果决定后续操作
+      switch (review.decision) {
+        case "continue":
+          console.log(`[Orchestrator] ✅ 整体质量评估通过`);
+          return true;
+
+        case "adjust":
+          console.log(`[Orchestrator] ⚠️ 整体质量需要调整`);
+          if (review.modifications && review.modifications.length > 0) {
+            await this.adjustTaskTree(taskTree, review.modifications, false);
+          }
+          return false;
+
+        case "restart":
+        case "overthrow":
+          console.log(`[Orchestrator] ❌ 整体质量不满意`);
+          return false;
+      }
+    }
+
+    return true;
   }
 
   // ========================================

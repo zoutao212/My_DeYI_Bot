@@ -14,6 +14,8 @@ import {
   renderStreamingGroup,
 } from "../chat/grouped-render";
 import { renderMarkdownSidebar } from "./markdown-sidebar";
+import { renderChatFileList } from "./chat-file-list";
+import { renderChatFilePreview } from "./chat-file-preview";
 import "../components/resizable-divider";
 
 export type CompactionIndicatorStatus = {
@@ -60,6 +62,17 @@ export type ChatProps = {
     payload?: unknown;
   }>;
   onClearRunEvents?: () => void;
+  // File list & preview (v20260206_1)
+  fileList?: Array<{
+    fileName: string;
+    size: number;
+    createdAt: string;
+    modifiedAt: string;
+  }>;
+  filePreview?: {
+    fileName: string;
+    content: string;
+  } | null;
   // Event handlers
   onRefresh: () => void;
   onToggleFocusMode: () => void;
@@ -73,6 +86,10 @@ export type ChatProps = {
   onCloseSidebar?: () => void;
   onSplitRatioChange?: (ratio: number) => void;
   onChatScroll?: (event: Event) => void;
+  // File handlers (v20260206_1)
+  onFilePreview?: (fileName: string) => void;
+  onFileDownload?: (fileName: string) => void;
+  onFilePreviewClose?: () => void;
 };
 
 const COMPACTION_TOAST_DURATION_MS = 5000;
@@ -288,6 +305,23 @@ export function renderChat(props: ChatProps) {
               </div>
             </div>
           `
+        : nothing}
+
+      ${props.fileList && props.fileList.length > 0 && props.onFilePreview && props.onFileDownload
+        ? renderChatFileList({
+            files: props.fileList,
+            onPreview: props.onFilePreview,
+            onDownload: props.onFileDownload,
+          })
+        : nothing}
+
+      ${props.filePreview && props.onFilePreviewClose && props.onFileDownload
+        ? renderChatFilePreview({
+            fileName: props.filePreview.fileName,
+            content: props.filePreview.content,
+            onClose: props.onFilePreviewClose,
+            onDownload: props.onFileDownload,
+          })
         : nothing}
 
       <div class="chat-compose">

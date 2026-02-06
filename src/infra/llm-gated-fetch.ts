@@ -190,6 +190,22 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
         return await original(input, init);
       }
       
+      // 检查是否是 LLM API 请求
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+      const isLlmRequest = 
+        url.includes("openai.com") ||
+        url.includes("anthropic.com") ||
+        url.includes("generativelanguage.googleapis.com") ||
+        url.includes("vectorengine") ||
+        url.includes("gemini") ||
+        url.includes("api.anthropic.com") ||
+        url.includes("api.openai.com");
+      
+      // 如果不是 LLM 请求，直接调用原始 fetch（不拦截 Telegram、WhatsApp 等 API 请求）
+      if (!isLlmRequest) {
+        return await original(input, init);
+      }
+      
       // 添加请求间隔控制，避免并发请求
       const now = Date.now();
       const timeSinceLastRequest = now - lastRequestTime;

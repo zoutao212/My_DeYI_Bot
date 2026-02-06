@@ -6,6 +6,7 @@
 
 import type { TaskTree, SubTask } from "./types.js";
 import { TaskTreeManager } from "./task-tree-manager.js";
+import { getPrompts } from "./prompts-loader.js";
 
 /**
  * 恢复管理器
@@ -38,6 +39,7 @@ export class RecoveryManager {
    * 恢复未完成的任务
    */
   async recoverUnfinishedTasks(sessionId: string): Promise<TaskTree> {
+    const prompts = getPrompts();
     const taskTree = await this.taskTreeManager.load(sessionId);
     if (!taskTree) {
       throw new Error(`Task tree not found: ${sessionId}`);
@@ -64,16 +66,16 @@ export class RecoveryManager {
           taskTree,
           latestCheckpointId,
         );
-        console.log(`[RecoveryManager] ✅ Restored from checkpoint: ${latestCheckpointId}`);
+        console.log(`[RecoveryManager] ${prompts.recoveryManager.logs.restoredFromCheckpoint}: ${latestCheckpointId}`);
         return restoredTaskTree;
       } catch (err) {
-        console.warn(`[RecoveryManager] ⚠️ Failed to restore from checkpoint: ${err}`);
+        console.warn(`[RecoveryManager] ${prompts.recoveryManager.logs.failedToRestore}: ${err}`);
         // 继续使用当前任务树
       }
     }
 
     console.log(
-      `[RecoveryManager] ✅ Recovered task tree with ${interruptedTasks.length} interrupted tasks`,
+      `[RecoveryManager] ${prompts.recoveryManager.logs.recoveredTaskTree.replace('{count}', String(interruptedTasks.length))}`,
     );
     return taskTree;
   }
@@ -94,8 +96,9 @@ export class RecoveryManager {
     taskTree: TaskTree,
     interruptedTasks: SubTask[],
   ): Promise<void> {
+    const prompts = getPrompts();
     console.log(
-      `[RecoveryManager] 🔄 Re-executing ${interruptedTasks.length} interrupted tasks`,
+      `[RecoveryManager] ${prompts.recoveryManager.logs.reexecutingTasks.replace('{count}', String(interruptedTasks.length))}`,
     );
 
     for (const task of interruptedTasks) {
@@ -104,7 +107,7 @@ export class RecoveryManager {
         task.status = "pending";
       }
 
-      console.log(`[RecoveryManager] 🔄 Re-executing task: ${task.id} (${task.summary})`);
+      console.log(`[RecoveryManager] ${prompts.recoveryManager.logs.reexecutingTask.replace('{id}', task.id).replace('{summary}', task.summary)}`);
     }
 
     // 保存任务树

@@ -33,7 +33,35 @@ export type SystemPromptL10n = {
   taskDecompositionWhenLine2: string;
   taskDecompositionWhenLine3: string;
   taskDecompositionWhenLine4: string;
-  taskDecompositionWhenLine5: string; // 新增
+  taskDecompositionWhenLine5: string;
+  taskDecompositionBatchTitle: string;
+  taskDecompositionBatchIntro: string;
+  taskDecompositionBatchLine1: string;
+  taskDecompositionBatchLine2: string;
+  taskDecompositionBatchLine3: string;
+  taskDecompositionBatchLine4: string;
+  taskDecompositionBatchWhenTitle: string;
+  taskDecompositionBatchWhenLine1: string;
+  taskDecompositionBatchWhenLine2: string;
+  taskDecompositionBatchWhenLine3: string;
+  taskDecompositionBatchHowTitle: string;
+  taskDecompositionBatchHowLine1: string;
+  taskDecompositionBatchHowLine2: string;
+  taskDecompositionBatchHowLine3: string;
+  taskDecompositionBatchHowLine4: string;
+  taskDecompositionBatchExampleTitle: string;
+  taskDecompositionBatchExampleLine1: string;
+  taskDecompositionBatchExampleLine2: string;
+  taskDecompositionBatchExampleLine3: string;
+  taskDecompositionBatchExampleLine4: string;
+  taskDecompositionBatchExampleLine5: string;
+  taskDecompositionBatchExampleLine6: string;
+  taskDecompositionBatchExampleLine7: string;
+  taskDecompositionBatchExampleLine8: string;
+  taskDecompositionBatchExampleLine9: string;
+  taskDecompositionBatchExampleLine10: string;
+  taskDecompositionBatchExampleLine11: string;
+  taskDecompositionBatchExampleLine12: string;
   taskDecompositionHowTitle: string;
   taskDecompositionHowLine1: string;
   taskDecompositionHowLine2: string;
@@ -53,10 +81,10 @@ export type SystemPromptL10n = {
   taskDecompositionRulesLine2: string;
   taskDecompositionRulesLine3: string;
   taskDecompositionCriticalWarning: string;
-  taskDecompositionCriticalWarningLine1: string; // 新增
-  taskDecompositionCriticalWarningLine2: string; // 新增
-  taskDecompositionCriticalWarningLine3: string; // 新增
-  taskDecompositionCriticalWarningLine4: string; // 新增
+  taskDecompositionCriticalWarningLine1: string;
+  taskDecompositionCriticalWarningLine2: string;
+  taskDecompositionCriticalWarningLine3: string;
+  taskDecompositionCriticalWarningLine4: string;
   taskDecompositionStorageTitle: string;
   taskDecompositionStorageLine1: string;
   taskDecompositionStorageLine2: string;
@@ -184,6 +212,7 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
     nodes: "Control paired physical devices like phones/tablets (status/describe/pairing/notify/camera/screen/location/run)",
     cron: "Manage cron jobs and wake events",
     enqueue_task: "Enqueue a task to be executed later (only use when user directly requests; do NOT call when executing queue tasks)",
+    batch_enqueue_tasks: "**Batch create tasks** (intelligent grouping and batch execution, significantly reducing costs and improving efficiency). System automatically groups similar tasks, completing multiple tasks in one LLM request, saving 40-60% tokens and reducing 50-75% requests. Use cases: 1️⃣ Large content generation (> 5000 words), 2️⃣ Large data processing (> 100 files), 3️⃣ Multi-step complex tasks (> 3 steps). Parameters: tasks (task list, each task includes prompt, summary, metadata), batchMode (batch mode: auto/force/disable, default auto)",
     show_task_board: "Display the task board for the current session, including all subtask statuses and progress",
     message: "Send messages and channel actions",
     gateway: "Restart, apply config, or run updates on the running Clawdbot process",
@@ -250,6 +279,34 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
   taskDecompositionWhenLine3: "- ✅ Large data processing (> 100 files or > 500k words) → Group by file/chapter/topic",
   taskDecompositionWhenLine4: "- ✅ Multi-step complex tasks (> 3 clear steps) → One subtask per step",
   taskDecompositionWhenLine5: "- ✅ Parallel processing scenarios → Create a subtask for each independent unit",
+  taskDecompositionBatchTitle: "### Batch Task Execution Optimization",
+  taskDecompositionBatchIntro: "**System supports batch task execution**, which can significantly reduce costs and improve efficiency:",
+  taskDecompositionBatchLine1: "- 💰 **Cost savings**: Save 40-60% tokens (system prompt sent only once)",
+  taskDecompositionBatchLine2: "- ⚡ **Efficiency boost**: Reduce 50-75% requests (multiple tasks merged into one request)",
+  taskDecompositionBatchLine3: "- 🤖 **Intelligent grouping**: System automatically groups tasks by characteristics (similarity, size, dependencies)",
+  taskDecompositionBatchLine4: "- 🔄 **Auto fallback**: If batch execution fails, automatically falls back to single-task execution",
+  taskDecompositionBatchWhenTitle: "**When to use batch execution?**",
+  taskDecompositionBatchWhenLine1: "- ✅ Many similar tasks (e.g., generate 20 chapters)",
+  taskDecompositionBatchWhenLine2: "- ✅ Small tasks (each task output < 2000 tokens)",
+  taskDecompositionBatchWhenLine3: "- ✅ Tasks without dependencies (can be executed in parallel)",
+  taskDecompositionBatchHowTitle: "**How to use batch execution?**",
+  taskDecompositionBatchHowLine1: "1. Use `batch_enqueue_tasks` tool to create multiple tasks",
+  taskDecompositionBatchHowLine2: "2. System automatically groups (3-5 tasks per group)",
+  taskDecompositionBatchHowLine3: "3. System automatically executes batches (one LLM request per group)",
+  taskDecompositionBatchHowLine4: "4. System automatically splits output and saves to each task",
+  taskDecompositionBatchExampleTitle: "**Example: Generate 20 chapters**",
+  taskDecompositionBatchExampleLine1: "```typescript",
+  taskDecompositionBatchExampleLine2: "// Use batch_enqueue_tasks to create 20 tasks at once",
+  taskDecompositionBatchExampleLine3: "batch_enqueue_tasks({",
+  taskDecompositionBatchExampleLine4: "  tasks: [",
+  taskDecompositionBatchExampleLine5: "    { prompt: \"Generate chapter 1...\", summary: \"Chapter 1\" },",
+  taskDecompositionBatchExampleLine6: "    { prompt: \"Generate chapter 2...\", summary: \"Chapter 2\" },",
+  taskDecompositionBatchExampleLine7: "    // ... 20 tasks total",
+  taskDecompositionBatchExampleLine8: "  ],",
+  taskDecompositionBatchExampleLine9: "  batchMode: \"auto\" // Auto intelligent grouping",
+  taskDecompositionBatchExampleLine10: "})",
+  taskDecompositionBatchExampleLine11: "```",
+  taskDecompositionBatchExampleLine12: "System will automatically create 5-7 batches, 3-4 tasks per batch, requiring only 5-7 LLM requests (instead of 20).",
   taskDecompositionHowTitle: "### How to use task decomposition?",
   taskDecompositionHowLine1: "**Step 1: Analyze task** - Task scale (content volume, data volume), complexity (step count, dependencies), decomposition strategy",
   taskDecompositionHowLine2: "**Step 2: Create task tree** - Use `enqueue_task` tool to create subtasks",

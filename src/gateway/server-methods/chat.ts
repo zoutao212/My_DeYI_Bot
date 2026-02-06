@@ -1873,4 +1873,139 @@ export const chatHandlers: GatewayRequestHandlers = {
 
     respond(true, { ok: true, messageId });
   },
+  
+  /**
+   * 获取任务文件列表
+   * @since v20260206_1
+   */
+  "chat.file.list": async ({ params, respond, context }) => {
+    const { sessionId } = params as { sessionId?: string };
+    
+    if (!sessionId) {
+      respond(false, undefined, errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        "sessionId is required"
+      ));
+      return;
+    }
+    
+    // 构建任务目录路径
+    const taskDir = path.join(
+      os.homedir(),
+      ".clawdbot",
+      "tasks",
+      sessionId,
+      "deliverables"
+    );
+    
+    // 检查目录是否存在
+    if (!fs.existsSync(taskDir)) {
+      respond(true, { files: [] });
+      return;
+    }
+    
+    try {
+      // 读取目录中的所有 .txt 文件
+      const files = fs.readdirSync(taskDir)
+        .filter(f => f.endsWith(".txt"))
+        .map(fileName => {
+          const filePath = path.join(taskDir, fileName);
+          const stats = fs.statSync(filePath);
+          return {
+            fileName,
+            size: stats.size,
+            createdAt: stats.birthtime.toISOString(),
+            modifiedAt: stats.mtime.toISOString(),
+          };
+        })
+        // 按创建时间倒序排列
+        .sort((a, b) => 
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        );
+      
+      respond(true, { files });
+    } catch (err) {
+      respond(false, undefined, errorShape(
+        ErrorCodes.INTERNAL_ERROR,
+        `Failed to list files: ${err instanceof Error ? err.message : String(err)}`
+      ));
+    }
+  },
+  
+  /**
+   * 下载任务文件
+   * @since v20260206_1
+   */
+  "chat.file.download": async ({ params, respond, context }) => {
+    const { sessionId, fileName } = params as {
+      sessionId?: string;
+      fileName?: string;
+    };
+    
+    // 验证参数
+    if (!sessionId || !fileName) {
+      respond(false, undefined, errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        "sessionId and fileName are required"
+      ));
+      return;
+    }
+    
+    // 安全检查：防止路径遍历攻击
+    const normalizedFileName = path.normalize(fileName);
+    if (normalizedFileName.includes("..") || path.isAbsolute(normalizedFileName)) {
+      respond(false, undefined, errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        "Invalid file name"
+      ));
+      return;
+    }
+    
+    // 构建文件路径
+    const taskDir = path.join(
+      os.homedir(),
+      ".clawdbot",
+      "tasks",
+      sessionId,
+      "deliverables"
+    );
+    
+    const filePath = path.join(taskDir, normalizedFileName);
+    
+    // 检查文件是否存在
+    if (!fs.existsSync(filePath)) {
+      respond(false, undefined, errorShape(
+        ErrorCodes.NOT_FOUND,
+        `File not found: ${fileName}`
+      ));
+      return;
+    }
+    
+    // 检查文件大小（限制 10 MB）
+    const MAX_FILE_SIZE = 10 * 1024 * 1024;
+    try {
+      const stats = fs.statSync(filePath);
+      if (stats.size > MAX_FILE_SIZE) {
+        respond(false, undefined, errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `File too large: ${stats.size} bytes (max: ${MAX_FILE_SIZE} bytes)`
+        ));
+        return;
+      }
+      
+      // 读取文件内容
+      const content = fs.readFileSync(filePath, "utf-8");
+      respond(true, {
+        fileName,
+        content,
+        mimeType: "text/plain",
+        size: stats.size,
+      });
+    } catch (err) {
+      respond(false, undefined, errorShape(
+        ErrorCodes.INTERNAL_ERROR,
+        `Failed to read file: ${err instanceof Error ? err.message : String(err)}`
+      ));
+    }
+  },
 };

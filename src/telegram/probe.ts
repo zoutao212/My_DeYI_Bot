@@ -21,14 +21,44 @@ async function fetchWithTimeout(
   url: string,
   timeoutMs: number,
   fetcher: typeof fetch,
+  retries = 2,
 ): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetcher(url, { signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
+  let lastError: Error | null = null;
+  
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    
+    try {
+      const response = await fetcher(url, { signal: controller.signal });
+      clearTimeout(timer);
+      return response;
+    } catch (err) {
+      clearTimeout(timer);
+      lastError = err instanceof Error ? err : new Error(String(err));
+      
+      // 如果是网络错误且还有重试次数，等待后重试
+      if (attempt < retries) {
+        const isNetworkError = 
+          lastError.message.includes("ECONNRESET") ||
+          lastError.message.includes("ETIMEDOUT") ||
+          lastError.message.includes("ENOTFOUND") ||
+          lastError.message.includes("network socket disconnected");
+        
+        if (isNetworkError) {
+          // 指数退避：第一次重试等待 1 秒，第二次等待 2 秒
+          const backoffMs = 1000 * (attempt + 1);
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          continue;
+        }
+      }
+      
+      // 非网络错误或已用完重试次数，抛出错误
+      throw lastError;
+    }
   }
+  
+  throw lastError ?? new Error("Fetch failed after retries");
 }
 
 export async function probeTelegram(
@@ -48,7 +78,9 @@ export async function probeTelegram(
   };
 
   try {
-    const meRes = await fetchWithTimeout(`${base}/getMe`, timeoutMs, fetcher);
+    // 增加超时时间到 15 秒，并启用重试机制
+    const effectiveTimeout = Math.max(timeoutMs, 15000);
+    const meRes = await fetchWithTimeout(`${base}/getMe`, effectiveTimeout, fetcher);
     const meJson = (await meRes.json()) as {
       ok?: boolean;
       description?: string;
@@ -83,7 +115,7 @@ export async function probeTelegram(
 
     // Try to fetch webhook info, but don't fail health if it errors.
     try {
-      const webhookRes = await fetchWithTimeout(`${base}/getWebhookInfo`, timeoutMs, fetcher);
+      const webhookRes = await fetchWithTimeout(`${base}/getWebhookInfo`, effectiveTimeout, fetcher);
       const webhookJson = (await webhookRes.json()) as {
         ok?: boolean;
         result?: { url?: string; has_custom_certificate?: boolean };
@@ -104,10 +136,26 @@ export async function probeTelegram(
     result.elapsedMs = Date.now() - started;
     return result;
   } catch (err) {
+    // 友好的错误消息
+    let errorMessage = err instanceof Error ? err.message : String(err);
+    
+    // 简化网络错误消息
+    if (errorMessage.includes("ECONNRESET")) {
+      errorMessage = "Network connection reset (网络连接被重置)";
+    } else if (errorMessage.includes("ETIMEDOUT")) {
+      errorMessage = "Network timeout (网络超时)";
+    } else if (errorMessage.includes("ENOTFOUND")) {
+      errorMessage = "DNS resolution failed (DNS 解析失败)";
+    } else if (errorMessage.includes("network socket disconnected")) {
+      errorMessage = "Network socket disconnected (网络套接字断开)";
+    } else if (errorMessage.includes("aborted")) {
+      errorMessage = "Request timeout (请求超时)";
+    }
+    
     return {
       ...result,
       status: err instanceof Response ? err.status : result.status,
-      error: err instanceof Error ? err.message : String(err),
+      error: errorMessage,
       elapsedMs: Date.now() - started,
     };
   }

@@ -82,6 +82,18 @@ export type FollowupRun = {
    * - false/undefined: 用户消息（允许调用 enqueue_task）
    */
   isQueueTask?: boolean;
+  
+  /**
+   * 标记这是否是根任务（允许分解子任务）
+   * 
+   * - true: 根任务（允许调用 enqueue_task 分解子任务）
+   * - false/undefined: 子任务（不允许调用 enqueue_task）
+   * 
+   * 🆕 用于区分"根任务"和"子任务"：
+   * - 根任务：用户直接发送的消息，或第一次调用 enqueue_task 创建的任务
+   * - 子任务：根任务分解出的子任务
+   */
+  isRootTask?: boolean;
 };
 
 export type ResolveQueueSettingsParams = {

@@ -70,6 +70,27 @@ export class TaskTreeManager {
       checkpoints: [],
     };
 
+    // 🆕 将根任务转换为特殊的 SubTask（用于汇总）
+    const rootSubTask: SubTask = {
+      id: `root-${sessionId}`,
+      prompt: rootTask,
+      summary: `【总任务】${rootTask.substring(0, 50)}...`,
+      status: "pending",
+      retryCount: 0,
+      createdAt: Date.now(),
+      parentId: null,
+      children: [],
+      waitForChildren: true,  // ✅ 等待所有子任务完成
+      depth: 0,
+      metadata: {
+        isRootTask: true,  // ✅ 标记为根任务
+        isSummaryTask: true,  // ✅ 标记为汇总任务
+      },
+    };
+
+    // 🆕 将根任务添加到 subTasks 数组的开头
+    taskTree.subTasks.unshift(rootSubTask);
+
     // 创建目录
     const dir = this.getTaskTreeDir(sessionId);
     await fs.mkdir(dir, { recursive: true });

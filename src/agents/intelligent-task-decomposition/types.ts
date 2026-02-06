@@ -59,6 +59,11 @@ export interface TaskTree {
   
   /** 元数据（统计信息） */
   metadata?: TaskTreeMetadata;
+  
+  // 🆕 批量执行相关字段
+  
+  /** 任务批次列表 */
+  batches?: TaskBatch[];
 }
 
 /**
@@ -113,6 +118,9 @@ export interface SubTask {
   
   /** 是否已分解（标记任务是否已经被分解成子任务） */
   decomposed?: boolean;
+  
+  /** 是否等待子任务完成（用于递归回溯，父任务等待所有子任务完成后才执行） */
+  waitForChildren?: boolean;
   
   /** 是否启用质量评估（默认继承任务树设置） */
   qualityReviewEnabled?: boolean;
@@ -260,6 +268,39 @@ export interface SubTaskMetadata {
   
   /** 优先级（低/中/高） */
   priority?: "low" | "medium" | "high";
+  
+  // 🆕 批量执行相关字段
+  
+  /** 预估输出 tokens */
+  estimatedTokens?: number;
+  
+  /** 是否可以批量执行（默认 true） */
+  canBatch?: boolean;
+  
+  /** 所属批次 ID（如果已分配到批次） */
+  batchId?: string;
+  
+  /** 在批次中的索引（用于输出拆分） */
+  batchIndex?: number;
+  
+  // 🆕 汇总任务标记
+  
+  /** 是否是汇总任务（等待子任务完成后执行汇总） */
+  isSummaryTask?: boolean;
+  
+  /** 是否是根任务（整个任务树的根节点） */
+  isRootTask?: boolean;
+  
+  // 🆕 文件产出相关字段
+  
+  /** 是否要求产生文件输出（写作任务） */
+  requiresFileOutput?: boolean;
+  
+  /** 期望的文件类型列表 */
+  expectedFileTypes?: string[];
+  
+  /** 实际产生的文件列表 */
+  producedFiles?: string[];
 }
 
 /**
@@ -420,4 +461,96 @@ export interface ValidationResult {
   
   /** 警告列表（不影响验证通过，但需要注意的问题） */
   warnings: string[];
+}
+
+// ========================================
+// 🆕 批量任务执行相关类型
+// ========================================
+
+/**
+ * 任务批次
+ * 
+ * 表示一组可以批量执行的任务
+ */
+export interface TaskBatch {
+  /** 批次 ID */
+  id: string;
+  
+  /** 批次中的任务列表 */
+  tasks: SubTask[];
+  
+  /** 预估总输出 tokens */
+  estimatedTokens: number;
+  
+  /** 批次状态 */
+  status?: "pending" | "active" | "completed" | "failed";
+  
+  /** 批次创建时间 */
+  createdAt: number;
+  
+  /** 批次完成时间 */
+  completedAt?: number;
+  
+  /** 批次输出（合并后的输出） */
+  output?: string;
+  
+  /** 批次错误信息 */
+  error?: string;
+}
+
+/**
+ * 分组选项
+ */
+export interface GroupingOptions {
+  /** 单个批次最多任务数（默认 5） */
+  maxTasksPerBatch?: number;
+  
+  /** 单个批次最大 tokens（默认 6000） */
+  maxTokensPerBatch?: number;
+  
+  /** 是否启用相似度分组（默认 true） */
+  enableSimilarityGrouping?: boolean;
+  
+  /** 是否启用大小分组（默认 true） */
+  enableSizeGrouping?: boolean;
+  
+  /** 相似度阈值（0-1，默认 0.6） */
+  similarityThreshold?: number;
+}
+
+/**
+ * 批量执行选项
+ */
+export interface BatchExecutionOptions {
+  /** 输出分隔符（默认 "---TASK-SEPARATOR---"） */
+  separator?: string;
+  
+  /** 是否启用后备拆分（默认 true） */
+  enableFallbackSplit?: boolean;
+  
+  /** 超时时间（毫秒，默认 120000 = 2 分钟） */
+  timeout?: number;
+}
+
+/**
+ * 批量执行结果
+ */
+export interface BatchExecutionResult {
+  /** 批次 ID */
+  batchId: string;
+  
+  /** 是否成功 */
+  success: boolean;
+  
+  /** 任务输出映射（任务 ID -> 输出） */
+  outputs: Map<string, string>;
+  
+  /** 错误信息（如果失败） */
+  error?: string;
+  
+  /** 执行时长（毫秒） */
+  duration: number;
+  
+  /** 实际消耗的 tokens */
+  actualTokens?: number;
 }

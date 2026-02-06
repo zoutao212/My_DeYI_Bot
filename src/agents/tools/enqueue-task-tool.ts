@@ -16,6 +16,32 @@ const EnqueueTaskSchema = Type.Object({
       description: "任务的简短描述（可选），用于日志和调试",
     }),
   ),
+  parentId: Type.Optional(
+    Type.String({
+      description: "父任务 ID（可选），用于递归分解。如果指定，当前任务将成为父任务的子任务",
+    }),
+  ),
+  waitForChildren: Type.Optional(
+    Type.Boolean({
+      description: "是否等待子任务完成（可选），默认 false。如果为 true，当前任务会等待所有子任务完成后才执行",
+    }),
+  ),
+  isNewRootTask: Type.Optional(
+    Type.Boolean({
+      description: `是否创建新的根任务树（可选），默认 false。
+
+**判断标准**：
+- true：用户提出了全新的、与当前任务树完全无关的任务
+- false：当前任务是现有任务树的分解或细化
+
+**示例**：
+- "写一篇关于东京的游记" → isNewRootTask=true（全新任务）
+- "将第一章分为三个小节" → isNewRootTask=false（当前任务的分解）
+- "现在写一个完全不同的故事" → isNewRootTask=true（全新任务）
+
+**重要**：如果设置为 true，parentId 必须为空`,
+    }),
+  ),
 });
 
 type EnqueueTaskOptions = {
@@ -104,15 +130,35 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
 
 **核心能力**：
 - 递归分解：任务可以分解成子任务，子任务可以继续分解（最多 3 层）
+- 新任务识别：自动区分"新任务"和"子任务"，避免混淆
 - 质量评估：AI 自主评估每个阶段的质量（初始分解、子任务完成、整体完成）
 - 动态调整：根据质量评估结果动态调整任务树（continue/adjust/restart/overthrow）
 - 失败学习：从失败中学习，避免重复错误
 
-**使用场景**（必须分解）：
-1. 大量内容生成（> 5000 字）→ 每 2000-3000 字一个子任务
-2. 大量数据处理（> 100 个文件或 > 50 万字）→ 按文件/章节/主题分组
-3. 多步骤复杂任务（> 3 个步骤）→ 每个步骤一个子任务
-4. 并行处理场景 → 为每个独立单元创建子任务
+**使用场景 1：创建新任务树**（isNewRootTask=true）
+- 用户提出了全新的、与当前任务树完全无关的任务
+- 示例：
+  - 当前任务："写一篇科幻小说"
+  - 用户新请求："现在写一篇关于东京的游记"
+  - 判断：完全不同的主题 → isNewRootTask=true
+
+**使用场景 2：分解现有任务**（isNewRootTask=false，默认）
+- 当前任务需要分解成多个子任务
+- 示例：
+  - 当前任务："写一篇 10000 字的科幻小说"
+  - 分解：5 个子任务，每个 2000 字
+  - 判断：是当前任务的分解 → isNewRootTask=false
+
+**判断标准**：
+✅ 新任务树（isNewRootTask=true）：
+- 用户明确提出了新的、不同的任务
+- 新任务与当前任务树的主题完全无关
+- 新任务不是当前任务的细化或分解
+
+❌ 子任务（isNewRootTask=false）：
+- 当前任务需要分解成多个步骤
+- 当前任务需要生成多段内容
+- 当前任务需要处理多个文件/章节
 
 **重要规则**：
 - ✅ 用户直接请求时：可以调用 enqueue_task 创建多个任务
@@ -122,10 +168,18 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
 **参数说明**：
 - prompt：任务的详细提示词，必须清晰、具体、可执行、有标准（包含上下文、要求、质量标准）
 - summary：任务的简短描述，用于任务看板显示
+- isNewRootTask：是否创建新任务树（true=新任务，false=子任务）
+- parentId：父任务 ID（仅在 isNewRootTask=false 时使用）
+- waitForChildren：是否等待子任务完成（用于汇总任务）
 
-**示例**：
+**示例 1：创建新任务树**
+用户：现在写一篇关于东京的游记
+→ 调用 enqueue_task({ prompt: "...", summary: "东京游记", isNewRootTask: true })
+→ 系统创建新的任务树
+
+**示例 2：分解现有任务**
 用户：请生成 10000 字的科幻小说
-→ 调用 enqueue_task 5 次，每次 2000 字，每个 prompt 包含详细要求
+→ 调用 enqueue_task 5 次，每次 2000 字，isNewRootTask=false
 → 系统自动执行，自动评估质量，自动调整
 
 **任务树存储**：
@@ -136,6 +190,9 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
       const params = args as Record<string, unknown>;
       const prompt = readStringParam(params, "prompt", { required: true });
       const summary = readStringParam(params, "summary");
+      const parentId = readStringParam(params, "parentId");
+      const waitForChildren = params.waitForChildren === true;
+      const isNewRootTask = params.isNewRootTask === true;
 
       if (!agentSessionKey) {
         return jsonResult({
@@ -154,13 +211,15 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
         });
       }
       
-      // 🔧 检测循环：如果当前正在执行队列任务，拒绝加入新任务
+      // 🔧 检测循环：如果当前正在执行队列任务（非根任务），拒绝加入新任务
       const isQueueTask = currentFollowupRun.isQueueTask ?? false;
-      if (isQueueTask) {
-        console.warn("[enqueue_task] ⚠️ Cannot enqueue task while executing a queue task");
+      const isRootTask = currentFollowupRun.isRootTask ?? false;
+      
+      if (isQueueTask && !isRootTask) {
+        console.warn("[enqueue_task] ⚠️ Cannot enqueue task while executing a non-root queue task");
         return jsonResult({
           success: false,
-          error: `❌ 不能在执行队列任务时加入新任务。
+          error: `❌ 不能在执行子任务时加入新任务。
 
 ✅ 正确做法：
 1. 直接生成当前任务要求的内容
@@ -175,23 +234,46 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
       }
 
       try {
+        // 🔧 验证参数：isNewRootTask=true 时，parentId 必须为空
+        if (isNewRootTask && parentId) {
+          return jsonResult({
+            success: false,
+            error: "❌ 参数错误：isNewRootTask=true 时，parentId 必须为空（新根任务不能有父任务）",
+          });
+        }
+
         // 🔧 使用 Orchestrator 管理任务树
         const sessionId = currentFollowupRun.run.sessionId;
         
+        // 🆕 如果是新根任务，生成新的 sessionId
+        const targetSessionId = isNewRootTask 
+          ? `${sessionId}-${Date.now()}` // 生成新的 sessionId
+          : sessionId;
+        
         // 加载或初始化任务树
-        let taskTree = await globalOrchestrator.loadTaskTree(sessionId);
+        let taskTree = await globalOrchestrator.loadTaskTree(targetSessionId);
         if (!taskTree) {
           // 第一次调用 enqueue_task，初始化任务树
+          const rootTaskPrompt = isNewRootTask 
+            ? prompt // 新根任务：使用当前 prompt 作为根任务
+            : currentFollowupRun.prompt; // 子任务：使用原始用户消息作为根任务
+          
           taskTree = await globalOrchestrator.initializeTaskTree(
-            currentFollowupRun.prompt, // 使用当前用户消息作为根任务
-            sessionId,
+            rootTaskPrompt,
+            targetSessionId,
           );
-          console.log(`[enqueue_task] ✅ Task tree initialized: sessionId=${sessionId}`);
+          console.log(`[enqueue_task] ✅ Task tree initialized: sessionId=${targetSessionId}, isNewRootTask=${isNewRootTask}`);
         }
         
         // 添加子任务到任务树
-        const subTask = await globalOrchestrator.addSubTask(taskTree, prompt, summary || prompt);
-        console.log(`[enqueue_task] ✅ Sub task added to tree: ${subTask.id} (${summary || "none"})`);
+        const subTask = await globalOrchestrator.addSubTask(
+          taskTree, 
+          prompt, 
+          summary || prompt,
+          parentId,           // 🆕 传递父任务 ID
+          waitForChildren,    // 🆕 传递是否等待子任务完成
+        );
+        console.log(`[enqueue_task] ✅ Sub task added to tree: ${subTask.id} (${summary || "none"}) [parent=${parentId || "none"}, waitForChildren=${waitForChildren}, isNewRootTask=${isNewRootTask}]`);
         
         // 构建 FollowupRun
         const followupRun: FollowupRun = {
@@ -201,6 +283,8 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
           run: currentFollowupRun.run,
           // 🔧 标记为队列任务，防止循环
           isQueueTask: true,
+          // 🆕 标记为非根任务（子任务不能再分解）
+          isRootTask: false,
         };
 
         // 解析队列设置
@@ -231,12 +315,17 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
 
         // 🆕 生成简洁的成功消息（不包含任务看板）
         // 任务看板会在子任务完成后由 followup-runner 自动发送
+        const message = isNewRootTask
+          ? `✅ 新任务树已创建${summary ? `：${summary}` : ""}`
+          : `✅ 任务已加入队列${summary ? `：${summary}` : ""}`;
+        
         return jsonResult({
           success: true,
-          message: `任务已加入队列${summary ? `：${summary}` : ""}`,
+          message,
           queueKey: agentSessionKey,
           subTaskId: subTask.id,
-          taskTreePath: `~/.clawdbot/tasks/${sessionId}/TASK_TREE.json`,
+          taskTreePath: `~/.clawdbot/tasks/${targetSessionId}/TASK_TREE.json`,
+          isNewRootTask,
         });
       } catch (err) {
         console.error(`[enqueue_task] ❌ Error:`, err);

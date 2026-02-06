@@ -499,6 +499,17 @@ ${prompts.jsonOnlyReminder}`;
           metadata: item.metadata || {}
         };
         
+        // 🆕 自动识别写作任务并标记
+        const isWritingTask = this.detectWritingTask(subTask.prompt, subTask.summary);
+        if (isWritingTask) {
+          subTask.metadata = {
+            ...subTask.metadata,
+            requiresFileOutput: true,
+            expectedFileTypes: ["txt", "md", "doc", "docx", "pdf"]
+          };
+          console.log(`[LLMTaskDecomposer] 📝 检测到写作任务：${subTask.summary}`);
+        }
+        
         return subTask;
       });
       
@@ -560,5 +571,29 @@ ${prompts.jsonOnlyReminder}`;
         estimatedDuration: 300000
       };
     }
+  }
+
+  /**
+   * 检测是否为写作任务
+   * 
+   * 🆕 自动识别需要产生文件的写作任务
+   * 
+   * @param prompt 任务提示词
+   * @param summary 任务摘要
+   * @returns 是否为写作任务
+   */
+  private detectWritingTask(prompt: string, summary: string): boolean {
+    const text = `${prompt} ${summary}`.toLowerCase();
+    
+    // 写作相关关键词
+    const writingKeywords = [
+      "写", "撰写", "编写", "创作", "起草",
+      "文章", "报告", "文档", "说明", "手册",
+      "创建文件", "生成文档", "保存为", "输出到文件",
+      "write", "create file", "generate document", "save as"
+    ];
+    
+    // 检查是否包含写作关键词
+    return writingKeywords.some(keyword => text.includes(keyword));
   }
 }

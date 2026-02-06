@@ -234,7 +234,12 @@ export async function runReplyAgent(params: {
 
   // 🔧 设置全局上下文，让 enqueue_task 工具可以访问当前的 FollowupRun
   // isQueueTask = false 表示这不是队列任务（是用户直接发送的消息）
-  setCurrentFollowupRunContext({ ...followupRun, isQueueTask: false });
+  // isRootTask = true 表示这是根任务（允许分解子任务）
+  setCurrentFollowupRunContext({ 
+    ...followupRun, 
+    isQueueTask: false,
+    isRootTask: true  // 🆕 标记为根任务
+  });
 
   activeSessionEntry = await runMemoryFlushIfNeeded({
     cfg,

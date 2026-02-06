@@ -108,6 +108,29 @@
 | **绕过问题** | `.kiro/lessons-learned/98_追根溯源原则_不要偷懒.md` |
 | **解决问题** | `.kiro/lessons-learned/98_追根溯源原则_不要偷懒.md` |
 | **系统能力** | `.kiro/lessons-learned/98_追根溯源原则_不要偷懒.md` |
+| **Response body 重复读取** | `.kiro/lessons-learned/100_Response_body重复读取导致崩溃.md` |
+| **bodyUsed** | `.kiro/lessons-learned/100_Response_body重复读取导致崩溃.md` |
+| **Response clone** | `.kiro/lessons-learned/100_Response_body重复读取导致崩溃.md` |
+| **disturbed or locked** | `.kiro/lessons-learned/100_Response_body重复读取导致崩溃.md` |
+| **Telegram 文件发送崩溃** | `.kiro/lessons-learned/100_Response_body重复读取导致崩溃.md` |
+| **fetch 错误处理** | `.kiro/lessons-learned/100_Response_body重复读取导致崩溃.md` |
+| **国际化迁移** | `.kiro/lessons-learned/101_大规模代码国际化迁移标准流程.md` |
+| **i18n** | `.kiro/lessons-learned/101_大规模代码国际化迁移标准流程.md` |
+| **l10n** | `.kiro/lessons-learned/101_大规模代码国际化迁移标准流程.md` |
+| **硬编码字符串** | `.kiro/lessons-learned/101_大规模代码国际化迁移标准流程.md` |
+| **多语言支持** | `.kiro/lessons-learned/101_大规模代码国际化迁移标准流程.md` |
+| **提示词迁移** | `.kiro/lessons-learned/101_大规模代码国际化迁移标准流程.md` |
+| **getPrompts** | `.kiro/lessons-learned/101_大规模代码国际化迁移标准流程.md` |
+| **占位符** | `.kiro/lessons-learned/101_大规模代码国际化迁移标准流程.md` |
+| **类型定义** | `.kiro/lessons-learned/101_大规模代码国际化迁移标准流程.md` |
+| **任务验证** | `.kiro/lessons-learned/105_任务文件产出验证机制.md` |
+| **文件产出** | `.kiro/lessons-learned/105_任务文件产出验证机制.md` |
+| **写作任务** | `.kiro/lessons-learned/105_任务文件产出验证机制.md` |
+| **自动识别** | `.kiro/lessons-learned/105_任务文件产出验证机制.md` |
+| **质量检查** | `.kiro/lessons-learned/105_任务文件产出验证机制.md` |
+| **验证机制** | `.kiro/lessons-learned/105_任务文件产出验证机制.md` |
+| **LLM 只描述不创建** | `.kiro/lessons-learned/105_任务文件产出验证机制.md` |
+| **任务完成判定** | `.kiro/lessons-learned/105_任务文件产出验证机制.md` |
 
 clawdbot 实际的 系统日志在 C:\Users\zouta\.clawdbot\runtimelog
 clawdbot 对话内容在 C:\Users\zouta\.clawdbot\agents\main\sessions

@@ -21,6 +21,7 @@ import type {
   ChangeType
 } from "./types.js";
 import { TaskTreeManager } from "./task-tree-manager.js";
+import { getPrompts } from "./prompts-loader.js";
 
 /**
  * 执行结果接口
@@ -55,10 +56,12 @@ export class TaskAdjuster {
     taskTree: TaskTree,
     changes: TaskTreeChange[]
   ): Promise<void> {
+    const prompts = getPrompts();
+    
     // 1. 验证变更的合法性
     const validation = this.validateChanges(taskTree, changes);
     if (!validation.valid) {
-      throw new Error(`变更验证失败: ${validation.errors.join(", ")}`);
+      throw new Error(`${prompts.taskAdjuster.errors.changeValidationFailed}: ${validation.errors.join(", ")}`);
     }
 
     // 2. 按类型应用变更
@@ -84,10 +87,10 @@ export class TaskAdjuster {
             await this.applySplitTask(taskTree, change);
             break;
           default:
-            console.warn(`未知的变更类型: ${change.type}`);
+            console.warn(`${prompts.taskAdjuster.errors.unknownChangeType}: ${change.type}`);
         }
       } catch (error) {
-        console.error(`应用变更失败 (${change.type}):`, error);
+        console.error(`${prompts.taskAdjuster.errors.applyChangeFailed} (${change.type}):`, error);
         throw error;
       }
     }
@@ -109,6 +112,7 @@ export class TaskAdjuster {
     taskTree: TaskTree,
     executionResults: ExecutionResult[]
   ): Promise<TaskTreeChange[]> {
+    const prompts = getPrompts();
     const changes: TaskTreeChange[] = [];
 
     for (const result of executionResults) {
@@ -121,7 +125,7 @@ export class TaskAdjuster {
             type: "split_task",
             targetId: result.subTaskId,
             after: {
-              reason: "任务重试次数过多，建议拆分为更小的子任务"
+              reason: prompts.taskAdjuster.logs.retryCountExceeded
             },
             timestamp: Date.now()
           });
@@ -145,6 +149,8 @@ export class TaskAdjuster {
     taskTree: TaskTree,
     review: QualityReviewResult
   ): Promise<TaskTreeChange[]> {
+    const prompts = getPrompts();
+    
     // 如果评估结果中已经包含了变更建议，直接返回
     if (review.modifications && review.modifications.length > 0) {
       return review.modifications;
@@ -156,7 +162,7 @@ export class TaskAdjuster {
     for (const suggestion of review.suggestions) {
       // 这里可以使用 LLM 将改进建议转换为具体的变更操作
       // 目前简化处理，只记录建议
-      console.log(`改进建议: ${suggestion}`);
+      console.log(`${prompts.taskAdjuster.logs.improvementSuggestion}: ${suggestion}`);
     }
 
     return changes;
@@ -178,6 +184,7 @@ export class TaskAdjuster {
     taskTree: TaskTree,
     changes: TaskTreeChange[]
   ): ValidationResult {
+    const prompts = getPrompts();
     const errors: string[] = [];
     const warnings: string[] = [];
 
@@ -186,7 +193,7 @@ export class TaskAdjuster {
       if (change.type !== "add_task") {
         const targetExists = taskTree.subTasks.some(st => st.id === change.targetId);
         if (!targetExists) {
-          errors.push(`目标任务 ${change.targetId} 不存在`);
+          errors.push(`${prompts.taskAdjuster.errors.targetTaskNotFound} ${change.targetId}`);
         }
       }
 
@@ -194,17 +201,17 @@ export class TaskAdjuster {
       switch (change.type) {
         case "add_task":
           if (!change.after) {
-            errors.push(`add_task 变更缺少 after 字段`);
+            errors.push(prompts.taskAdjuster.errors.addTaskMissingAfter);
           }
           break;
         case "modify_task":
           if (!change.after) {
-            errors.push(`modify_task 变更缺少 after 字段`);
+            errors.push(prompts.taskAdjuster.errors.modifyTaskMissingAfter);
           }
           break;
         case "move_task":
           if (!change.after || !change.after.parentId) {
-            errors.push(`move_task 变更缺少 after.parentId 字段`);
+            errors.push(prompts.taskAdjuster.errors.moveTaskMissingParentId);
           }
           break;
       }
@@ -230,10 +237,12 @@ export class TaskAdjuster {
     taskIds: string[],
     newTask: Partial<SubTask>
   ): Promise<string> {
+    const prompts = getPrompts();
+    
     // 1. 找到要合并的任务
     const tasksToMerge = taskTree.subTasks.filter(st => taskIds.includes(st.id));
     if (tasksToMerge.length === 0) {
-      throw new Error("没有找到要合并的任务");
+      throw new Error(prompts.taskAdjuster.errors.noTasksToMerge);
     }
 
     // 2. 合并任务的描述、依赖关系、输出
@@ -284,10 +293,12 @@ export class TaskAdjuster {
     taskId: string,
     newTasks: Partial<SubTask>[]
   ): Promise<string[]> {
+    const prompts = getPrompts();
+    
     // 1. 找到要拆分的任务
     const taskToSplit = taskTree.subTasks.find(st => st.id === taskId);
     if (!taskToSplit) {
-      throw new Error(`任务 ${taskId} 不存在`);
+      throw new Error(`${prompts.taskAdjuster.errors.taskNotFound} ${taskId}`);
     }
 
     // 2. 创建新任务

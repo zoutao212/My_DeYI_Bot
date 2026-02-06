@@ -73,6 +73,7 @@ export class QualityReviewer {
     subTaskId: string | null,
     type: ReviewType
   ): Promise<QualityReviewResult> {
+    const prompts = getPrompts();
     try {
       // 1. 构建评估提示词
       const prompt = this.buildDecompositionReviewPrompt(taskTree, subTaskId, type);
@@ -100,7 +101,7 @@ export class QualityReviewer {
       
       return result;
     } catch (error) {
-      console.error("质量评估失败:", error);
+      console.error(`${prompts.qualityReviewer.errors.reviewFailed}:`, error);
       // 返回默认的通过结果
       return {
         status: "passed",
@@ -128,11 +129,12 @@ export class QualityReviewer {
     taskTree: TaskTree,
     subTaskId: string
   ): Promise<QualityReviewResult> {
+    const prompts = getPrompts();
     try {
       // 1. 找到子任务
       const subTask = this.findSubTask(taskTree, subTaskId);
       if (!subTask) {
-        throw new Error(`子任务 ${subTaskId} 不存在`);
+        throw new Error(`${prompts.qualityReviewer.errors.subTaskNotFound} ${subTaskId}`);
       }
 
       // 2. 构建评估提示词
@@ -161,7 +163,7 @@ export class QualityReviewer {
       
       return result;
     } catch (error) {
-      console.error("子任务完成质量评估失败:", error);
+      console.error(`${prompts.qualityReviewer.errors.completionReviewFailed}:`, error);
       return {
         status: "passed",
         decision: "continue",
@@ -186,6 +188,7 @@ export class QualityReviewer {
   async reviewOverallCompletion(
     taskTree: TaskTree
   ): Promise<QualityReviewResult> {
+    const prompts = getPrompts();
     try {
       // 1. 构建评估提示词
       const prompt = this.buildOverallReviewPrompt(taskTree);
@@ -212,7 +215,7 @@ export class QualityReviewer {
       
       return result;
     } catch (error) {
-      console.error("整体完成质量评估失败:", error);
+      console.error(`${prompts.qualityReviewer.errors.overallReviewFailed}:`, error);
       return {
         status: "passed",
         decision: "continue",
@@ -242,11 +245,12 @@ export class QualityReviewer {
     subTaskId: string,
     error: string
   ): Promise<FailureAnalysisResult> {
+    const prompts = getPrompts();
     try {
       // 1. 找到子任务
       const subTask = this.findSubTask(taskTree, subTaskId);
       if (!subTask) {
-        throw new Error(`子任务 ${subTaskId} 不存在`);
+        throw new Error(`${prompts.qualityReviewer.errors.subTaskNotFound} ${subTaskId}`);
       }
 
       // 2. 构建分析提示词
@@ -266,7 +270,7 @@ export class QualityReviewer {
         type: "failure_analysis",
         status: "needs_adjustment",
         reviewedAt: Date.now(),
-        criteria: ["失败原因分析"],
+        criteria: [prompts.failureAnalysis.aspectsTitle],
         findings: [result.reason],
         suggestions: result.improvements,
         decision: result.decision
@@ -274,9 +278,9 @@ export class QualityReviewer {
       
       return result;
     } catch (error) {
-      console.error("失败分析失败:", error);
+      console.error(`${prompts.qualityReviewer.errors.failureAnalysisFailed}:`, error);
       return {
-        reason: "未知错误",
+        reason: "Unknown error",
         context: "",
         lessons: [],
         improvements: [],
@@ -296,19 +300,20 @@ export class QualityReviewer {
     taskTree: TaskTree,
     review: QualityReviewRecord
   ): string {
+    const prompts = getPrompts();
     const lines: string[] = [];
     
-    lines.push(`# 质量评估报告`);
+    lines.push(prompts.qualityReviewer.report.title);
     lines.push(``);
-    lines.push(`**任务树 ID**: ${review.taskTreeId}`);
-    lines.push(`**评估类型**: ${this.getReviewTypeLabel(review.type)}`);
-    lines.push(`**评估时间**: ${new Date(review.reviewedAt).toLocaleString()}`);
-    lines.push(`**评估状态**: ${this.getQualityStatusLabel(review.status)}`);
-    lines.push(`**评估决策**: ${this.getReviewDecisionLabel(review.decision)}`);
+    lines.push(`${prompts.qualityReviewer.report.taskTreeId}: ${review.taskTreeId}`);
+    lines.push(`${prompts.qualityReviewer.report.reviewType}: ${this.getReviewTypeLabel(review.type)}`);
+    lines.push(`${prompts.qualityReviewer.report.reviewTime}: ${new Date(review.reviewedAt).toLocaleString()}`);
+    lines.push(`${prompts.qualityReviewer.report.reviewStatus}: ${this.getQualityStatusLabel(review.status)}`);
+    lines.push(`${prompts.qualityReviewer.report.reviewDecision}: ${this.getReviewDecisionLabel(review.decision)}`);
     lines.push(``);
     
     if (review.criteria.length > 0) {
-      lines.push(`## 评估标准`);
+      lines.push(prompts.qualityReviewer.report.criteriaTitle);
       lines.push(``);
       review.criteria.forEach((criterion, index) => {
         lines.push(`${index + 1}. ${criterion}`);
@@ -317,7 +322,7 @@ export class QualityReviewer {
     }
     
     if (review.findings.length > 0) {
-      lines.push(`## 发现的问题`);
+      lines.push(prompts.qualityReviewer.report.findingsTitle);
       lines.push(``);
       review.findings.forEach((finding, index) => {
         lines.push(`${index + 1}. ${finding}`);
@@ -326,7 +331,7 @@ export class QualityReviewer {
     }
     
     if (review.suggestions.length > 0) {
-      lines.push(`## 改进建议`);
+      lines.push(prompts.qualityReviewer.report.suggestionsTitle);
       lines.push(``);
       review.suggestions.forEach((suggestion, index) => {
         lines.push(`${index + 1}. ${suggestion}`);
@@ -335,10 +340,10 @@ export class QualityReviewer {
     }
     
     if (review.changes && review.changes.length > 0) {
-      lines.push(`## 应用的变更`);
+      lines.push(prompts.qualityReviewer.report.changesTitle);
       lines.push(``);
       review.changes.forEach((change, index) => {
-        lines.push(`${index + 1}. ${this.getChangeTypeLabel(change.type)} - 目标: ${change.targetId}`);
+        lines.push(`${index + 1}. ${this.getChangeTypeLabel(change.type)} - ${prompts.qualityReviewer.report.changeTarget}: ${change.targetId}`);
       });
       lines.push(``);
     }
@@ -352,6 +357,7 @@ export class QualityReviewer {
    * @param record 质量评估记录
    */
   async saveReviewRecord(record: QualityReviewRecord): Promise<void> {
+    const prompts = getPrompts();
     try {
       const sessionDir = join(this.reviewsDir, record.taskTreeId);
       await fs.mkdir(sessionDir, { recursive: true });
@@ -361,7 +367,7 @@ export class QualityReviewer {
       
       await fs.appendFile(reviewsFile, line, "utf-8");
     } catch (error) {
-      console.error("保存质量评估记录失败:", error);
+      console.error(`${prompts.qualityReviewer.errors.saveRecordFailed}:`, error);
     }
   }
 
@@ -598,6 +604,7 @@ ${prompts.jsonOnlyReminder}`;
    * 解析评估响应
    */
   private parseReviewResponse(response: string): QualityReviewResult {
+    const prompts = getPrompts();
     try {
       const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/) || 
                        response.match(/```\s*([\s\S]*?)\s*```/) ||
@@ -606,7 +613,7 @@ ${prompts.jsonOnlyReminder}`;
       const jsonStr = jsonMatch[1] || response;
       return JSON.parse(jsonStr.trim()) as QualityReviewResult;
     } catch (error) {
-      console.error("解析评估响应失败:", error);
+      console.error(`${prompts.qualityReviewer.errors.reviewFailed}:`, error);
       return {
         status: "passed",
         decision: "continue",
@@ -621,6 +628,7 @@ ${prompts.jsonOnlyReminder}`;
    * 解析失败分析响应
    */
   private parseFailureAnalysisResponse(response: string): FailureAnalysisResult {
+    const prompts = getPrompts();
     try {
       const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/) || 
                        response.match(/```\s*([\s\S]*?)\s*```/) ||
@@ -629,9 +637,9 @@ ${prompts.jsonOnlyReminder}`;
       const jsonStr = jsonMatch[1] || response;
       return JSON.parse(jsonStr.trim()) as FailureAnalysisResult;
     } catch (error) {
-      console.error("解析失败分析响应失败:", error);
+      console.error(`${prompts.qualityReviewer.errors.failureAnalysisFailed}:`, error);
       return {
-        reason: "未知错误",
+        reason: "Unknown error",
         context: "",
         lessons: [],
         improvements: [],

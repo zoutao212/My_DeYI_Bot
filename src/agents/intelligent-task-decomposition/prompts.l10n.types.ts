@@ -269,4 +269,80 @@ export interface TaskDecompositionPromptsL10n {
       split_task: string;
     };
   };
+  
+  // ========================================
+  // 任务调整器提示词
+  // ========================================
+  taskAdjuster: {
+    errors: {
+      changeValidationFailed: string;
+      targetTaskNotFound: string;
+      addTaskMissingAfter: string;
+      modifyTaskMissingAfter: string;
+      moveTaskMissingParentId: string;
+      noTasksToMerge: string;
+      taskNotFound: string;
+      unknownChangeType: string;
+      applyChangeFailed: string;
+    };
+    logs: {
+      retryCountExceeded: string;
+      improvementSuggestion: string;
+    };
+  };
+  
+  // ========================================
+  // 恢复管理器提示词
+  // ========================================
+  recoveryManager: {
+    logs: {
+      restoredFromCheckpoint: string;
+      failedToRestore: string;
+      recoveredTaskTree: string;
+      reexecutingTasks: string;
+      reexecutingTask: string;
+    };
+  };
+  
+  // ========================================
+  // 重试管理器提示词
+  // ========================================
+  retryManager: {
+    logs: {
+      executingTask: string;
+      taskSucceeded: string;
+      taskFailed: string;
+      errorNotRetryable: string;
+      waitingBeforeRetry: string;
+      allRetriesFailed: string;
+      failureLogged: string;
+    };
+  };
+  
+  // ========================================
+  // 质量评审器提示词
+  // ========================================
+  qualityReviewer: {
+    errors: {
+      reviewFailed: string;
+      subTaskNotFound: string;
+      completionReviewFailed: string;
+      overallReviewFailed: string;
+      failureAnalysisFailed: string;
+      saveRecordFailed: string;
+    };
+    report: {
+      title: string;
+      taskTreeId: string;
+      reviewType: string;
+      reviewTime: string;
+      reviewStatus: string;
+      reviewDecision: string;
+      criteriaTitle: string;
+      findingsTitle: string;
+      suggestionsTitle: string;
+      changesTitle: string;
+      changeTarget: string;
+    };
+  };
 }

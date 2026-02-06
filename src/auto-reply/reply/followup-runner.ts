@@ -197,8 +197,14 @@ export function createFollowupRunner(params: {
       let fallbackModel = queued.run.model;
       try {
         // 🔧 设置全局上下文：正在执行队列任务
-        // isQueueTask = true 表示这是队列任务（不允许调用 enqueue_task）
-        setCurrentFollowupRunContext({ ...queued, isQueueTask: true });
+        // 检查是否是根任务
+        const isRootTask = queued.isRootTask ?? false;
+        
+        setCurrentFollowupRunContext({ 
+          ...queued, 
+          isQueueTask: !isRootTask,  // 🆕 根任务不标记为队列任务
+          isRootTask: isRootTask      // 🆕 保留根任务标记
+        });
         
         const fallbackResult = await runWithModelFallback({
           cfg: queued.run.config,
@@ -263,6 +269,7 @@ export function createFollowupRunner(params: {
           subTask.output = outputText;
           subTask.completedAt = Date.now();
           subTask.status = "completed";
+          
           await orchestrator.saveTaskTree(taskTree);
           console.log(`[followup-runner] ✅ Sub task completed: ${subTask.id}`);
           
@@ -376,7 +383,9 @@ export function createFollowupRunner(params: {
         originatingTo: queued.originatingTo,
         accountId: queued.run.agentAccountId,
       });
-      const finalPayloads = suppressMessagingToolReplies ? [] : dedupedPayloads;
+      
+      // 声明 finalPayloads（提前声明，避免作用域问题）
+      let finalPayloads = suppressMessagingToolReplies ? [] : dedupedPayloads;
 
       if (finalPayloads.length === 0) return;
 

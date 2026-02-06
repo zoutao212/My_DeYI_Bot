@@ -242,4 +242,80 @@ export const TASK_DECOMPOSITION_PROMPTS_ZH: TaskDecompositionPromptsL10n = {
       split_task: "拆分任务",
     },
   },
+  
+  // ========================================
+  // 任务调整器提示词
+  // ========================================
+  taskAdjuster: {
+    errors: {
+      changeValidationFailed: "变更验证失败",
+      targetTaskNotFound: "目标任务不存在",
+      addTaskMissingAfter: "add_task 变更缺少 after 字段",
+      modifyTaskMissingAfter: "modify_task 变更缺少 after 字段",
+      moveTaskMissingParentId: "move_task 变更缺少 after.parentId 字段",
+      noTasksToMerge: "没有找到要合并的任务",
+      taskNotFound: "任务不存在",
+      unknownChangeType: "未知的变更类型",
+      applyChangeFailed: "应用变更失败",
+    },
+    logs: {
+      retryCountExceeded: "任务重试次数过多，建议拆分为更小的子任务",
+      improvementSuggestion: "改进建议",
+    },
+  },
+  
+  // ========================================
+  // 恢复管理器提示词
+  // ========================================
+  recoveryManager: {
+    logs: {
+      restoredFromCheckpoint: "✅ 从检查点恢复",
+      failedToRestore: "⚠️ 从检查点恢复失败",
+      recoveredTaskTree: "✅ 恢复任务树，包含 {count} 个中断的任务",
+      reexecutingTasks: "🔄 重新执行 {count} 个中断的任务",
+      reexecutingTask: "🔄 重新执行任务: {id} ({summary})",
+    },
+  },
+  
+  // ========================================
+  // 重试管理器提示词
+  // ========================================
+  retryManager: {
+    logs: {
+      executingTask: "🔄 执行任务 (尝试 {attempt}/{maxRetries}): {id}",
+      taskSucceeded: "✅ 任务成功: {id}",
+      taskFailed: "❌ 任务失败 (尝试 {attempt}/{maxRetries}): {id}",
+      errorNotRetryable: "⚠️ 错误不可重试: {message}",
+      waitingBeforeRetry: "⏳ 等待 {delay}ms 后重试...",
+      allRetriesFailed: "❌ 所有重试都失败了: {id}",
+      failureLogged: "📝 失败日志已记录: {path}",
+    },
+  },
+  
+  // ========================================
+  // 质量评审器提示词
+  // ========================================
+  qualityReviewer: {
+    errors: {
+      reviewFailed: "质量评估失败",
+      subTaskNotFound: "子任务不存在",
+      completionReviewFailed: "子任务完成质量评估失败",
+      overallReviewFailed: "整体完成质量评估失败",
+      failureAnalysisFailed: "失败分析失败",
+      saveRecordFailed: "保存质量评估记录失败",
+    },
+    report: {
+      title: "# 质量评估报告",
+      taskTreeId: "**任务树 ID**",
+      reviewType: "**评估类型**",
+      reviewTime: "**评估时间**",
+      reviewStatus: "**评估状态**",
+      reviewDecision: "**评估决策**",
+      criteriaTitle: "## 评估标准",
+      findingsTitle: "## 发现的问题",
+      suggestionsTitle: "## 改进建议",
+      changesTitle: "## 应用的变更",
+      changeTarget: "目标",
+    },
+  },
 };

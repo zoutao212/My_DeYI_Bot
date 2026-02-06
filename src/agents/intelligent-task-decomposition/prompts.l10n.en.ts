@@ -242,4 +242,80 @@ export const TASK_DECOMPOSITION_PROMPTS_EN: TaskDecompositionPromptsL10n = {
       split_task: "Split Task",
     },
   },
+  
+  // ========================================
+  // Task Adjuster Prompts
+  // ========================================
+  taskAdjuster: {
+    errors: {
+      changeValidationFailed: "Change validation failed",
+      targetTaskNotFound: "Target task does not exist",
+      addTaskMissingAfter: "add_task change is missing 'after' field",
+      modifyTaskMissingAfter: "modify_task change is missing 'after' field",
+      moveTaskMissingParentId: "move_task change is missing 'after.parentId' field",
+      noTasksToMerge: "No tasks found to merge",
+      taskNotFound: "Task does not exist",
+      unknownChangeType: "Unknown change type",
+      applyChangeFailed: "Failed to apply change",
+    },
+    logs: {
+      retryCountExceeded: "Task retry count exceeded, suggest splitting into smaller subtasks",
+      improvementSuggestion: "Improvement suggestion",
+    },
+  },
+  
+  // ========================================
+  // Recovery Manager Prompts
+  // ========================================
+  recoveryManager: {
+    logs: {
+      restoredFromCheckpoint: "✅ Restored from checkpoint",
+      failedToRestore: "⚠️ Failed to restore from checkpoint",
+      recoveredTaskTree: "✅ Recovered task tree with {count} interrupted tasks",
+      reexecutingTasks: "🔄 Re-executing {count} interrupted tasks",
+      reexecutingTask: "🔄 Re-executing task: {id} ({summary})",
+    },
+  },
+  
+  // ========================================
+  // Retry Manager Prompts
+  // ========================================
+  retryManager: {
+    logs: {
+      executingTask: "🔄 Executing task (attempt {attempt}/{maxRetries}): {id}",
+      taskSucceeded: "✅ Task succeeded: {id}",
+      taskFailed: "❌ Task failed (attempt {attempt}/{maxRetries}): {id}",
+      errorNotRetryable: "⚠️ Error is not retryable: {message}",
+      waitingBeforeRetry: "⏳ Waiting {delay}ms before retry...",
+      allRetriesFailed: "❌ All retries failed for task: {id}",
+      failureLogged: "📝 Failure logged: {path}",
+    },
+  },
+  
+  // ========================================
+  // Quality Reviewer Prompts
+  // ========================================
+  qualityReviewer: {
+    errors: {
+      reviewFailed: "Quality review failed",
+      subTaskNotFound: "Subtask does not exist",
+      completionReviewFailed: "Subtask completion quality review failed",
+      overallReviewFailed: "Overall completion quality review failed",
+      failureAnalysisFailed: "Failure analysis failed",
+      saveRecordFailed: "Failed to save quality review record",
+    },
+    report: {
+      title: "# Quality Review Report",
+      taskTreeId: "**Task Tree ID**",
+      reviewType: "**Review Type**",
+      reviewTime: "**Review Time**",
+      reviewStatus: "**Review Status**",
+      reviewDecision: "**Review Decision**",
+      criteriaTitle: "## Evaluation Criteria",
+      findingsTitle: "## Findings",
+      suggestionsTitle: "## Suggestions",
+      changesTitle: "## Applied Changes",
+      changeTarget: "Target",
+    },
+  },
 };

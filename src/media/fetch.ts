@@ -52,13 +52,24 @@ function parseContentDispositionFileName(header?: string | null): string | undef
 
 async function readErrorBodySnippet(res: Response, maxChars = 200): Promise<string | undefined> {
   try {
-    const text = await res.text();
+    // 检查 body 是否已被读取
+    if (res.bodyUsed) {
+      console.warn("[fetchRemoteMedia] Response body already consumed, cannot read error snippet");
+      return undefined;
+    }
+    
+    // 克隆 Response 以避免消耗原始 body
+    const clone = res.clone();
+    const text = await clone.text();
+    
     if (!text) return undefined;
     const collapsed = text.replace(/\s+/g, " ").trim();
     if (!collapsed) return undefined;
     if (collapsed.length <= maxChars) return collapsed;
     return `${collapsed.slice(0, maxChars)}…`;
-  } catch {
+  } catch (error) {
+    // 记录错误但不抛出
+    console.warn("[fetchRemoteMedia] Failed to read error body snippet:", error);
     return undefined;
   }
 }

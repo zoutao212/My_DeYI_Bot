@@ -7,6 +7,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { SubTask, FailureLog } from "./types.js";
+import { getPrompts } from "./prompts-loader.js";
 
 /**
  * 重试管理器
@@ -79,35 +80,36 @@ export class RetryManager {
     executor: () => Promise<T>,
     maxRetries: number = 3,
   ): Promise<T> {
+    const prompts = getPrompts();
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        console.log(`[RetryManager] 🔄 Executing task (attempt ${attempt + 1}/${maxRetries + 1}): ${subTask.id}`);
+        console.log(`[RetryManager] ${prompts.retryManager.logs.executingTask.replace('{attempt}', String(attempt + 1)).replace('{maxRetries}', String(maxRetries + 1)).replace('{id}', subTask.id)}`);
         const result = await executor();
-        console.log(`[RetryManager] ✅ Task succeeded: ${subTask.id}`);
+        console.log(`[RetryManager] ${prompts.retryManager.logs.taskSucceeded.replace('{id}', subTask.id)}`);
         return result;
       } catch (error) {
         lastError = error as Error;
-        console.error(`[RetryManager] ❌ Task failed (attempt ${attempt + 1}/${maxRetries + 1}): ${subTask.id}`, error);
+        console.error(`[RetryManager] ${prompts.retryManager.logs.taskFailed.replace('{attempt}', String(attempt + 1)).replace('{maxRetries}', String(maxRetries + 1)).replace('{id}', subTask.id)}`, error);
 
         // 检查是否可重试
         if (!this.isRetryable(lastError)) {
-          console.error(`[RetryManager] ⚠️ Error is not retryable: ${lastError.message}`);
+          console.error(`[RetryManager] ${prompts.retryManager.logs.errorNotRetryable.replace('{message}', lastError.message)}`);
           throw lastError;
         }
 
         // 如果还有重试机会，等待后重试
         if (attempt < maxRetries) {
           const delay = Math.pow(2, attempt) * 1000; // 指数退避：1s, 2s, 4s
-          console.log(`[RetryManager] ⏳ Waiting ${delay}ms before retry...`);
+          console.log(`[RetryManager] ${prompts.retryManager.logs.waitingBeforeRetry.replace('{delay}', String(delay))}`);
           await new Promise((resolve) => setTimeout(resolve, delay));
         }
       }
     }
 
     // 所有重试都失败了
-    console.error(`[RetryManager] ❌ All retries failed for task: ${subTask.id}`);
+    console.error(`[RetryManager] ${prompts.retryManager.logs.allRetriesFailed.replace('{id}', subTask.id)}`);
     throw lastError!;
   }
 
@@ -115,6 +117,7 @@ export class RetryManager {
    * 记录失败日志
    */
   async logFailure(subTask: SubTask, error: Error, sessionId: string): Promise<void> {
+    const prompts = getPrompts();
     const failureLog: FailureLog = {
       subTaskId: subTask.id,
       error: error.message,
@@ -133,7 +136,7 @@ export class RetryManager {
     const logLine = JSON.stringify(failureLog) + "\n";
     await fs.appendFile(logPath, logLine, "utf-8");
 
-    console.log(`[RetryManager] 📝 Failure logged: ${logPath}`);
+    console.log(`[RetryManager] ${prompts.retryManager.logs.failureLogged.replace('{path}', logPath)}`);
   }
 
   /**

@@ -1560,3 +1560,194 @@
   bottom: 0;
   background: var(--card);
 }
+
+
+/* ========================================
+   Chat File List & Preview
+   @since v20260206_1
+   ======================================== */
+
+/* 文件列表容器 */
+.chat-file-list {
+  margin: 16px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--card);
+}
+
+.chat-file-list-header {
+  padding: 12px 16px;
+  background: var(--bg-secondary, #f5f5f5);
+  border-bottom: 1px solid var(--border);
+}
+
+.chat-file-list-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.chat-file-list-body {
+  padding: 8px;
+}
+
+/* 文件列表项 */
+.chat-file-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 6px;
+  transition: background 0.2s;
+}
+
+.chat-file-item:hover {
+  background: var(--bg-hover, rgba(0, 0, 0, 0.05));
+}
+
+.chat-file-icon {
+  font-size: 24px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.chat-file-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-file-name {
+  font-weight: 500;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.chat-file-meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.chat-file-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* 文件预览遮罩层 */
+.chat-file-preview-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+
+/* 文件预览卡片 */
+.chat-file-preview-card {
+  background: var(--card);
+  border-radius: 12px;
+  width: 90%;
+  max-width: 1200px;
+  height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  overflow: hidden;
+}
+
+.chat-file-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary, #f5f5f5);
+  flex-shrink: 0;
+}
+
+.chat-file-preview-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-file-preview-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.chat-file-preview-body {
+  flex: 1;
+  overflow: auto;
+  padding: 24px;
+  background: var(--bg);
+}
+
+.chat-file-preview-content {
+  margin: 0;
+  font-family: 'Monaco', 'Menlo', 'Consolas', 'Courier New', monospace;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+  .chat-file-preview-card {
+    width: 95%;
+    height: 90vh;
+  }
+
+  .chat-file-preview-header {
+    padding: 12px 16px;
+  }
+
+  .chat-file-preview-title {
+    font-size: 14px;
+  }
+
+  .chat-file-preview-body {
+    padding: 16px;
+  }
+
+  .chat-file-preview-content {
+    font-size: 13px;
+  }
+
+  .chat-file-item {
+    flex-wrap: wrap;
+  }
+
+  .chat-file-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+
+/* 小按钮样式 */
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+}
