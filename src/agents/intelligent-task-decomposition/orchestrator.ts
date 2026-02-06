@@ -18,6 +18,7 @@ import { OutputFormatter } from "./output-formatter.js";
 import { TaskGrouper, type GroupingOptions } from "./task-grouper.js";
 import { BatchExecutor, type LLMCaller } from "./batch-executor.js";
 import { DeliveryReporter, type DeliveryReport } from "./delivery-reporter.js";
+import { ComplexityScorer } from "./complexity-scorer.js";
 
 /**
  * 任务分解协调器
@@ -84,7 +85,6 @@ export class Orchestrator {
     );
     
     // 🆕 计算并记录复杂度评分
-    const { ComplexityScorer } = require("./complexity-scorer.js");
     const scorer = new ComplexityScorer();
     const score = scorer.calculateScore(taskTree);
     
@@ -1364,16 +1364,17 @@ ${childOutputs.join("\n\n---\n\n")}
    */
   calculateAdaptiveMaxDepth(rootTask: string, subTaskCount: number): number {
     // 🆕 使用复杂度评分器
-    const { ComplexityScorer } = require("./complexity-scorer.js");
     const scorer = new ComplexityScorer();
     
     // 创建临时任务树用于评分
-    const tempTaskTree = {
+    const tempTaskTree: TaskTree = {
       id: "temp",
       rootTask,
       subTasks: [],
       status: "pending" as const,
       createdAt: Date.now(),
+      updatedAt: Date.now(),
+      checkpoints: [],
     };
     
     // 计算复杂度评分
