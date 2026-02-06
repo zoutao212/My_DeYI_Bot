@@ -83,6 +83,21 @@ export class Orchestrator {
       `创建任务树：${rootTask}`
     );
     
+    // 🆕 计算并记录复杂度评分
+    const { ComplexityScorer } = require("./complexity-scorer.js");
+    const scorer = new ComplexityScorer();
+    const score = scorer.calculateScore(taskTree);
+    
+    // 记录到任务树元数据
+    if (!taskTree.metadata) {
+      taskTree.metadata = {};
+    }
+    taskTree.metadata.complexityScore = score.total;
+    taskTree.metadata.calculatedMaxDepth = score.recommendedMaxDepth;
+    taskTree.metadata.scoreDimensions = score.dimensions;
+    
+    console.log(`[Orchestrator] 📊 任务树复杂度评分已记录: ${score.total}/100, maxDepth=${score.recommendedMaxDepth}`);
+    
     return taskTree;
   }
 
@@ -1331,22 +1346,45 @@ ${childOutputs.join("\n\n---\n\n")}
   // ========================================
 
   /**
-   * 自适应计算最大分解深度
+   * 自适应计算最大分解深度（智能深度控制）
    * 
-   * 基于子任务数量和根任务复杂度动态调整 maxDepth，
-   * 避免过深（浪费 token）或过浅（分解不足）。
+   * 使用复杂度评分模型，综合考虑多个维度：
+   * - Prompt 长度
+   * - 任务类型
+   * - 工具依赖
+   * - 历史表现
    * 
    * @param rootTask 根任务描述
    * @param subTaskCount 当前子任务数量
-   * @returns 推荐的最大分解深度
+   * @returns 推荐的最大分解深度 (1-3)
    */
   calculateAdaptiveMaxDepth(rootTask: string, subTaskCount: number): number {
-    // 简单任务（<= 3 子任务）-> maxDepth = 1
-    if (subTaskCount <= 3) return 1;
-    // 中等任务（4-10 子任务）-> maxDepth = 2
-    if (subTaskCount <= 10) return 2;
-    // 复杂任务（> 10 子任务）-> maxDepth = 3
-    return 3;
+    // 🆕 使用复杂度评分器
+    const { ComplexityScorer } = require("./complexity-scorer.js");
+    const scorer = new ComplexityScorer();
+    
+    // 创建临时任务树用于评分
+    const tempTaskTree = {
+      id: "temp",
+      rootTask,
+      subTasks: [],
+      status: "pending" as const,
+      createdAt: Date.now(),
+    };
+    
+    // 计算复杂度评分
+    const score = scorer.calculateScore(tempTaskTree);
+    
+    console.log(`[Orchestrator] 📊 任务复杂度评分: ${score.total}/100`);
+    console.log(`[Orchestrator] 📏 推荐最大深度: ${score.recommendedMaxDepth}`);
+    console.log(`[Orchestrator] 📋 评分详情:`, {
+      promptLength: score.dimensions.promptLength,
+      taskType: score.dimensions.taskType,
+      toolDependencies: score.dimensions.toolDependencies,
+      historicalPerformance: score.dimensions.historicalPerformance,
+    });
+    
+    return score.recommendedMaxDepth;
   }
 
   /**

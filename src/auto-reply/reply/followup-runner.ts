@@ -336,13 +336,25 @@ export function createFollowupRunner(params: {
               // 归档失败不影响主流程
             }
 
-            // 🆕 Step 6b: 生成并发送结构化交付报告
+            // 🆕 Step 6b: 生成并发送结构化交付报告（支持 HTML）
             try {
               const reporter = new DeliveryReporter();
               const report = reporter.generateReport(taskTree);
-              const markdown = reporter.formatAsMarkdown(report);
-              await sendFollowupPayloads([{ text: markdown }], queued);
-              console.log(`[followup-runner] 📦 Delivery report sent (${report.statistics.successRate} success)`);
+              
+              // 🆕 根据频道类型选择格式
+              const { selectFormatter } = require("../../agents/intelligent-task-decomposition/report-formatter.js");
+              const originatingChannel = queued.originatingChannel;
+              const formatter = selectFormatter(originatingChannel);
+              
+              const formattedReport = formatter.format(report);
+              const isHTML = formatter.constructor.name === "HTMLFormatter";
+              
+              await sendFollowupPayloads([{ 
+                text: formattedReport,
+                ...(isHTML && { parseMode: "HTML" })
+              }], queued);
+              
+              console.log(`[followup-runner] 📦 Delivery report sent (${report.statistics.successRate} success, format=${formatter.constructor.name})`);
             } catch (reportErr) {
               console.warn(`[followup-runner] ⚠️ Delivery report failed: ${reportErr}`);
             }

@@ -305,10 +305,11 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
         );
         console.log(`[enqueue_task] ✅ Sub task added to tree: ${subTask.id} (${summary || "none"}) [parent=${parentId || "none"}, waitForChildren=${waitForChildren}, isNewRootTask=${isNewRootTask}]`);
         
-        // 构建 FollowupRun（融合方案 1+2+3）
+        // 构建 FollowupRun（融合方案 1+2+3 + 精确匹配）
         // - isRootTask：新根任务允许分解子任务（方案 1）
         // - isNewRootTask：显式传播，drain 时双保险恢复语义（方案 2）
         // - taskDepth：记录入队时的深度，drain 时做兜底检查（方案 3）
+        // - subTaskId：记录子任务 ID，用于精确匹配（任务系统改进）
         const subTaskDepth = subTask.depth ?? 0;
         const followupRun: FollowupRun = {
           prompt,
@@ -319,6 +320,7 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
           isRootTask: isNewRootTask,       // 方案 1：新根任务 → isRootTask=true
           isNewRootTask: isNewRootTask,    // 方案 2：显式传播标记
           taskDepth: subTaskDepth,          // 方案 3：记录任务树深度
+          subTaskId: subTask.id,            // 🆕 精确匹配：记录子任务 ID
         };
 
         // 解析队列设置

@@ -316,7 +316,8 @@ export function createBatchEnqueueTasksTool(options?: BatchEnqueueTasksOptions):
         
         for (let i = 0; i < tasks.length; i++) {
           const task = tasks[i];
-          const subTaskDepth = createdTasks[i]?.depth ?? 0;
+          const subTask = createdTasks[i];
+          const subTaskDepth = subTask?.depth ?? 0;
           const followupRun: FollowupRun = {
             prompt: task.prompt,
             summaryLine: task.summary,
@@ -327,6 +328,7 @@ export function createBatchEnqueueTasksTool(options?: BatchEnqueueTasksOptions):
             isRootTask: false,            // 批量子任务不是根任务
             isNewRootTask: false,         // 批量子任务不是新根任务
             taskDepth: subTaskDepth,      // 方案 3：记录任务树深度
+            subTaskId: subTask.id,        // 🆕 精确匹配：记录子任务 ID
           };
 
           // 加入队列

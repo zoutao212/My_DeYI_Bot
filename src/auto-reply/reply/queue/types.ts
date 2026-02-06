@@ -112,6 +112,19 @@ export type FollowupRun = {
    * - depth>=maxDepth(3)：禁止继续分解
    */
   taskDepth?: number;
+
+  /**
+   * 子任务 ID（用于精确匹配）
+   * 
+   * 当任务来自任务树时，记录对应的子任务 ID。
+   * 用于在队列中精确匹配任务，避免 prompt 相同时的误匹配。
+   * 
+   * - 有值：来自任务树的子任务，使用 ID 进行精确匹配
+   * - undefined：普通任务或旧版本任务，回退到 prompt 匹配
+   * 
+   * @since v2026.2.6 - 任务系统改进
+   */
+  subTaskId?: string;
 };
 
 export type ResolveQueueSettingsParams = {

@@ -129,11 +129,31 @@ export function scheduleFollowupDrain(
                 const parallelItems: FollowupRun[] = [];
 
                 // 从队列中提取与并行组匹配的 items
+                // 🆕 优先使用 subTaskId 匹配，回退到 prompt 匹配（向后兼容）
+                let idMatchCount = 0;
+                let promptMatchCount = 0;
+                
                 for (const pgTask of parallelGroup) {
-                  const idx = queue.items.findIndex((item) => item.prompt === pgTask.prompt);
+                  const idx = queue.items.findIndex((item) => {
+                    // 优先使用 ID 匹配（精确匹配）
+                    if (item.subTaskId && pgTask.id) {
+                      const matched = item.subTaskId === pgTask.id;
+                      if (matched) idMatchCount++;
+                      return matched;
+                    }
+                    // 回退到 prompt 匹配（向后兼容）
+                    const matched = item.prompt === pgTask.prompt;
+                    if (matched) promptMatchCount++;
+                    return matched;
+                  });
                   if (idx >= 0) {
                     parallelItems.push(queue.items.splice(idx, 1)[0]);
                   }
+                }
+                
+                // 记录匹配统计
+                if (parallelItems.length > 0) {
+                  console.log(`[drain] 📊 Match stats: ID=${idMatchCount}, prompt=${promptMatchCount}`);
                 }
 
                 if (parallelItems.length > 1) {

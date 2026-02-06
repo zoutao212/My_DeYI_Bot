@@ -104,7 +104,7 @@ export interface CreateCapabilityPoolConfig {
  *
  * 复用现有组件：
  * - MemoryService (src/agents/memory/service.ts)
- * - loadCharacterConfig/loadCharacterProfile (src/agents/lina/config/loader.ts)
+ * - CharacterService (src/agents/pipeline/characters/character-service.ts)
  * - generateSessionSummary (src/agents/session-summary.ts)
  */
 export function createDefaultCapabilityPool(poolConfig: CreateCapabilityPoolConfig): CapabilityPool {

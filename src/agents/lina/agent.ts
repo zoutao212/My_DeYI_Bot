@@ -4,11 +4,7 @@
  */
 
 import { createSubsystemLogger } from "../../logging/subsystem.js";
-import { loadCharacterConfig, loadCharacterProfile } from "./config/loader.js";
-import {
-  generateSystemPrompt,
-  type SystemPromptContext,
-} from "./prompts/system-prompt-generator.js";
+import { getCharacterService, type LoadedCharacter } from "../pipeline/characters/character-service.js";
 import {
   routeCapability,
   logRoutingDecision,
@@ -58,8 +54,7 @@ export class LinaAgent {
   private memoryService?: IMemoryService;
 
   // 缓存的配置
-  private config?: Awaited<ReturnType<typeof loadCharacterConfig>>;
-  private profile?: Awaited<ReturnType<typeof loadCharacterProfile>>;
+  private loadedCharacter?: LoadedCharacter;
   private systemPrompt?: string;
 
   constructor(config: LinaAgentConfig) {
@@ -75,27 +70,23 @@ export class LinaAgent {
   async initialize(): Promise<void> {
     log.info(`[LinaAgent] 初始化角色: ${this.characterName}`);
 
-    // 加载配置和档案
-    this.config = await loadCharacterConfig(this.characterName, this.basePath);
-    this.profile = await loadCharacterProfile(this.characterName, this.basePath);
+    // 统一通过 CharacterService 加载
+    const svc = getCharacterService(this.basePath);
+    const loaded = await svc.loadCharacter(this.characterName);
+    if (!loaded) {
+      throw new Error(`Failed to load character: ${this.characterName}`);
+    }
+    this.loadedCharacter = loaded;
+    this.systemPrompt = loaded.formattedSystemPrompt;
 
-    // 生成 System Prompt
-    const promptContext: SystemPromptContext = {
-      config: this.config,
-      profile: this.profile,
-      currentDate: new Date().toLocaleDateString("zh-CN"),
-    };
-
-    this.systemPrompt = generateSystemPrompt(promptContext);
-
-    log.info(`[LinaAgent] 初始化完成: ${this.characterName} v${this.config.version}`);
+    log.info(`[LinaAgent] 初始化完成: ${this.characterName} v${loaded.config.version}`);
   }
 
   /**
    * 处理用户消息
    */
   async handleMessage(context: LinaAgentContext): Promise<LinaAgentResponse> {
-    if (!this.config || !this.profile) {
+    if (!this.loadedCharacter) {
       throw new Error("Agent not initialized. Call initialize() first.");
     }
 
@@ -106,7 +97,7 @@ export class LinaAgent {
     // 1. 路由到对应能力
     const routingContext: RoutingContext = {
       userMessage,
-      config: this.config,
+      config: this.loadedCharacter.config as any,
       conversationHistory,
     };
 
@@ -200,7 +191,7 @@ export class LinaAgent {
     // 这里可以调用 LLM，传入 systemPrompt
     // 暂时返回简单响应
     const greeting = userName ? `${userName}，` : "";
-    return `${greeting}我是 ${this.config!.name}。${userMessage}`;
+    return `${greeting}我是 ${this.loadedCharacter!.config.name}。${userMessage}`;
   }
 
   /**
@@ -214,14 +205,21 @@ export class LinaAgent {
    * 获取角色配置
    */
   getConfig() {
-    return this.config;
+    return this.loadedCharacter?.config;
   }
 
   /**
    * 获取角色档案
    */
   getProfile() {
-    return this.profile;
+    return this.loadedCharacter?.profile;
+  }
+
+  /**
+   * 获取完整的已加载角色数据
+   */
+  getLoadedCharacter() {
+    return this.loadedCharacter;
   }
 }
 

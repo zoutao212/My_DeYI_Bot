@@ -3,14 +3,18 @@
  * 将用户请求路由到对应的能力模块（TaskDelegator、MemoryService）
  */
 
-import type { CharacterConfig } from "../config/loader.js";
 import { createSubsystemLogger } from "../../../logging/subsystem.js";
 
 const log = createSubsystemLogger("lina:router");
 
+/** 路由器所需的最小角色配置（不依赖具体的 CharacterConfig 类型） */
+interface RoutingCharacterConfig {
+  capabilities: Record<string, boolean>;
+}
+
 export interface RoutingContext {
   userMessage: string;
-  config: CharacterConfig;
+  config: RoutingCharacterConfig;
   conversationHistory?: Array<{ role: string; content: string }>;
 }
 

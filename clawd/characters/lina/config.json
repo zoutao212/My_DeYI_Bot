@@ -1,7 +1,7 @@
 {
   "name": "lina",
   "displayName": "栗娜",
-  "version": "1.0",
+  "version": "1.1",
   "type": "system-persona",
   "enabled": true,
 
@@ -39,6 +39,19 @@
 
   "knowledge": {
     "files": ["capabilities.md", "guidelines.md"]
+  },
+
+  "files": {
+    "persona": "persona.md",
+    "systemPrompt": "prompts/system.md",
+    "profile": "profile.md",
+    "knowledge": ["capabilities.md", "guidelines.md"],
+    "coreMemories": "memory/core-memories.md",
+    "sessionArchiveDir": "memory/sessions"
+  },
+
+  "overrides": {
+    "SOUL.md": true
   },
 
   "reminders": {

@@ -888,18 +888,19 @@ export const chatHandlers: GatewayRequestHandlers = {
       // 🆕 如果 Hook 返回了 characterName，追加完整的角色设定
       if (characterName && systemPrompt) {
         try {
-          const { loadCharacterProfile } = await import("../../agents/lina/config/loader.js");
-          const characterProfile = await loadCharacterProfile(characterName, effectiveWorkspaceDir);
+          const { getCharacterService } = await import("../../agents/pipeline/characters/character-service.js");
+          const svc = getCharacterService();
+          const loaded = await svc.loadCharacter(characterName);
           
-          // 拼接完整的角色设定
-          let characterSection = `# 角色设定 (${characterName})\n\n${characterProfile.systemPrompt}`;
-          
-          // 如果有核心记忆，追加到角色设定中
-          if (characterProfile.coreMemories) {
-            characterSection += `\n\n## 核心记忆\n\n${characterProfile.coreMemories}`;
+          if (loaded) {
+            let characterSection = `# 角色设定 (${characterName})\n\n${loaded.formattedSystemPrompt}`;
+            
+            if (loaded.memories.coreMemories) {
+              characterSection += `\n\n## 核心记忆\n\n${loaded.memories.coreMemories}`;
+            }
+            
+            systemPrompt = `${systemPrompt}\n\n${characterSection}`;
           }
-          
-          systemPrompt = `${systemPrompt}\n\n${characterSection}`;
         } catch (err) {
           console.warn(`[chat.send.preview] Failed to load character profile: ${err}`);
         }

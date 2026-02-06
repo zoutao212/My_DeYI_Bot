@@ -57,7 +57,7 @@ import { buildSystemPromptReport } from "../../system-prompt-report.js";
 import { resolveDefaultModelForAgent } from "../../model-selection.js";
 import { generateSessionSummary, formatSessionSummary } from "../../session-summary.js";
 import { retrieveMemoryContext } from "../../memory/pipeline-integration.js";
-import { resolvePersonaPrompt } from "../../persona-injector.js";
+import { resolvePersonaPrompt, renderPersonaWithContext } from "../../persona-injector.js";
 
 import { isAbortError } from "../abort.js";
 import { buildEmbeddedExtensionPaths } from "../extensions.js";
@@ -459,19 +459,15 @@ export async function runEmbeddedAttempt(
           ? "minimal"
           : "full";
       
-      // 🆕 Step 3.5: 人格 + 记忆上下文注入
+      // Step 3.5: 人格 + 记忆上下文注入（延迟渲染）
       let enhancedExtraSystemPrompt = params.extraSystemPrompt;
+      let filteredContextFiles = contextFiles;
       {
-        // 人格注入（目录制角色优先，JSON 配置 fallback）
+        // Step A: 解析人格（目录制角色优先，JSON 配置 fallback）
         const resolved = await resolvePersonaPrompt(params.config, sessionAgentId, hookCharacterName ?? undefined);
-        if (resolved) {
-          enhancedExtraSystemPrompt = enhancedExtraSystemPrompt
-            ? `${resolved.prompt}\n\n${enhancedExtraSystemPrompt}`
-            : resolved.prompt;
-          log.info(`[attempt] Persona injected: ${resolved.displayName} (source=${resolved.source})`);
-        }
 
-        // 记忆注入（仅根任务，避免子任务重复检索）
+        // Step B: 检索记忆（仅根任务，避免子任务重复检索）
+        let relevantMemories: string | undefined;
         const followupCtx = (await import("../../tools/enqueue-task-tool.js")).getCurrentFollowupRunContext();
         const isQueueTask = followupCtx?.isQueueTask === true;
         if (!isQueueTask && params.prompt) {
@@ -482,15 +478,42 @@ export async function runEmbeddedAttempt(
             sessionAgentId,
           );
           if (memoryCtx) {
-            enhancedExtraSystemPrompt = enhancedExtraSystemPrompt
-              ? `${enhancedExtraSystemPrompt}\n\n${memoryCtx}`
-              : memoryCtx;
-            log.info(`[attempt] Memory context injected (${memoryCtx.length} chars)`);
+            relevantMemories = memoryCtx;
+            log.info(`[attempt] Memory context retrieved (${memoryCtx.length} chars)`);
           }
+        }
+
+        // Step C: 延迟渲染 — 在记忆就绪后统一替换模板变量
+        if (resolved) {
+          const personaPrompt = renderPersonaWithContext(resolved, {
+            relevantMemories,
+            userName: params.ownerNumbers?.[0],
+          });
+          enhancedExtraSystemPrompt = enhancedExtraSystemPrompt
+            ? `${personaPrompt}\n\n${enhancedExtraSystemPrompt}`
+            : personaPrompt;
+          log.info(`[attempt] Persona injected: ${resolved.displayName} (source=${resolved.source})`);
+
+          // Step D: Workspace 文件冲突协调 — system-persona 存在时过滤 SOUL.md
+          if (resolved.overridesWorkspaceFiles.length > 0 && filteredContextFiles) {
+            const overrideSet = new Set(resolved.overridesWorkspaceFiles);
+            filteredContextFiles = filteredContextFiles.filter(
+              (f) => {
+                const basename = f.path.split(/[\\/]/).pop() ?? "";
+                return !overrideSet.has(basename);
+              },
+            );
+            log.info(`[attempt] Workspace files filtered by overrides: ${resolved.overridesWorkspaceFiles.join(", ")}`);
+          }
+        } else if (relevantMemories) {
+          // 没有角色但有记忆，直接追加
+          enhancedExtraSystemPrompt = enhancedExtraSystemPrompt
+            ? `${enhancedExtraSystemPrompt}\n\n${relevantMemories}`
+            : relevantMemories;
         }
       }
 
-      // 🆕 Step 4: 生成 system prompt（传递动态识别的角色名）
+      // Step 4: 生成 system prompt
       const appendPrompt = await buildEmbeddedSystemPrompt({
         workspaceDir: effectiveWorkspace,
         defaultThinkLevel: params.thinkLevel,
@@ -516,9 +539,9 @@ export async function runEmbeddedAttempt(
         userTimezone,
         userTime,
         userTimeFormat,
-        contextFiles,
-        characterName: hookCharacterName,  // 🆕 传递动态识别的角色名
-        characterBasePath: process.cwd(),  // 🆕 传递基础路径
+        contextFiles: filteredContextFiles,
+        characterName: hookCharacterName,
+        characterBasePath: process.cwd(),
       });
       
       const systemPromptReport = buildSystemPromptReport({
@@ -766,7 +789,7 @@ export async function runEmbeddedAttempt(
             userTimezone,
             userTime,
             userTimeFormat,
-            contextFiles,
+            contextFiles: filteredContextFiles,
             sessionSummary: sessionSummaryText, // 🆕 Inject session summary
           });
 

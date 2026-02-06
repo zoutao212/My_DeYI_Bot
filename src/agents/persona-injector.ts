@@ -15,6 +15,7 @@ import {
   getCharacterService,
   type LoadedCharacter,
 } from "./pipeline/characters/character-service.js";
+import { renderTemplate, type TemplateContext, buildTemplateContextFromCharacter } from "./pipeline/characters/template-engine.js";
 
 const log = createSubsystemLogger("persona:injector");
 
@@ -52,6 +53,8 @@ export interface ResolvedPersona {
   source: "directory" | "config";
   /** 目录制角色的完整数据（仅 source=directory 时有值） */
   character?: LoadedCharacter;
+  /** 此角色覆盖的 Workspace 文件列表（如 ["SOUL.md"]） */
+  overridesWorkspaceFiles: string[];
 }
 
 // ============================================================================
@@ -91,6 +94,7 @@ export async function resolvePersonaPrompt(
           prompt: loaded.formattedSystemPrompt,
           source: "directory",
           character: loaded,
+          overridesWorkspaceFiles: loaded.overridesWorkspaceFiles,
         };
       }
     } catch (err) {
@@ -107,6 +111,7 @@ export async function resolvePersonaPrompt(
       displayName: simpleCfg.name,
       prompt,
       source: "config",
+      overridesWorkspaceFiles: [],
     };
   }
 
@@ -157,13 +162,66 @@ export function buildPersonaPrompt(config: PersonaConfig): string {
   return parts.join("\n");
 }
 
+// ============================================================================
+// 延迟渲染：在记忆数据就绪后统一替换模板变量
+// ============================================================================
+
 /**
- * 从 ClawdbotConfig 解析指定 Agent 的简易人格配置
+ * 延迟渲染人格 Prompt（统一注入记忆）
  *
- * @param cfg - Clawdbot 配置
- * @param agentId - Agent ID
- * @returns 人格配置，如果未配置则返回 null
+ * 使用场景：当 resolvePersonaPrompt 返回的是目录制角色时，
+ * 可以用此方法在 MemoryService 检索完成后重新渲染模板，
+ * 将 {coreMemories} 和 {relevantMemories} 替换为实际内容。
+ *
+ * @param resolved - resolvePersonaPrompt 的返回值
+ * @param memoryContext - 记忆上下文
+ * @returns 渲染后的 prompt 字符串
  */
+export function renderPersonaWithContext(
+  resolved: ResolvedPersona,
+  memoryContext: {
+    relevantMemories?: string;
+    userName?: string;
+    currentDate?: string;
+  },
+): string {
+  // 如果是 JSON fallback 或没有 rawTemplate，直接返回已有 prompt
+  if (resolved.source !== "directory" || !resolved.character?.rawTemplate) {
+    return resolved.prompt;
+  }
+
+  const loaded = resolved.character;
+  const config = loaded.config;
+
+  // 从角色数据构建基础上下文
+  const baseCtx = buildTemplateContextFromCharacter({
+    config,
+    profileRawContent: loaded.profile.rawContent,
+    profileCapabilities: loaded.profile.capabilities,
+    knowledgeCombined: loaded.knowledge.combinedContent,
+    userName: memoryContext.userName,
+  });
+
+  // 合并延迟注入的记忆数据
+  const fullCtx: Partial<TemplateContext> = {
+    ...baseCtx,
+    // persona.md 优先覆盖
+    personality: loaded.persona.personality || config.systemPrompt.personality.join("、"),
+    coreMemories: loaded.memories.coreMemories || "暂无核心记忆",
+    relevantMemories: memoryContext.relevantMemories || loaded.memories.recentSessions.join("\n\n") || "暂无相关记忆",
+    currentDate: memoryContext.currentDate ?? new Date().toLocaleDateString("zh-CN"),
+  };
+
+  let result = renderTemplate(loaded.rawTemplate, fullCtx);
+
+  // 追加知识库
+  if (loaded.knowledge.combinedContent) {
+    result += `\n\n## 知识库\n\n${loaded.knowledge.combinedContent}`;
+  }
+
+  return result;
+}
+
 export function resolvePersonaConfig(
   cfg: ClawdbotConfig | undefined,
   agentId: string,

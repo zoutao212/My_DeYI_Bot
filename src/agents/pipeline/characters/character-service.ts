@@ -8,6 +8,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createSubsystemLogger } from "../../../logging/subsystem.js";
 import type { CharacterRecognitionConfig } from "../types.js";
+import { renderTemplate, buildTemplateContextFromCharacter, type TemplateContext } from "./template-engine.js";
 
 const log = createSubsystemLogger("pipeline:character");
 
@@ -58,6 +59,19 @@ export interface FullCharacterConfig {
     files: string[];
   };
 
+  // 文件路径配置（新增）
+  files?: {
+    persona?: string;
+    systemPrompt?: string;
+    profile?: string;
+    knowledge?: string[];
+    coreMemories?: string;
+    sessionArchiveDir?: string;
+  };
+
+  // Workspace 文件覆盖声明（新增）
+  overrides?: Record<string, boolean>;
+
   // 提醒配置（仅系统人格）
   reminders?: {
     enabled: boolean;
@@ -91,15 +105,30 @@ export interface CharacterMemories {
   recentSessions: string[];
 }
 
+/** persona.md 解析结果 */
+export interface CharacterPersona {
+  identity: string;
+  personality: string;
+  speakingStyle: string;
+  values: string;
+  rawContent: string;
+}
+
 export interface LoadedCharacter {
   config: FullCharacterConfig;
   profile: CharacterProfile;
   knowledge: CharacterKnowledge;
   memories: CharacterMemories;
+  persona: CharacterPersona;
   systemPromptTemplate: string;
+  /** 未渲染的原始模板（延迟渲染用） */
+  rawTemplate: string;
+  /** 向后兼容：提前渲染的 system prompt（不含延迟注入的记忆） */
   formattedSystemPrompt: string;
   isSystemPersona: boolean;
   characterDir: string;
+  /** 声明此角色覆盖的 Workspace 文件列表（如 ["SOUL.md"]） */
+  overridesWorkspaceFiles: string[];
 }
 
 // ==============================================================================
@@ -161,23 +190,37 @@ export class CharacterService {
       // 5. 加载系统提示词模板
       const systemPromptTemplate = await this.loadSystemPromptTemplate(characterDir, config.prompts);
 
-      // 6. 生成格式化的系统提示词
+      // 5.5 加载 persona.md（新增）
+      const persona = await this.loadPersona(characterDir, config);
+
+      // 6. 生成格式化的系统提示词（向后兼容，不含延迟记忆）
       const formattedSystemPrompt = this.formatSystemPrompt(systemPromptTemplate, {
         config,
         profile,
         knowledge,
         memories,
+        persona,
       });
+
+      // 7. 解析 overrides
+      const overridesWorkspaceFiles = config.overrides
+        ? Object.entries(config.overrides)
+            .filter(([, v]) => v === true)
+            .map(([k]) => k)
+        : [];
 
       const loaded: LoadedCharacter = {
         config,
         profile,
         knowledge,
         memories,
+        persona,
         systemPromptTemplate,
+        rawTemplate: systemPromptTemplate,
         formattedSystemPrompt,
         isSystemPersona: config.type === "system-persona",
         characterDir,
+        overridesWorkspaceFiles,
       };
 
       // 缓存
@@ -502,6 +545,38 @@ export class CharacterService {
     }
   }
 
+  /**
+   * 加载 persona.md（人格声明文件）
+   * 如果 persona.md 不存在，fallback 到 config.json 的 systemPrompt 字段
+   */
+  private async loadPersona(
+    characterDir: string,
+    config: FullCharacterConfig,
+  ): Promise<CharacterPersona> {
+    const personaFile = config.files?.persona ?? "persona.md";
+    try {
+      const personaPath = join(characterDir, personaFile);
+      const content = await readFile(personaPath, "utf-8");
+      const sections = this.parseMarkdownSections(content);
+      return {
+        identity: sections["身份"] || sections["Identity"] || "",
+        personality: sections["性格"] || sections["Personality"] || "",
+        speakingStyle: sections["说话风格"] || sections["Speaking Style"] || "",
+        values: sections["价值观"] || sections["Values"] || "",
+        rawContent: content,
+      };
+    } catch {
+      // fallback: 从 config.json 的 systemPrompt 字段构建
+      return {
+        identity: `${config.displayName}`,
+        personality: config.systemPrompt.personality.join("、"),
+        speakingStyle: "",
+        values: "",
+        rawContent: "",
+      };
+    }
+  }
+
   private formatSystemPrompt(
     template: string,
     context: {
@@ -509,29 +584,26 @@ export class CharacterService {
       profile: CharacterProfile;
       knowledge: CharacterKnowledge;
       memories: CharacterMemories;
+      persona: CharacterPersona;
     },
   ): string {
-    const { config, profile, knowledge, memories } = context;
+    const { config, profile, knowledge, memories, persona } = context;
 
-    let result = template;
-
-    // 替换变量
-    const replacements: Record<string, string> = {
-      "{userName}": "用户",
-      "{addressUser}": config.systemPrompt.addressUser,
-      "{addressSelf}": config.systemPrompt.addressSelf,
-      "{personality}": config.systemPrompt.personality.join("、"),
-      "{capabilities}": profile.capabilities || "待定义",
-      "{characterProfile}": profile.rawContent,
-      "{currentDate}": new Date().toLocaleDateString("zh-CN"),
-      "{coreMemories}": memories.coreMemories || "暂无核心记忆",
-      "{relevantMemories}": memories.recentSessions.join("\n\n") || "暂无相关记忆",
-      "{relationshipStatus}": "初始状态",
+    // 使用统一模板引擎渲染
+    const templateCtx: Partial<TemplateContext> = {
+      ...buildTemplateContextFromCharacter({
+        config,
+        profileRawContent: profile.rawContent,
+        profileCapabilities: profile.capabilities,
+        knowledgeCombined: knowledge.combinedContent,
+      }),
+      // persona.md 优先覆盖 config.json 的 personality
+      personality: persona.personality || config.systemPrompt.personality.join("、"),
+      coreMemories: memories.coreMemories || "暂无核心记忆",
+      relevantMemories: memories.recentSessions.join("\n\n") || "暂无相关记忆",
     };
 
-    for (const [key, value] of Object.entries(replacements)) {
-      result = result.replaceAll(key, value);
-    }
+    let result = renderTemplate(template, templateCtx);
 
     // 如果有知识库内容，追加到末尾
     if (knowledge.combinedContent) {
