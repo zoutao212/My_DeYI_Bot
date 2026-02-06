@@ -37,6 +37,7 @@ import {
   patchToolSchemaForClaudeCompatibility,
   wrapToolParamNormalization,
 } from "./pi-tools.read.js";
+import { wrapEditWithFuzzyMatch } from "./pi-tools.fuzzy-edit.js";
 import { createEnhancedWriteTool } from "./pi-tools.write.js";
 import { cleanToolSchemaForGemini, normalizeToolParameters } from "./pi-tools.schema.js";
 import type { AnyAgentTool } from "./pi-tools.types.js";
@@ -282,8 +283,10 @@ export function createClawdbotCodingTools(options?: {
       // Wrap with param normalization for Claude Code compatibility
       const editTool = createEditTool(workspaceRoot);
       const normalized = wrapToolParamNormalization(editTool, CLAUDE_PARAM_GROUPS.edit);
+      // Wrap with fuzzy match fallback (auto-retry with whitespace normalization on exact match failure)
+      const fuzzy = wrapEditWithFuzzyMatch(normalized, workspaceRoot);
       // Wrap with result fallback to ensure non-empty result (prevents LLM from repeating calls)
-      return [wrapToolWithResultFallback(normalized)];
+      return [wrapToolWithResultFallback(fuzzy)];
     }
     return [tool as AnyAgentTool];
   });
