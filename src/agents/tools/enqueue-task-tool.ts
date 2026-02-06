@@ -265,10 +265,9 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
         // 🔧 使用 Orchestrator 管理任务树
         const sessionId = currentFollowupRun.run.sessionId;
         
-        // 🆕 如果是新根任务，生成新的 sessionId
-        const targetSessionId = isNewRootTask 
-          ? `${sessionId}-${Date.now()}` // 生成新的 sessionId
-          : sessionId;
+        // 🔧 统一使用原始 sessionId，靠 rootTaskId 隔离轮次
+        // 旧版用后缀 sessionId 会导致任务树分裂（isNewRootTask=true 写入新树，其余写入旧树）
+        const targetSessionId = sessionId;
         
         // 加载或初始化任务树（必须在 rootTaskId 确定前完成，以便检查旧 round 状态）
         let taskTree = await globalOrchestrator.loadTaskTree(targetSessionId);
@@ -337,7 +336,7 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
           enqueuedAt: Date.now(),
           run: currentFollowupRun.run,
           isQueueTask: true,
-          isRootTask: isNewRootTask || subTaskDepth < MAX_ENQUEUE_DEPTH - 1, // 方案 1+2：新根任务或浅层子任务均允许继续分解
+          isRootTask: isNewRootTask,  // 🔧 只有新根任务标记为根任务，子任务通过 depth guard 控制递归分解
           isNewRootTask: isNewRootTask,    // 方案 2：显式传播标记
           taskDepth: subTaskDepth,          // 方案 3：记录任务树深度
           subTaskId: subTask.id,            // 精确匹配：记录子任务 ID

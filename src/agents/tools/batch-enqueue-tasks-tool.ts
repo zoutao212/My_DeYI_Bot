@@ -335,7 +335,7 @@ export function createBatchEnqueueTasksTool(options?: BatchEnqueueTasksOptions):
             run: currentFollowupRun.run,
             // 🔧 标记为队列任务，防止循环（与 enqueue_task 保持一致）
             isQueueTask: true,
-            isRootTask: subTaskDepth < MAX_ENQUEUE_DEPTH - 1, // 浅层子任务允许继续分解
+            isRootTask: false,  // 🔧 批量子任务不标记为根任务，通过 depth guard 控制递归分解
             isNewRootTask: false,         // 批量子任务不是新根任务
             taskDepth: subTaskDepth,      // 方案 3：记录任务树深度
             subTaskId: subTask.id,        // 🆕 精确匹配：记录子任务 ID

@@ -212,18 +212,17 @@ export function createFollowupRunner(params: {
       let fallbackModel = queued.run.model;
       try {
         // 🔧 设置全局上下文（融合方案 1+2+3）
-        // 双保险：isRootTask 或 isNewRootTask 任一为 true 即视为根任务
-        const isRootTask = queued.isRootTask ?? false;
+        // 只有 isNewRootTask=true 才视为"用户级根任务"（可自由 enqueue）；
+        // 普通子任务保持 isQueueTask=true，通过 depth guard 控制递归分解。
         const isNewRoot = queued.isNewRootTask ?? false;
-        const effectiveIsRoot = isRootTask || isNewRoot;
         
         setCurrentFollowupRunContext({ 
           ...queued, 
-          isQueueTask: !effectiveIsRoot,  // 根任务不标记为队列任务
-          isRootTask: effectiveIsRoot,     // 双保险恢复根任务语义
-          isNewRootTask: isNewRoot,        // 传播 isNewRootTask 标记
-          taskDepth: queued.taskDepth ?? 0, // 传播任务树深度
-          rootTaskId: queued.rootTaskId,   // 🆕 传播轮次 ID（递归分解时继承）
+          isQueueTask: isNewRoot ? false : (queued.isQueueTask ?? true),  // 🔧 只有新根任务才允许自由入队
+          isRootTask: isNewRoot,             // 🔧 只有新根任务标记为根任务
+          isNewRootTask: isNewRoot,          // 传播 isNewRootTask 标记
+          taskDepth: queued.taskDepth ?? 0,  // 传播任务树深度
+          rootTaskId: queued.rootTaskId,     // 传播轮次 ID（递归分解时继承）
         });
         
         const fallbackResult = await runWithModelFallback({
