@@ -263,7 +263,8 @@ export function createFollowupRunner(params: {
                 const base = queued.run.extraSystemPrompt ?? "";
 
                 // 🔧 子任务强制落盘指令：防止 LLM 偷懒只输出文本不调工具
-                const isSubTask = queued.isQueueTask && !queued.isRootTask;
+                // 用 subTaskId 判断（由 enqueue_task 创建），而非 isRootTask（表示"允许递归"不代表"用户原始请求"）
+                const isSubTask = Boolean(queued.subTaskId);
                 const persistInstruction = isSubTask
                   ? "\n\n[系统强制要求] 你正在执行一个子任务。生成的内容（尤其是长文本/创作内容）**必须**使用 `write` 工具写入文件落盘，文件名应包含任务摘要。仅在聊天中回复简短确认即可，不要把完整内容直接输出到聊天。"
                   : "";

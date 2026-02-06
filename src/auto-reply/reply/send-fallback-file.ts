@@ -96,8 +96,35 @@ export async function sendFallbackFile(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(
-        `[send-fallback-file] ⚠️ Telegram 文件发送失败：${msg}`,
+        `[send-fallback-file] ⚠️ Telegram 文件发送失败，降级为 routeReply 文本通知：${msg}`,
       );
+      // 🔧 降级：sendDocument 失败时（chat not found / 权限不足），
+      //    通过 routeReply 发送文本通知（与 outbound 的 chunks 降级对齐）
+      try {
+        const { isRoutableChannel, routeReply } = await import("./route-reply.js");
+        if (isRoutableChannel(channel)) {
+          const fileContent = (await readFile(filePath, "utf-8")).slice(0, 4000);
+          const notifyText = caption
+            ? `📎 ${caption}\n\n${fileContent}${fileContent.length >= 4000 ? "\n\n...(已截断)" : ""}`
+            : `📎 文件内容：\n\n${fileContent}${fileContent.length >= 4000 ? "\n\n...(已截断)" : ""}`;
+          const payload: ReplyPayload = { text: notifyText };
+          const result = await routeReply({
+            payload,
+            channel,
+            to,
+            sessionKey: queued.run.sessionKey,
+            accountId: queued.originatingAccountId,
+            threadId: queued.originatingThreadId,
+            cfg: queued.run.config,
+          });
+          if (result.ok) {
+            console.log(`[send-fallback-file] ✅ Telegram sendDocument 失败后通过 routeReply 成功发送文本`);
+            return { ok: true, method: "text-notify" };
+          }
+        }
+      } catch {
+        // 降级也失败，返回原始错误
+      }
       return { ok: false, method: "telegram", error: msg };
     }
   }
