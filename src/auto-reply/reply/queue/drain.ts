@@ -8,6 +8,8 @@ import {
 import { isRoutableChannel } from "../route-reply.js";
 import { FOLLOWUP_QUEUES } from "./state.js";
 import type { FollowupRun } from "./types.js";
+import { findParallelGroups } from "../../../agents/intelligent-task-decomposition/dependency-analyzer.js";
+import { getGlobalOrchestrator } from "../../../agents/tools/enqueue-task-tool.js";
 
 export function scheduleFollowupDrain(
   key: string,
@@ -108,6 +110,45 @@ export function scheduleFollowupDrain(
             enqueuedAt: Date.now(),
           });
           continue;
+        }
+
+        // 🆕 并行执行：检测队列中是否有多个无依赖的任务可以并发
+        if (queue.items.length > 1 && queue.items.every((item) => item.isQueueTask)) {
+          try {
+            const orchestrator = getGlobalOrchestrator();
+            const sessionId = queue.items[0]?.run?.sessionId;
+            const taskTree = sessionId ? await orchestrator.loadTaskTree(sessionId) : null;
+
+            if (taskTree && taskTree.subTasks.length > 0) {
+              const pendingTasks = taskTree.subTasks.filter((t) => t.status === "pending");
+              const groups = findParallelGroups(pendingTasks);
+
+              // 如果第一个并行组有 > 1 个任务，尝试并发执行
+              if (groups.length > 0 && groups[0].length > 1) {
+                const parallelGroup = groups[0];
+                const parallelItems: FollowupRun[] = [];
+
+                // 从队列中提取与并行组匹配的 items
+                for (const pgTask of parallelGroup) {
+                  const idx = queue.items.findIndex((item) => item.prompt === pgTask.prompt);
+                  if (idx >= 0) {
+                    parallelItems.push(queue.items.splice(idx, 1)[0]);
+                  }
+                }
+
+                if (parallelItems.length > 1) {
+                  console.log(`[drain] 🚀 Parallel execution: ${parallelItems.length} tasks`);
+                  await Promise.allSettled(parallelItems.map((item) => runFollowup(item)));
+                  continue;
+                } else {
+                  // 放回队列头部
+                  queue.items.unshift(...parallelItems);
+                }
+              }
+            }
+          } catch {
+            // 并行分析失败，回退到串行执行
+          }
         }
 
         const next = queue.items.shift();

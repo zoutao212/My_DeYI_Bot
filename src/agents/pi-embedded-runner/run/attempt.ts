@@ -56,6 +56,8 @@ import { DEFAULT_BOOTSTRAP_FILENAME } from "../../workspace.js";
 import { buildSystemPromptReport } from "../../system-prompt-report.js";
 import { resolveDefaultModelForAgent } from "../../model-selection.js";
 import { generateSessionSummary, formatSessionSummary } from "../../session-summary.js";
+import { retrieveMemoryContext } from "../../memory/pipeline-integration.js";
+import { resolvePersonaPrompt } from "../../persona-injector.js";
 
 import { isAbortError } from "../abort.js";
 import { buildEmbeddedExtensionPaths } from "../extensions.js";
@@ -457,12 +459,43 @@ export async function runEmbeddedAttempt(
           ? "minimal"
           : "full";
       
+      // 🆕 Step 3.5: 人格 + 记忆上下文注入
+      let enhancedExtraSystemPrompt = params.extraSystemPrompt;
+      {
+        // 人格注入（目录制角色优先，JSON 配置 fallback）
+        const resolved = await resolvePersonaPrompt(params.config, sessionAgentId, hookCharacterName ?? undefined);
+        if (resolved) {
+          enhancedExtraSystemPrompt = enhancedExtraSystemPrompt
+            ? `${resolved.prompt}\n\n${enhancedExtraSystemPrompt}`
+            : resolved.prompt;
+          log.info(`[attempt] Persona injected: ${resolved.displayName} (source=${resolved.source})`);
+        }
+
+        // 记忆注入（仅根任务，避免子任务重复检索）
+        const followupCtx = (await import("../../tools/enqueue-task-tool.js")).getCurrentFollowupRunContext();
+        const isQueueTask = followupCtx?.isQueueTask === true;
+        if (!isQueueTask && params.prompt) {
+          const memoryCtx = await retrieveMemoryContext(
+            params.prompt,
+            params.sessionId,
+            params.config,
+            sessionAgentId,
+          );
+          if (memoryCtx) {
+            enhancedExtraSystemPrompt = enhancedExtraSystemPrompt
+              ? `${enhancedExtraSystemPrompt}\n\n${memoryCtx}`
+              : memoryCtx;
+            log.info(`[attempt] Memory context injected (${memoryCtx.length} chars)`);
+          }
+        }
+      }
+
       // 🆕 Step 4: 生成 system prompt（传递动态识别的角色名）
       const appendPrompt = await buildEmbeddedSystemPrompt({
         workspaceDir: effectiveWorkspace,
         defaultThinkLevel: params.thinkLevel,
         reasoningLevel: params.reasoningLevel ?? "off",
-        extraSystemPrompt: params.extraSystemPrompt,
+        extraSystemPrompt: enhancedExtraSystemPrompt,
         ownerNumbers: params.ownerNumbers,
         reasoningTagHint,
         heartbeatPrompt: isDefaultAgent
@@ -712,7 +745,7 @@ export async function runEmbeddedAttempt(
             workspaceDir: effectiveWorkspace,
             defaultThinkLevel: params.thinkLevel,
             reasoningLevel: params.reasoningLevel ?? "off",
-            extraSystemPrompt: params.extraSystemPrompt,
+            extraSystemPrompt: enhancedExtraSystemPrompt,
             ownerNumbers: params.ownerNumbers,
             reasoningTagHint,
             heartbeatPrompt: isDefaultAgent

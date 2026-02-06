@@ -1,0 +1,94 @@
+/**
+ * 记忆系统管线集成 (Memory Pipeline Integration)
+ *
+ * 封装记忆检索与归档的管线级接口，供 attempt.ts / followup-runner.ts 直接调用。
+ * 内置超时保护，不阻塞主流程。
+ *
+ * @module agents/memory/pipeline-integration
+ */
+
+import type { ClawdbotConfig } from "../../config/config.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { resolveMemoryServiceConfig, createMemoryService } from "./factory.js";
+import type { IMemoryService, MemoryRetrievalResult } from "./types.js";
+
+const log = createSubsystemLogger("memory:pipeline");
+
+/** 默认记忆检索超时（毫秒） */
+const DEFAULT_RETRIEVAL_TIMEOUT_MS = 5_000;
+
+/**
+ * 检索记忆上下文，封装超时保护。
+ *
+ * @param query - 检索关键词（通常为用户消息）
+ * @param sessionId - 会话 ID
+ * @param config - Clawdbot 配置
+ * @param agentId - Agent ID（用于定位配置）
+ * @param timeoutMs - 超时毫秒数，默认 5000
+ * @returns 格式化的记忆上下文字符串；检索失败或超时返回空字符串
+ */
+export async function retrieveMemoryContext(
+  query: string,
+  sessionId: string,
+  config: ClawdbotConfig | undefined,
+  agentId: string,
+  timeoutMs = DEFAULT_RETRIEVAL_TIMEOUT_MS,
+): Promise<string> {
+  if (!config) return "";
+
+  let service: IMemoryService | null;
+  try {
+    const memCfg = resolveMemoryServiceConfig(config, agentId);
+    service = memCfg ? createMemoryService(config, agentId) : null;
+  } catch {
+    log.debug("Failed to create memory service for pipeline integration");
+    return "";
+  }
+
+  if (!service) return "";
+
+  try {
+    const result: MemoryRetrievalResult = await Promise.race([
+      service.retrieve({
+        query,
+        context: { userId: "default", sessionId, agentId },
+      }),
+      new Promise<MemoryRetrievalResult>((_, reject) =>
+        setTimeout(() => reject(new Error("memory retrieval timeout")), timeoutMs),
+      ),
+    ]);
+    if (result.formattedContext) {
+      log.debug(`Memory context retrieved: ${result.memories.length} items, ${result.durationMs}ms`);
+    }
+    return result.formattedContext ?? "";
+  } catch (err) {
+    log.debug(`Memory retrieval skipped: ${err}`);
+    return "";
+  }
+}
+
+/**
+ * 构建已完成兄弟子任务的输出摘要，用于注入到下一个子任务的 extraSystemPrompt。
+ *
+ * @param completedSiblings - 已完成的子任务列表（需要 summary + output）
+ * @param maxSnippetLen - 每条摘要最大字符数，默认 200
+ * @returns 格式化的上下文文本；无内容则返回空字符串
+ */
+export function buildSiblingContext(
+  completedSiblings: Array<{ summary?: string; output?: string; status: string }>,
+  maxSnippetLen = 200,
+): string {
+  const completed = completedSiblings.filter(
+    (t) => t.status === "completed" && t.output,
+  );
+  if (completed.length === 0) return "";
+
+  const lines = completed.map((t) => {
+    const snippet = t.output!.length > maxSnippetLen
+      ? `${t.output!.substring(0, maxSnippetLen)}...`
+      : t.output!;
+    return `- [${t.summary ?? "子任务"}]: ${snippet}`;
+  });
+
+  return `\n\n## 已完成的关联任务\n${lines.join("\n")}`;
+}

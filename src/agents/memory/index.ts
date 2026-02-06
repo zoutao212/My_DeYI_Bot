@@ -7,4 +7,6 @@
 export * from "./types.js";
 export * from "./retriever.js";
 export * from "./archiver.js";
-export * from "./service.js";
+export { MemoryService } from "./service.js";
+export { createMemoryService, resolveMemoryServiceConfig } from "./factory.js";
+export * from "./pipeline-integration.js";

@@ -62,6 +62,19 @@ export type AgentConfig = {
     prune?: SandboxPruneSettings;
   };
   tools?: AgentToolsConfig;
+  /** 人格配置（配置驱动的角色系统，替代独立的 Butler/VirtualWorld/Lina 模块） */
+  persona?: {
+    /** 角色名称（如 "栗娜"） */
+    name: string;
+    /** 性格描述 */
+    personality?: string;
+    /** 说话风格 */
+    speakingStyle?: string;
+    /** 能力列表 */
+    capabilities?: string[];
+    /** 行为规则 */
+    rules?: string[];
+  };
 };
 
 export type AgentsConfig = {

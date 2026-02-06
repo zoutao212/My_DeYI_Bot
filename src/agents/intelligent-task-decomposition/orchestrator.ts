@@ -17,6 +17,7 @@ import { FileManager } from "./file-manager.js";
 import { OutputFormatter } from "./output-formatter.js";
 import { TaskGrouper, type GroupingOptions } from "./task-grouper.js";
 import { BatchExecutor, type LLMCaller } from "./batch-executor.js";
+import { DeliveryReporter, type DeliveryReport } from "./delivery-reporter.js";
 
 /**
  * 任务分解协调器
@@ -1164,9 +1165,13 @@ ${childOutputs.join("\n\n---\n\n")}
 
       // 根据评估结果决定后续操作
       switch (review.decision) {
-        case "continue":
+        case "continue": {
           console.log(`[Orchestrator] ✅ 整体质量评估通过`);
+          // 🆕 Step 6c: 生成交付报告
+          const deliveryReport = this.generateDeliveryReport(taskTree);
+          console.log(`[Orchestrator] 📦 交付报告已生成: ${deliveryReport.statistics.successRate} 成功率`);
           return true;
+        }
 
         case "adjust":
           console.log(`[Orchestrator] ⚠️ 整体质量需要调整`);
@@ -1292,5 +1297,224 @@ ${childOutputs.join("\n\n---\n\n")}
 
     console.log(`[Orchestrator] ❌ 推翻分解完成（第 ${taskTree.overthrowCount} 次），生成 ${newTasks.length} 个新子任务`);
     return newTasks;
+  }
+
+  // ========================================
+  // 🆕 交付报告生成
+  // ========================================
+
+  /**
+   * 生成结构化交付报告
+   * 
+   * @param taskTree 任务树
+   * @returns 交付报告数据
+   */
+  generateDeliveryReport(taskTree: TaskTree): DeliveryReport {
+    const reporter = new DeliveryReporter();
+    return reporter.generateReport(taskTree);
+  }
+
+  /**
+   * 生成交付报告的 Markdown 格式
+   * 
+   * @param taskTree 任务树
+   * @returns Markdown 格式的交付报告
+   */
+  generateDeliveryReportMarkdown(taskTree: TaskTree): string {
+    const reporter = new DeliveryReporter();
+    const report = reporter.generateReport(taskTree);
+    return reporter.formatAsMarkdown(report);
+  }
+
+  // ========================================
+  // 🆕 增强分解能力（自适应深度 + 分解验证）
+  // ========================================
+
+  /**
+   * 自适应计算最大分解深度
+   * 
+   * 基于子任务数量和根任务复杂度动态调整 maxDepth，
+   * 避免过深（浪费 token）或过浅（分解不足）。
+   * 
+   * @param rootTask 根任务描述
+   * @param subTaskCount 当前子任务数量
+   * @returns 推荐的最大分解深度
+   */
+  calculateAdaptiveMaxDepth(rootTask: string, subTaskCount: number): number {
+    // 简单任务（<= 3 子任务）-> maxDepth = 1
+    if (subTaskCount <= 3) return 1;
+    // 中等任务（4-10 子任务）-> maxDepth = 2
+    if (subTaskCount <= 10) return 2;
+    // 复杂任务（> 10 子任务）-> maxDepth = 3
+    return 3;
+  }
+
+  /**
+   * 验证分解结果的合法性
+   * 
+   * 检查：循环依赖、孤立任务、空任务等。
+   * 
+   * @param taskTree 任务树
+   * @returns 验证结果（通过 / 错误列表）
+   */
+  validateDecomposition(taskTree: TaskTree): { valid: boolean; errors: string[] } {
+    const errors: string[] = [];
+
+    // 1. 检查是否有子任务
+    if (taskTree.subTasks.length === 0) {
+      errors.push("任务树没有子任务");
+      return { valid: false, errors };
+    }
+
+    // 2. 检查循环依赖
+    const visited = new Set<string>();
+    const stack = new Set<string>();
+    const taskMap = new Map(taskTree.subTasks.map(t => [t.id, t]));
+
+    const hasCycle = (id: string): boolean => {
+      if (stack.has(id)) return true;
+      if (visited.has(id)) return false;
+      visited.add(id);
+      stack.add(id);
+      const task = taskMap.get(id);
+      if (task?.dependencies) {
+        for (const dep of task.dependencies) {
+          if (hasCycle(dep)) return true;
+        }
+      }
+      stack.delete(id);
+      return false;
+    };
+
+    for (const t of taskTree.subTasks) {
+      if (hasCycle(t.id)) {
+        errors.push(`检测到循环依赖，涉及任务: ${t.id} (${t.summary})`);
+        break;
+      }
+    }
+
+    // 3. 检查孤立依赖（依赖不存在的任务）
+    const allIds = new Set(taskTree.subTasks.map(t => t.id));
+    for (const t of taskTree.subTasks) {
+      if (t.dependencies) {
+        for (const dep of t.dependencies) {
+          if (!allIds.has(dep)) {
+            errors.push(`任务 ${t.id} (${t.summary}) 依赖不存在的任务: ${dep}`);
+          }
+        }
+      }
+    }
+
+    // 4. 检查空 prompt
+    for (const t of taskTree.subTasks) {
+      if (!t.prompt || t.prompt.trim().length === 0) {
+        errors.push(`任务 ${t.id} (${t.summary}) 的 prompt 为空`);
+      }
+    }
+
+    if (errors.length > 0) {
+      console.warn(`[Orchestrator] ⚠️ 分解验证失败: ${errors.join("; ")}`);
+    }
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  // ========================================
+  // 🆕 TaskBoard 渲染能力（合并自 task-board/compact-renderer）
+  // ========================================
+
+  /**
+   * 将任务树渲染为紧凑的任务看板格式（Markdown）
+   * 
+   * 复用 task-board 的渲染逻辑，统一到 Orchestrator 中。
+   * 
+   * @param taskTree 任务树
+   * @returns 紧凑格式的 Markdown 字符串
+   */
+  renderTaskBoard(taskTree: TaskTree): string {
+    const statusEmoji = (status: string): string => {
+      switch (status) {
+        case "completed": return "✅";
+        case "active": return "🔄";
+        case "pending": return "⏳";
+        case "failed": return "❌";
+        case "interrupted": return "⚠️";
+        default: return "❓";
+      }
+    };
+
+    const lines: string[] = [];
+    const completed = taskTree.subTasks.filter(t => t.status === "completed").length;
+    const total = taskTree.subTasks.length;
+    const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+    lines.push("## 📋 任务看板");
+    lines.push("");
+    lines.push(`**主任务**: ${taskTree.rootTask}`);
+    lines.push(`**状态**: ${statusEmoji(taskTree.status)} ${taskTree.status}`);
+    lines.push(`**进度**: ${completed}/${total} (${pct}%)`);
+    lines.push("");
+
+    if (taskTree.subTasks.length > 0) {
+      lines.push("**子任务**:");
+      for (let i = 0; i < taskTree.subTasks.length; i++) {
+        const t = taskTree.subTasks[i];
+        const deps = t.dependencies && t.dependencies.length > 0
+          ? ` (依赖: ${t.dependencies.join(", ")})`
+          : "";
+        lines.push(`${i + 1}. ${statusEmoji(t.status)} ${t.summary}${deps}`);
+      }
+      lines.push("");
+    }
+
+    return lines.join("\n");
+  }
+
+  /**
+   * 构建任务上下文 Prompt（注入到 System Prompt 中）
+   * 
+   * 将任务树的关键状态信息格式化为 LLM 可理解的上下文片段。
+   * 
+   * @param taskTree 任务树
+   * @returns 格式化的任务上下文 Prompt
+   */
+  buildTaskContextPrompt(taskTree: TaskTree): string {
+    const completed = taskTree.subTasks.filter(t => t.status === "completed");
+    const pending = taskTree.subTasks.filter(t => t.status === "pending");
+    const failed = taskTree.subTasks.filter(t => t.status === "failed");
+
+    const parts: string[] = [];
+    parts.push("## 当前任务上下文");
+    parts.push("");
+    parts.push(`你正在执行一个多步骤任务：**${taskTree.rootTask}**`);
+    parts.push(`总共 ${taskTree.subTasks.length} 个子任务，已完成 ${completed.length}，待执行 ${pending.length}，失败 ${failed.length}。`);
+    parts.push("");
+
+    if (completed.length > 0) {
+      parts.push("### 已完成");
+      for (const t of completed) {
+        const snippet = t.output ? t.output.substring(0, 150) : "无输出";
+        parts.push(`- ✅ ${t.summary}: ${snippet}${t.output && t.output.length > 150 ? "..." : ""}`);
+      }
+      parts.push("");
+    }
+
+    if (pending.length > 0) {
+      parts.push("### 待执行");
+      for (const t of pending) {
+        parts.push(`- ⏳ ${t.summary}`);
+      }
+      parts.push("");
+    }
+
+    if (failed.length > 0) {
+      parts.push("### 失败");
+      for (const t of failed) {
+        parts.push(`- ❌ ${t.summary}: ${t.error ?? "未知错误"}`);
+      }
+      parts.push("");
+    }
+
+    return parts.join("\n");
   }
 }

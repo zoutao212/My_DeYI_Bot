@@ -285,6 +285,16 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
           console.log(`[enqueue_task] ✅ Task tree initialized: sessionId=${targetSessionId}, isNewRootTask=${isNewRootTask}`);
         }
         
+        // 🆕 Step 4b: 自适应深度控制 — 初始化任务树后自动设置 maxDepth
+        if (taskTree.maxDepth === undefined || taskTree.maxDepth === null) {
+          const adaptiveDepth = globalOrchestrator.calculateAdaptiveMaxDepth(
+            taskTree.rootTask,
+            taskTree.subTasks.length,
+          );
+          taskTree.maxDepth = adaptiveDepth;
+          console.log(`[enqueue_task] 📏 Adaptive maxDepth set to ${adaptiveDepth}`);
+        }
+
         // 添加子任务到任务树
         const subTask = await globalOrchestrator.addSubTask(
           taskTree, 

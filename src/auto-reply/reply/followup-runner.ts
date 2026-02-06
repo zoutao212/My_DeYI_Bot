@@ -28,6 +28,9 @@ import type { TypingController } from "./typing.js";
 import { createTypingSignaler } from "./typing-mode.js";
 import { setCurrentFollowupRunContext } from "../../agents/tools/enqueue-task-tool.js";
 import { getGlobalOrchestrator } from "../../agents/tools/enqueue-task-tool.js";
+import { buildSiblingContext } from "../../agents/memory/pipeline-integration.js";
+import { createMemoryService } from "../../agents/memory/factory.js";
+import { DeliveryReporter } from "../../agents/intelligent-task-decomposition/delivery-reporter.js";
 
 /**
  * 判断错误是否可重试
@@ -236,7 +239,17 @@ export function createFollowupRunner(params: {
               config: queued.run.config,
               skillsSnapshot: queued.run.skillsSnapshot,
               prompt: queued.prompt,
-              extraSystemPrompt: queued.run.extraSystemPrompt,
+              extraSystemPrompt: (() => {
+                // 🆕 子任务间上下文共享：注入已完成兄弟任务的输出摘要
+                const siblingCtx = taskTree?.subTasks
+                  ? buildSiblingContext(taskTree.subTasks)
+                  : "";
+                if (siblingCtx) {
+                  console.log(`[followup-runner] 📋 Injecting sibling context (${siblingCtx.length} chars)`);
+                }
+                const base = queued.run.extraSystemPrompt ?? "";
+                return siblingCtx ? `${base}${siblingCtx}` : base || undefined;
+              })(),
               ownerNumbers: queued.run.ownerNumbers,
               enforceFinalTag: queued.run.enforceFinalTag,
               provider,
@@ -277,7 +290,63 @@ export function createFollowupRunner(params: {
           await orchestrator.saveTaskTree(taskTree);
           console.log(`[followup-runner] ✅ Sub task completed: ${subTask.id}`);
           
-          // 注意：不在这里添加进度提示，而是在后面单独发送简化的进度消息
+          // 🆕 检查任务树是否全部完成，异步归档到记忆系统
+          const allDone = taskTree.subTasks.every(
+            (t) => t.status === "completed" || t.status === "failed",
+          );
+          if (allDone) {
+            taskTree.status = taskTree.subTasks.some((t) => t.status === "failed")
+              ? "failed"
+              : "completed";
+            await orchestrator.saveTaskTree(taskTree);
+            console.log(`[followup-runner] 🏁 Task tree ${taskTree.status}: ${taskTree.id}`);
+            
+            // 异步归档（fire-and-forget，不阻塞主流程）
+            try {
+              const memService = createMemoryService(queued.run.config, "main");
+              if (memService) {
+                const completedCount = taskTree.subTasks.filter((t) => t.status === "completed").length;
+                const totalCount = taskTree.subTasks.length;
+                const archiveSummary = {
+                  taskGoal: taskTree.rootTask ?? "任务树",
+                  keyActions: taskTree.subTasks
+                    .filter((t) => t.status === "completed")
+                    .map((t) => t.summary ?? t.prompt?.substring(0, 60) ?? "子任务"),
+                  keyDecisions: [] as string[],
+                  blockers: taskTree.subTasks
+                    .filter((t) => t.status === "failed")
+                    .map((t) => t.error ?? "未知错误"),
+                  totalTurns: totalCount,
+                  createdAt: Date.now(),
+                  progress: {
+                    completed: completedCount,
+                    total: totalCount,
+                    percentage: totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0,
+                  },
+                };
+                memService.archive({
+                  summary: archiveSummary,
+                  context: {
+                    userId: queued.run.agentAccountId ?? "default",
+                    sessionId,
+                  },
+                }).catch((err) => console.warn(`[followup-runner] Memory archive failed: ${err}`));
+              }
+            } catch {
+              // 归档失败不影响主流程
+            }
+
+            // 🆕 Step 6b: 生成并发送结构化交付报告
+            try {
+              const reporter = new DeliveryReporter();
+              const report = reporter.generateReport(taskTree);
+              const markdown = reporter.formatAsMarkdown(report);
+              await sendFollowupPayloads([{ text: markdown }], queued);
+              console.log(`[followup-runner] 📦 Delivery report sent (${report.statistics.successRate} success)`);
+            } catch (reportErr) {
+              console.warn(`[followup-runner] ⚠️ Delivery report failed: ${reportErr}`);
+            }
+          }
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

@@ -1,5 +1,8 @@
 /**
- * Agent Orchestrator
+ * @deprecated 此模块已废弃。请使用 `src/agents/intelligent-task-decomposition/orchestrator.ts` 中的
+ * `Orchestrator` 类，它已合并了 TaskBoard 的渲染能力（renderTaskBoard / buildTaskContextPrompt）。
+ * 
+ * Agent Orchestrator（旧版）
  * 
  * 负责协调任务分解器、任务执行器、进度跟踪器和失败处理器，
  * 实现完整的任务分解、执行和跟踪流程。
