@@ -36,6 +36,39 @@ export function scheduleFollowupDrain(
         // collect mode 会把所有 items 合并成一个 prompt，破坏子任务的独立执行语义
         const hasQueueTasks = queue.items.some((item) => item.isQueueTask || item.subTaskId);
         if (hasQueueTasks) {
+          // 🔧 任务树完成守卫：如果任务树已经 completed/failed，丢弃残留的子任务
+          // 场景：LLM 在根任务中直接生成了所有内容并发送了 TXT，但递归分解产生的
+          // 子任务仍残留在队列中。此时任务树已标记完成，这些子任务不应再执行。
+          const nextPeek = queue.items[0];
+          if (nextPeek && (nextPeek.subTaskId || nextPeek.isQueueTask)) {
+            try {
+              const orchestrator = getGlobalOrchestrator();
+              const sessionId = nextPeek.run?.sessionId;
+              if (sessionId) {
+                const taskTree = await orchestrator.loadTaskTree(sessionId);
+                if (taskTree && (taskTree.status === "completed" || taskTree.status === "failed")) {
+                  // 任务树已终结，丢弃所有残留的子任务（含无 subTaskId 的旧版子任务）
+                  const isStale = (item: FollowupRun) => Boolean(item.subTaskId || item.isQueueTask);
+                  const staleCount = queue.items.filter(isStale).length;
+                  queue.items = queue.items.filter((item) => !isStale(item));
+                  console.log(`[drain] 🧹 Task tree already ${taskTree.status}, discarded ${staleCount} stale sub-tasks`);
+                  continue;
+                }
+                // 额外检查：如果该子任务在任务树中已经是 completed/failed，也跳过
+                if (nextPeek.subTaskId) {
+                  const subTaskInTree = taskTree?.subTasks.find((t) => t.id === nextPeek.subTaskId);
+                  if (subTaskInTree && (subTaskInTree.status === "completed" || subTaskInTree.status === "failed")) {
+                    queue.items.shift();
+                    console.log(`[drain] 🧹 Sub-task ${nextPeek.subTaskId} already ${subTaskInTree.status}, skipping`);
+                    continue;
+                  }
+                }
+              }
+            } catch {
+              // 检查失败不阻塞执行，回退到正常流程
+            }
+          }
+
           const next = queue.items.shift();
           if (!next) { console.log(`[drain] ⚠️ queue task shift() returned undefined, breaking`); break; }
           console.log(`[drain] ▶️ Running queue task individually: summary=${next.summaryLine || 'none'}, isQueueTask=${next.isQueueTask}, isRootTask=${next.isRootTask}, depth=${next.taskDepth}`);
