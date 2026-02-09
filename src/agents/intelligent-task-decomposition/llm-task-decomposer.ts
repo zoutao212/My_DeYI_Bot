@@ -20,6 +20,7 @@ import type {
   SubTaskMetadata,
 } from "./types.js";
 import { getPrompts } from "./prompts-loader.js";
+import type { LLMCaller } from "./batch-executor.js";
 
 /**
  * LLM 配置接口
@@ -36,9 +37,11 @@ interface LLMConfig {
  */
 export class LLMTaskDecomposer {
   private llmConfig: LLMConfig;
+  private llmCaller: LLMCaller | null;
 
-  constructor(llmConfig: LLMConfig) {
+  constructor(llmConfig: LLMConfig, llmCaller?: LLMCaller) {
     this.llmConfig = llmConfig;
+    this.llmCaller = llmCaller ?? null;
   }
 
   /**
@@ -429,12 +432,24 @@ ${prompts.jsonOnlyReminder}`;
    * 调用 LLM
    */
   private async callLLM(prompt: string): Promise<string> {
-    // TODO: 实现实际的 LLM 调用
-    // 这里需要集成到现有的 LLM 调用系统
-    // 暂时返回一个模拟响应
     console.log(`[LLMTaskDecomposer] 调用 LLM，提示词长度: ${prompt.length}`);
     
-    // 模拟响应
+    // 🔧 使用真实 LLMCaller（如果已注入）
+    if (this.llmCaller) {
+      try {
+        const response = await this.llmCaller.call(prompt);
+        console.log(`[LLMTaskDecomposer] ✅ LLM 响应长度: ${response.length}`);
+        return response;
+      } catch (err) {
+        console.error(`[LLMTaskDecomposer] ❌ LLM 调用失败:`, err);
+        // 降级到默认响应
+        console.warn(`[LLMTaskDecomposer] ⚠️ 降级到默认分解方案`);
+      }
+    } else {
+      console.warn(`[LLMTaskDecomposer] ⚠️ 未配置 LLMCaller，使用默认分解方案`);
+    }
+    
+    // 兜底：返回默认分解方案
     return `{
   "subTasks": [
     {

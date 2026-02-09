@@ -419,60 +419,122 @@ export class FileManager {
    * @returns 合并后的文件路径
    */
   async mergeTaskOutputs(taskTree: TaskTree): Promise<string> {
-    // 1. 收集所有子任务的文件
+    // 🔧 多策略合并：producedFilePaths → artifacts → output.txt
     const allFiles: Array<{ 
       taskId: string; 
       taskSummary: string; 
       fileName: string;
       content: string;
+      source: "tracked" | "artifacts" | "output";
     }> = [];
     
     for (const subTask of taskTree.subTasks) {
-      if (!subTask.metadata?.producedFiles || subTask.metadata.producedFiles.length === 0) {
-        continue;
+      if (subTask.status !== "completed") continue;
+      
+      let found = false;
+      
+      // 策略 1：使用文件追踪器记录的完整路径（最精准）
+      if (subTask.metadata?.producedFilePaths && subTask.metadata.producedFilePaths.length > 0) {
+        for (let i = 0; i < subTask.metadata.producedFilePaths.length; i++) {
+          const filePath = subTask.metadata.producedFilePaths[i];
+          const fileName = subTask.metadata.producedFiles?.[i] || path.basename(filePath);
+          try {
+            const content = await fs.readFile(filePath, "utf-8");
+            if (content.trim().length > 0) {
+              allFiles.push({
+                taskId: subTask.id,
+                taskSummary: subTask.summary,
+                fileName,
+                content,
+                source: "tracked",
+              });
+              found = true;
+              console.log(`[FileManager] 📄 策略1命中: ${fileName} (${content.length} 字符)`);
+            }
+          } catch (err) {
+            console.warn(`[FileManager] ⚠️ 策略1失败 ${filePath}:`, err);
+          }
+        }
       }
       
-      const artifactsDir = path.join(
-        this.taskTreePath,
-        "tasks",
-        subTask.id,
-        "artifacts"
-      );
-      
-      for (const fileName of subTask.metadata.producedFiles) {
-        const filePath = path.join(artifactsDir, fileName);
-        try {
-          const content = await fs.readFile(filePath, "utf-8");
-          allFiles.push({
-            taskId: subTask.id,
-            taskSummary: subTask.summary,
-            fileName,
-            content
-          });
-        } catch (err) {
-          console.warn(`[FileManager] ⚠️ 无法读取文件 ${filePath}:`, err);
+      // 策略 2：从 artifacts 目录查找（旧路径兼容）
+      if (!found && subTask.metadata?.producedFiles && subTask.metadata.producedFiles.length > 0) {
+        const artifactsDir = path.join(this.taskTreePath, "tasks", subTask.id, "artifacts");
+        for (const fileName of subTask.metadata.producedFiles) {
+          const filePath = path.join(artifactsDir, fileName);
+          try {
+            const content = await fs.readFile(filePath, "utf-8");
+            if (content.trim().length > 0) {
+              allFiles.push({
+                taskId: subTask.id,
+                taskSummary: subTask.summary,
+                fileName,
+                content,
+                source: "artifacts",
+              });
+              found = true;
+              console.log(`[FileManager] 📄 策略2命中: ${fileName} (${content.length} 字符)`);
+            }
+          } catch {
+            // 静默跳过，尝试下一个策略
+          }
         }
+      }
+      
+      // 策略 3：兜底读取 output.txt（LLM 回复文本）
+      if (!found) {
+        try {
+          const output = await this.readTaskOutput(subTask.id);
+          if (output && output.trim().length > 50) { // 至少 50 字符才认为是有效内容
+            allFiles.push({
+              taskId: subTask.id,
+              taskSummary: subTask.summary,
+              fileName: `output_${subTask.id}.txt`,
+              content: output,
+              source: "output",
+            });
+            found = true;
+            console.log(`[FileManager] 📄 策略3兜底: output.txt (${output.length} 字符)`);
+          }
+        } catch {
+          // 静默跳过
+        }
+      }
+      
+      if (!found) {
+        console.warn(`[FileManager] ⚠️ 子任务 ${subTask.id} (${subTask.summary}) 无任何可合并内容`);
       }
     }
     
     if (allFiles.length === 0) {
-      throw new Error("没有找到任何子任务的文件产出");
+      throw new Error("没有找到任何子任务的文件产出（已尝试：文件追踪 → artifacts → output.txt）");
     }
     
-    // 2. 合并内容
-    let mergedContent = `# ${taskTree.rootTask}\n\n`;
-    mergedContent += `生成时间：${new Date().toLocaleString("zh-CN")}\n\n`;
-    mergedContent += `---\n\n`;
+    // 内容验证：检查是否有"摘要式"内容（疑似 Bug 2 残留）
+    const suspiciousCount = allFiles.filter(f => 
+      f.source === "output" && f.content.length < 500
+    ).length;
+    if (suspiciousCount > 0) {
+      console.warn(
+        `[FileManager] ⚠️ 发现 ${suspiciousCount} 个疑似摘要内容（< 500 字符），` +
+        `可能是 LLM 未使用 write 工具直接写入文件`
+      );
+    }
+    
+    // 合并内容（纯文本，不加 Markdown 标记，适合直接阅读）
+    let mergedContent = "";
     
     for (let i = 0; i < allFiles.length; i++) {
       const file = allFiles[i];
-      mergedContent += `## 子任务 ${i + 1}：${file.taskSummary}\n\n`;
-      mergedContent += `文件：${file.fileName}\n\n`;
-      mergedContent += `${file.content}\n\n`;
-      mergedContent += `---\n\n`;
+      if (allFiles.length > 1) {
+        mergedContent += `\n\n${"=".repeat(60)}\n`;
+        mergedContent += `${file.taskSummary}\n`;
+        mergedContent += `${"=".repeat(60)}\n\n`;
+      }
+      mergedContent += file.content;
     }
     
-    // 3. 保存合并后的文件
+    // 保存合并后的文件
     const deliverableDir = path.join(this.taskTreePath, "deliverables");
     await fs.mkdir(deliverableDir, { recursive: true });
     
@@ -483,7 +545,12 @@ export class FileManager {
     await fs.writeFile(mergedFilePath, mergedContent, "utf-8");
     
     console.log(`[FileManager] ✅ 合并完成：${mergedFilePath}`);
-    console.log(`[FileManager] 📦 合并了 ${allFiles.length} 个文件`);
+    console.log(
+      `[FileManager] 📦 合并了 ${allFiles.length} 个文件 ` +
+      `(tracked: ${allFiles.filter(f => f.source === "tracked").length}, ` +
+      `artifacts: ${allFiles.filter(f => f.source === "artifacts").length}, ` +
+      `output: ${allFiles.filter(f => f.source === "output").length})`
+    );
     
     return mergedFilePath;
   }

@@ -6,6 +6,7 @@ import { resolveQueueSettings } from "../../auto-reply/reply/queue/settings.js";
 import type { ClawdbotConfig } from "../../config/config.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import { Orchestrator } from "../intelligent-task-decomposition/orchestrator.js";
+import { createLLMCallerFromEnv } from "../intelligent-task-decomposition/llm-caller-impl.js";
 
 const EnqueueTaskSchema = Type.Object({
   prompt: Type.String({
@@ -63,7 +64,13 @@ let currentFollowupRunContext: FollowupRun | null = null;
  * 
  * 用于管理任务树的持久化和恢复
  */
-const globalOrchestrator = new Orchestrator();
+// 🔧 创建真实 LLMCaller 并注入 Orchestrator（修复 QC 桩函数 Bug）
+const globalLLMCaller = createLLMCallerFromEnv();
+const globalOrchestrator = new Orchestrator(
+  undefined,           // groupingOptions
+  undefined,           // batchExecutionOptions
+  globalLLMCaller ?? undefined,  // llmCaller → 透传给 QualityReviewer + LLMTaskDecomposer
+);
 
 /**
  * 设置当前的 FollowupRun 上下文

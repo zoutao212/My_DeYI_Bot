@@ -72,31 +72,6 @@ trigger: always_on
 - **止损流程**：
   - 退出 REPL（`exit()` 或 `Ctrl+Z` 回车） -> 回到 PowerShell -> 仅运行短命令/一键脚本.
 
-### 3.4 错误证据闭环（强制）
-
-- 调试/验证命令必须能提供可复现证据：
-  - stdout/stderr 关键片段
-  - 具体命令文本
-  - Shell 环境（PowerShell/REPL）
-
-### 3.4.1 付费 LLM 排障的“先落盘、后分析”（强制）
-
-- **先让证据可回放**：当问题涉及模型请求（尤其是多轮 `seq`）时，必须先确保每次 `seq` 的请求 payload 与完成状态被落盘（脱敏），再做进一步尝试.
-- **优先使用运行时 trace**：优先通过 `runtimelog/trace__*.jsonl` 回放定位，而不是反复重试消耗额度.
-
-### 3.5 复盘固化：卡死/无感知的根因与修复（原文固化）
-
-1） 根因复盘（这次我确实感知到了）你之前遇到的py_compile一跑就卡住”，不是你不允许，也不是py_compile本身慢，而是我用 Python-船多行、复杂引号 的方式跑命令，PowerShell很容易它拆坏，导致Python进入等待态（看起来像卡死、没输出）。我这次直接确认到：后台命令长期RUNNING且无输出，就是“命令被拆坏、进入等待”的典型表现.
-
-2） 修复措施：用“短脚本 +福禄寿心跳”替代复杂 -c我新建了一个极短的校验脚本VirtualWorld/WorkTemp/py_compile_check.py它会逐个文件输出进度（绝不可能无感知卡flushTrue
-
-3） 语法校验结果OK刚刚运行结果（已完成）：编译通cognito_routes_extra.py编译通cognito_api.py输出里最后是：py_compile_checkOK
-
-当前任务状态（闭环）路由拆分与注册：已完成运行时依赖兜底已cognito_routes_extra.pylogger/is_embedding_enabled/_get_ai_facto已注cognito_api.py—register_extra_routes(...)教训固化：已完ProjectMemory+ windsurf/rules/work_flow.md已补“识别 REPL/<stdin>//语法校验：已完成（不再卡死）还剩一个可选项（我建议后面再清马瑞克逗我呢临潼的空行告警：不影响功能，你要我现在把MD022/MD032这类格式告警清掉，我也能做，但我建议等功能稳定后再统一整理一次，避免无意义折腾。
-
-如果你要继续做“最小冒烟启动验证”（启动服务确认路由已挂上），你告诉我你希望用哪个启动方式（现有 把他脚本 、 直接跑 我再接着推进serverFeedbacksubmittedCommandAwaiting
-
----
 
 ## 第四章：文档与同步
 

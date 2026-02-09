@@ -323,8 +323,11 @@ export interface SubTaskMetadata {
   /** 期望的文件类型列表 */
   expectedFileTypes?: string[];
   
-  /** 实际产生的文件列表 */
+  /** 实际产生的文件名列表 */
   producedFiles?: string[];
+  
+  /** 实际产生的文件完整路径列表（用于 mergeTaskOutputs 精准定位） */
+  producedFilePaths?: string[];
   
   // 🆕 兜底落盘相关字段
   

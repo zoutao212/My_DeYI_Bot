@@ -35,6 +35,7 @@ import { buildSiblingContext } from "../../agents/memory/pipeline-integration.js
 import { createMemoryService } from "../../agents/memory/factory.js";
 import { DeliveryReporter } from "../../agents/intelligent-task-decomposition/delivery-reporter.js";
 import { sendFallbackFile } from "./send-fallback-file.js";
+import { beginTracking, collectTrackedFiles, clearTracking } from "../../agents/intelligent-task-decomposition/file-tracker.js";
 
 /**
  * 判断错误是否可重试
@@ -200,9 +201,12 @@ export function createFollowupRunner(params: {
         }
       }
       
-      // 🔧 如果找到了子任务，更新状态为 "active"
+      // 🔧 如果找到了子任务，更新状态为 "active" 并启动文件追踪
       if (taskTree && subTask) {
         console.log(`[followup-runner] 🔍 Found sub task in tree: ${subTask.id}`);
+        // 🔧 启动文件追踪（与 orchestrator.executeSubTask 对齐）
+        // write 工具调用 trackFileWrite() 时会自动关联到此 taskId
+        beginTracking(subTask.id);
         await orchestrator.saveTaskTree(taskTree);
       }
       
@@ -313,6 +317,18 @@ export function createFollowupRunner(params: {
           subTask.output = outputText;
           subTask.completedAt = Date.now();
           subTask.status = "completed";
+          
+          // 🔧 收集文件追踪结果（与 orchestrator.executeSubTask 对齐）
+          const trackedFiles = collectTrackedFiles(subTask.id);
+          if (trackedFiles.length > 0) {
+            if (!subTask.metadata) subTask.metadata = {};
+            subTask.metadata.producedFiles = trackedFiles.map(f => f.fileName);
+            subTask.metadata.producedFilePaths = trackedFiles.map(f => f.filePath);
+            console.log(
+              `[followup-runner] 📂 收集到 ${trackedFiles.length} 个文件产出: ` +
+              trackedFiles.map(f => f.fileName).join(", ")
+            );
+          }
           
           // 🆕 兜底落盘：检测 LLM 是否偷懒（生成了大段内容但未调用 write 工具落盘）
           const FILE_TOOLS = new Set(["write", "send_file"]);
@@ -496,6 +512,8 @@ export function createFollowupRunner(params: {
         
         // 🔧 如果找到了子任务，更新状态并保存错误信息
         if (taskTree && subTask) {
+          // 🔧 异常时清理文件追踪（防止内存泄漏）
+          clearTracking(subTask.id);
           subTask.error = message;
           subTask.retryCount++;
           

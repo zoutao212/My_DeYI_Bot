@@ -8,6 +8,11 @@ import type { AnyAgentTool } from "./pi-tools.types.js";
 import { assertSandboxPath } from "./sandbox-paths.js";
 import { sanitizeToolResultImages } from "./tool-images.js";
 import { createEnhancedWriteTool } from "./pi-tools.write.js";
+import {
+  type SupportedEncoding,
+  decodeBuffer,
+  detectEncoding,
+} from "./intelligent-task-decomposition/encoding-utils.js";
 
 // NOTE(steipete): Upstream read now does file-magic MIME detection; we keep the wrapper
 // to normalize payloads and sanitize oversized images before they hit providers.
@@ -15,51 +20,21 @@ type ToolContentBlock = AgentToolResult<unknown>["content"][number];
 type ImageContentBlock = Extract<ToolContentBlock, { type: "image" }>;
 type TextContentBlock = Extract<ToolContentBlock, { type: "text" }>;
 
-// Encoding detection and conversion utilities
-type SupportedEncoding = "utf-8" | "gbk" | "gb2312" | "big5" | "shift_jis" | "auto";
-
-async function detectTextEncoding(filePath: string): Promise<string> {
-  const encodings = ["utf-8", "gbk", "gb2312", "big5", "shift_jis"];
-  const buffer = await fs.promises.readFile(filePath);
-  
-  for (const encoding of encodings) {
-    try {
-      const decoder = new TextDecoder(encoding, { fatal: true });
-      const text = decoder.decode(buffer);
-      
-      // Check for replacement characters (indicates encoding mismatch)
-      if (!text.includes("\uFFFD")) {
-        return encoding;
-      }
-    } catch {
-      // Encoding failed, try next
-      continue;
-    }
-  }
-  
-  // Default to utf-8 if detection fails
-  return "utf-8";
-}
-
+/**
+ * 以指定编码读取文件（统一使用 encoding-utils 模块）
+ */
 async function readFileWithEncoding(
   filePath: string,
   encoding: SupportedEncoding,
 ): Promise<string> {
   const buffer = await fs.promises.readFile(filePath);
   
-  // Auto-detect encoding
   if (encoding === "auto") {
-    const detected = await detectTextEncoding(filePath);
-    encoding = detected as SupportedEncoding;
+    const detected = detectEncoding(buffer);
+    return decodeBuffer(buffer, detected as SupportedEncoding);
   }
   
-  // Read with specified encoding
-  try {
-    const decoder = new TextDecoder(encoding, { fatal: false });
-    return decoder.decode(buffer);
-  } catch (err) {
-    throw new Error(`Failed to read file with encoding ${encoding}: ${String(err)}`);
-  }
+  return decodeBuffer(buffer, encoding);
 }
 
 async function sniffMimeFromBase64(base64: string): Promise<string | undefined> {

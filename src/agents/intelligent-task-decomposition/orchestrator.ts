@@ -19,6 +19,7 @@ import { TaskGrouper, type GroupingOptions } from "./task-grouper.js";
 import { BatchExecutor, type LLMCaller } from "./batch-executor.js";
 import { DeliveryReporter, type DeliveryReport } from "./delivery-reporter.js";
 import { ComplexityScorer } from "./complexity-scorer.js";
+import { beginTracking, collectTrackedFiles, clearTracking } from "./file-tracker.js";
 
 /**
  * 任务分解协调器
@@ -54,8 +55,9 @@ export class Orchestrator {
       provider: "openai",
       model: "gpt-4",
     };
-    this.llmDecomposer = new LLMTaskDecomposer(llmConfig);
-    this.qualityReviewer = new QualityReviewer(llmConfig);
+    // 🔧 透传 LLMCaller 给 LLMTaskDecomposer 和 QualityReviewer
+    this.llmDecomposer = new LLMTaskDecomposer(llmConfig, llmCaller);
+    this.qualityReviewer = new QualityReviewer(llmConfig, llmCaller);
     this.taskAdjuster = new TaskAdjuster(this.taskTreeManager);
     
     // 🆕 初始化批量执行组件
@@ -182,6 +184,9 @@ export class Orchestrator {
       // 创建检查点
       await this.taskTreeManager.createCheckpoint(taskTree);
 
+      // 🔧 开始文件追踪（在任务执行前启动，收集 write 工具的文件产出）
+      beginTracking(subTask.id);
+
       // 执行任务（带重试）
       const output = await this.retryManager.executeWithRetry(
         subTask,
@@ -193,6 +198,21 @@ export class Orchestrator {
       subTask.output = output;
       subTask.completedAt = Date.now();
       await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "completed");
+
+      // 🔧 收集文件追踪结果，写入 metadata.producedFiles
+      const trackedFiles = collectTrackedFiles(subTask.id);
+      if (trackedFiles.length > 0) {
+        if (!subTask.metadata) {
+          subTask.metadata = {};
+        }
+        subTask.metadata.producedFiles = trackedFiles.map(f => f.fileName);
+        // 🆕 同时保存完整的文件路径映射（用于 mergeTaskOutputs 精准定位）
+        subTask.metadata.producedFilePaths = trackedFiles.map(f => f.filePath);
+        console.log(
+          `[Orchestrator] 📂 收集到 ${trackedFiles.length} 个文件产出: ` +
+          trackedFiles.map(f => f.fileName).join(", ")
+        );
+      }
 
       // 🆕 自动触发质量评估
       if (taskTree.qualityReviewEnabled !== false) {
@@ -342,6 +362,9 @@ export class Orchestrator {
         },
         taskTree.id,
       );
+
+      // 🔧 异常时清理文件追踪
+      clearTracking(subTask.id);
 
       console.error(`[Orchestrator] ❌ Sub task failed: ${subTask.id} - ${error.message}`);
       throw error;
@@ -984,10 +1007,32 @@ ${childOutputs.join("\n\n---\n\n")}
   ): Promise<boolean> {
     if (!this.fileManager) {
       console.warn(`[Orchestrator] ⚠️ FileManager 未初始化，跳过文件产出验证`);
-      return true; // 如果 FileManager 未初始化，假设验证通过
+      return true;
     }
 
-    // 1. 检查任务目录下的 artifacts 目录
+    // 🔧 策略 1（优先）：检查文件追踪器已记录的路径
+    // collectTrackedFiles 在此之前已经把精确路径写入了 metadata，
+    // 如果有数据则直接信任，**不可覆写**。
+    if (subTask.metadata?.producedFilePaths && subTask.metadata.producedFilePaths.length > 0) {
+      const { stat } = await import("node:fs/promises");
+      let existCount = 0;
+      for (const fp of subTask.metadata.producedFilePaths) {
+        try {
+          await stat(fp);
+          existCount++;
+        } catch {
+          console.warn(`[Orchestrator] ⚠️ 追踪文件不存在: ${fp}`);
+        }
+      }
+      if (existCount > 0) {
+        console.log(
+          `[Orchestrator] ✅ 文件追踪器验证通过: ${existCount}/${subTask.metadata.producedFilePaths.length} 个文件存在`,
+        );
+        return true;
+      }
+    }
+
+    // 🔧 策略 2（兜底）：检查 artifacts 目录
     const { join } = await import("node:path");
     const { readdir } = await import("node:fs/promises");
     
@@ -1001,7 +1046,6 @@ ${childOutputs.join("\n\n---\n\n")}
     try {
       const files = await readdir(artifactsDir);
       
-      // 过滤掉隐藏文件和临时文件
       const validFiles = files.filter(file => 
         !file.startsWith(".") && 
         !file.endsWith(".tmp") &&
@@ -1013,24 +1057,32 @@ ${childOutputs.join("\n\n---\n\n")}
       );
 
       if (validFiles.length > 0) {
-        console.log(`[Orchestrator] ✅ 任务 ${subTask.id} 产生了 ${validFiles.length} 个文件：${validFiles.join(", ")}`);
+        console.log(`[Orchestrator] ✅ 任务 ${subTask.id} 在 artifacts 中产生了 ${validFiles.length} 个文件：${validFiles.join(", ")}`);
         
-        // 🆕 将文件列表记录到任务元数据
+        // 🔧 仅在追踪器未记录时才补充（避免覆写追踪器的精确数据）
         if (!subTask.metadata) {
           subTask.metadata = {};
         }
-        subTask.metadata.producedFiles = validFiles;
+        if (!subTask.metadata.producedFiles || subTask.metadata.producedFiles.length === 0) {
+          subTask.metadata.producedFiles = validFiles;
+        }
         
         return true;
       }
-
-      console.warn(`[Orchestrator] ⚠️ 任务 ${subTask.id} 未产生文件输出`);
-      return false;
-    } catch (err) {
-      // artifacts 目录不存在，说明没有文件产出
-      console.warn(`[Orchestrator] ⚠️ 任务 ${subTask.id} 的 artifacts 目录不存在`);
-      return false;
+    } catch {
+      // artifacts 目录不存在，继续下一个策略
     }
+
+    // 🔧 策略 3：检查任务输出文本长度（LLM 直接在回复中写了完整内容）
+    if (subTask.output && subTask.output.length > 500) {
+      console.log(
+        `[Orchestrator] ✅ 任务 ${subTask.id} 有 ${subTask.output.length} 字符的文本输出，视为有效产出`,
+      );
+      return true;
+    }
+
+    console.warn(`[Orchestrator] ⚠️ 任务 ${subTask.id} 未产生任何文件或有效文本输出`);
+    return false;
   }
 
   /**

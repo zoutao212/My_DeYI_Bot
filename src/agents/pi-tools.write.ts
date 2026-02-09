@@ -3,6 +3,14 @@ import path from "node:path";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { AnyAgentTool } from "./pi-tools.types.js";
 import { patchToolSchemaForClaudeCompatibility, normalizeToolParams } from "./pi-tools.read.js";
+import {
+  type SupportedEncoding,
+  encodeString,
+  decodeBuffer,
+  isEncodingSupported,
+  getEncodingDescription,
+} from "./intelligent-task-decomposition/encoding-utils.js";
+import { trackFileWrite } from "./intelligent-task-decomposition/file-tracker.js";
 
 /**
  * Enhanced write tool with multiple modes:
@@ -10,10 +18,17 @@ import { patchToolSchemaForClaudeCompatibility, normalizeToolParams } from "./pi
  * - append: Append to end of file
  * - insert: Insert at specific line
  * - replace: Replace line range
+ *
+ * 编码支持（已修复 GBK 乱码 Bug）：
+ * - utf-8 / utf8：标准 UTF-8
+ * - utf-8-bom：带 BOM 的 UTF-8（Windows 友好，推荐中文文件使用）
+ * - gbk / gb2312：中文 GBK 编码（通过 iconv-lite 实现真正的 GBK 写入）
+ * - big5：繁体中文 Big5 编码
+ * - shift_jis：日文 Shift_JIS 编码
+ * - ascii / latin1：基础编码
  */
 
 type WriteMode = "overwrite" | "append" | "insert" | "replace";
-type SupportedEncoding = "utf-8" | "utf8" | "gbk" | "gb2312" | "ascii" | "latin1";
 
 async function ensureParentDir(filePath: string): Promise<void> {
   const dir = path.dirname(filePath);
@@ -22,7 +37,8 @@ async function ensureParentDir(filePath: string): Promise<void> {
 
 async function readFileLines(filePath: string, encoding: SupportedEncoding = "utf-8"): Promise<string[]> {
   try {
-    const content = await fs.promises.readFile(filePath, { encoding: encoding as BufferEncoding });
+    const buffer = await fs.promises.readFile(filePath);
+    const content = decodeBuffer(buffer, encoding);
     return content.split("\n");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
@@ -32,9 +48,14 @@ async function readFileLines(filePath: string, encoding: SupportedEncoding = "ut
   }
 }
 
+async function writeFileContent(filePath: string, content: string, encoding: SupportedEncoding = "utf-8"): Promise<void> {
+  const buffer = encodeString(content, encoding);
+  await fs.promises.writeFile(filePath, buffer);
+}
+
 async function writeFileLines(filePath: string, lines: string[], encoding: SupportedEncoding = "utf-8"): Promise<void> {
   const content = lines.join("\n");
-  await fs.promises.writeFile(filePath, content, { encoding: encoding as BufferEncoding });
+  await writeFileContent(filePath, content, encoding);
 }
 
 export function createEnhancedWriteTool(baseTool: AnyAgentTool): AnyAgentTool {
@@ -78,7 +99,8 @@ export function createEnhancedWriteTool(baseTool: AnyAgentTool): AnyAgentTool {
   // Add encoding parameter
   properties.encoding = {
     type: "string",
-    description: "File encoding (default: utf-8)",
+    description: "File encoding. Supported: utf-8 (default), utf-8-bom (Windows friendly), gbk, gb2312, big5, shift_jis, ascii, latin1",
+    enum: ["utf-8", "utf-8-bom", "gbk", "gb2312", "big5", "shift_jis", "ascii", "latin1"],
   };
   
   // Add createDirs parameter
@@ -128,8 +150,14 @@ export function createEnhancedWriteTool(baseTool: AnyAgentTool): AnyAgentTool {
       const position = typeof record.position === "number" ? record.position : undefined;
       const startLine = typeof record.startLine === "number" ? record.startLine : undefined;
       const endLine = typeof record.endLine === "number" ? record.endLine : undefined;
-      const encoding = (typeof record.encoding === "string" ? record.encoding : "utf-8") as SupportedEncoding;
+      const rawEncoding = typeof record.encoding === "string" ? record.encoding : "utf-8";
       const createDirs = typeof record.createDirs === "boolean" ? record.createDirs : true;
+      
+      // 验证编码是否支持
+      if (!isEncodingSupported(rawEncoding)) {
+        console.warn(`[write] ⚠️ 不支持的编码 "${rawEncoding}"，回退到 UTF-8`);
+      }
+      const encoding = rawEncoding as SupportedEncoding;
       
       // Validate mode-specific parameters
       if (mode === "insert" && position === undefined) {
@@ -155,15 +183,16 @@ export function createEnhancedWriteTool(baseTool: AnyAgentTool): AnyAgentTool {
         switch (mode) {
           case "overwrite": {
             // Default behavior: overwrite entire file
-            await fs.promises.writeFile(filePath, content, { encoding: encoding as BufferEncoding });
-            resultMessage = `File written successfully (overwrite mode): ${filePath}`;
+            await writeFileContent(filePath, content, encoding);
+            resultMessage = `File written successfully (overwrite mode, ${getEncodingDescription(encoding)}): ${filePath}`;
             break;
           }
           
           case "append": {
-            // Append to end of file
-            await fs.promises.appendFile(filePath, content, { encoding: encoding as BufferEncoding });
-            resultMessage = `Content appended successfully: ${filePath}`;
+            // Append to end of file — 需要用 Buffer 拼接而非原生 appendFile
+            const appendBuffer = encodeString(content, encoding);
+            await fs.promises.appendFile(filePath, appendBuffer);
+            resultMessage = `Content appended successfully (${getEncodingDescription(encoding)}): ${filePath}`;
             break;
           }
           
@@ -209,6 +238,10 @@ export function createEnhancedWriteTool(baseTool: AnyAgentTool): AnyAgentTool {
           }
         }
         
+        // 追踪文件写入（用于任务系统的文件产出收集）
+        const fileSize = fs.statSync(filePath).size;
+        trackFileWrite(filePath, fileSize, encoding);
+        
         return {
           content: [
             {
@@ -216,7 +249,7 @@ export function createEnhancedWriteTool(baseTool: AnyAgentTool): AnyAgentTool {
               text: resultMessage,
             },
           ],
-          details: { filePath, mode, encoding },
+          details: { filePath, mode, encoding, fileSize },
         } satisfies AgentToolResult<unknown>;
         
       } catch (err) {
