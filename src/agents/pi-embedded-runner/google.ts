@@ -779,13 +779,13 @@ export async function sanitizeSessionHistory(params: {
     
     if (msg.role === "assistant") {
       const contentType = msg.content === null ? "null" : Array.isArray(msg.content) ? `array(${msg.content.length})` : typeof msg.content;
-      log.info(`[sanitize] message[${i}]: role=assistant, content=${contentType}`);
+      log.debug(`[sanitize] message[${i}]: role=assistant, content=${contentType}`);
       if (msg.content === null) {
         msg.content = [] as never; // Empty array for assistant messages with only tool_calls
         fixedCount++;
         log.info(`✓ Fixed assistant.content: null → [] (message index: ${i}, sessionId: ${params.sessionId})`);
       } else if (Array.isArray(msg.content) && msg.content.length === 0) {
-        log.info(`[sanitize] message[${i}]: content is already empty array (good!)`);
+        log.debug(`[sanitize] message[${i}]: content is already empty array (good!)`);
       }
     }
     
@@ -823,11 +823,11 @@ export async function sanitizeSessionHistory(params: {
       });
       
       toolResultCount++;
-      log.info(`✓ Converted toolResult → tool: name="${toolName}", index=${i}, sessionId=${params.sessionId}`);
+      log.debug(`✓ Converted toolResult → tool: name="${toolName}", index=${i}, sessionId=${params.sessionId}`);
     }
   }
   if (fixedCount === 0) {
-    log.info(`[sanitize] No null content found in ${params.messages.length} messages (sessionId: ${params.sessionId})`);
+    log.debug(`[sanitize] No null content found in ${params.messages.length} messages (sessionId: ${params.sessionId})`);
   }
   if (toolResultCount > 0) {
     log.info(`[sanitize] Converted ${toolResultCount} toolResult messages to OpenAI format (sessionId: ${params.sessionId})`);

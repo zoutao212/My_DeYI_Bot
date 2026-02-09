@@ -258,19 +258,52 @@ export class Orchestrator {
             }
             break;
 
-          case "restart":
-            console.log(`[Orchestrator] 🔄 质量不满意，需要重新执行`);
-            await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
-            subTask.retryCount++;
-            result.needsRequeue = true;
+          case "restart": {
+            const maxQualityRestarts = 3;
+            const currentRetry = subTask.retryCount ?? 0;
+            if (currentRetry >= maxQualityRestarts) {
+              // 🔧 P9 熔断：超过最大重试次数，降级为 overthrow 防止无限循环
+              console.warn(
+                `[Orchestrator] ⚠️ 子任务 ${subTask.id} 已重试 ${currentRetry} 次（上限 ${maxQualityRestarts}），` +
+                `降级为 overthrow 防止无限循环`,
+              );
+              await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
+              subTask.error = `质量重试超限 (${currentRetry}/${maxQualityRestarts})：${review.findings.join("; ")}`;
+              result.decision = "overthrow";
+              result.markedFailed = true;
+            } else {
+              console.log(`[Orchestrator] 🔄 质量不满意，重新执行 (${currentRetry + 1}/${maxQualityRestarts})`);
+              await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
+              subTask.retryCount = currentRetry + 1;
+              result.needsRequeue = true;
+            }
             break;
+          }
 
-          case "overthrow":
-            console.log(`[Orchestrator] ❌ 质量严重不满意，标记失败`);
-            await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
-            subTask.error = `质量评估严重不通过：${review.findings.join("; ")}`;
-            result.markedFailed = true;
+          case "overthrow": {
+            // 🔧 P9 改进：首次 overthrow 降级为 restart（给一次重试机会）
+            // 只有连续第 2 次 overthrow 才真正标记 failed，防止单次质量偏差导致整个轮次被级联丢弃
+            const overthrowCount = (subTask.metadata?.overthrowCount ?? 0) + 1;
+            if (!subTask.metadata) subTask.metadata = {};
+            subTask.metadata.overthrowCount = overthrowCount;
+
+            if (overthrowCount <= 1) {
+              console.log(
+                `[Orchestrator] ⚠️ 质量严重不满意（第 ${overthrowCount} 次），降级为 restart 给予重试机会`,
+              );
+              await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
+              subTask.retryCount = (subTask.retryCount ?? 0) + 1;
+              subTask.error = `质量评估 overthrow → 降级 restart (${overthrowCount}/2)：${review.findings.join("; ")}`;
+              result.decision = "restart";
+              result.needsRequeue = true;
+            } else {
+              console.log(`[Orchestrator] ❌ 质量连续 ${overthrowCount} 次严重不满意，标记失败`);
+              await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
+              subTask.error = `质量评估连续 overthrow (${overthrowCount} 次)：${review.findings.join("; ")}`;
+              result.markedFailed = true;
+            }
             break;
+          }
         }
       } catch (err) {
         console.warn(`[Orchestrator] ⚠️ 子任务质量评估失败，默认通过:`, err);
@@ -550,7 +583,7 @@ export class Orchestrator {
 
       // 更新错误信息和状态
       subTask.error = error.message;
-      subTask.retryCount++;
+      subTask.retryCount = (subTask.retryCount ?? 0) + 1;
       await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
 
       // 🆕 记录失败到文件系统
@@ -898,8 +931,11 @@ export class Orchestrator {
 
     // 🔧 检查是否有其他轮次的 pending/active 任务
     // 如果有，不能把整棵树标记为 completed，否则 drain Guard A/B 会误杀新任务
+    // 🔧 P8 修复：排除 isSummaryTask（根汇总占位符），否则它永远 pending 阻止树终结
     const otherPendingCount = taskTree.subTasks.filter(
-      (t) => t.rootTaskId !== rootTaskId && (t.status === "pending" || t.status === "active"),
+      (t) => t.rootTaskId !== rootTaskId
+        && !t.metadata?.isSummaryTask
+        && (t.status === "pending" || t.status === "active"),
     ).length;
 
     if (otherPendingCount > 0) {
@@ -1207,44 +1243,25 @@ export class Orchestrator {
         continue;
       }
 
-      // 🆕 2. 如果是根任务，检查所有非根任务是否完成
-      if (subTask.metadata?.isRootTask) {
+      // 🔧 P8 修复：根/汇总任务跳过 LLM 执行路径
+      // 合并输出由 onRoundCompleted → FileManager.mergeTaskOutputs() 系统路径处理，
+      // 避免将所有子输出灌入 prompt 浪费 token + 产生幻觉
+      if (subTask.metadata?.isRootTask && subTask.metadata?.isSummaryTask) {
         const allNonRootTasksCompleted = taskTree.subTasks
-          .filter(t => !t.metadata?.isRootTask)
-          .every(t => t.status === "completed");
+          .filter(t => !t.metadata?.isRootTask && !t.metadata?.isSummaryTask)
+          .every(t => t.status === "completed" || t.status === "failed");
 
         if (!allNonRootTasksCompleted) {
-          console.log(`[Orchestrator] ⏳ Root task waiting for all sub-tasks to complete`);
+          console.log(`[Orchestrator] ⏳ Root summary task waiting for all sub-tasks to complete`);
           continue;
         }
 
-        // 🆕 3. 收集所有子任务的输出
-        const childOutputs = taskTree.subTasks
-          .filter(t => !t.metadata?.isRootTask && t.output && t.output.length > 0)
-          .map(t => `### ${t.summary}\n\n${t.output}`);
-
-        if (childOutputs.length > 0) {
-          console.log(`[Orchestrator] 📥 Injecting ${childOutputs.length} child outputs into root task`);
-          
-          // 🆕 4. 修改根任务的 prompt，添加汇总指令
-          subTask.prompt = `${subTask.prompt}
-
-## 子任务输出
-
-以下是所有子任务的输出结果，请将它们汇总整合为一个完整的、连贯的最终产物：
-
-${childOutputs.join("\n\n---\n\n")}
-
-## 汇总要求
-
-1. **整合内容**: 将所有子任务的输出整合为一个完整的文档
-2. **保持连贯**: 确保内容逻辑连贯，过渡自然
-3. **统一风格**: 统一文风、格式和术语
-4. **生成文件**: 将最终产物保存为 txt 或 md 文件
-5. **质量检查**: 确保内容完整、准确、符合要求
-
-请立即执行汇总任务，并生成最终交付文件。`;
-        }
+        // 所有子任务已完成，直接标记根任务为 completed（系统合并路径处理实际输出）
+        subTask.status = "completed";
+        subTask.completedAt = Date.now();
+        subTask.output = "[SystemMerge] 合并输出由 onRoundCompleted 系统路径处理";
+        console.log(`[Orchestrator] � P8: Root summary task ${subTask.id} 跳过 LLM，直接标记 completed（系统合并路径处理）`);
+        continue; // 不加入 executableTasks
       }
 
       // 2. 检查依赖关系（所有依赖的任务都必须已完成）
@@ -2230,11 +2247,11 @@ ${childOutputs.join("\n\n---\n\n")}
     const isRetryable = this.isRetryableError(error);
     const maxRetries = 3;
 
-    if (isRetryable && subTask.retryCount < maxRetries) {
+    if (isRetryable && (subTask.retryCount ?? 0) < maxRetries) {
       // 可重试：标记 pending + retryCount++
       subTask.status = "pending";
       subTask.error = message;
-      subTask.retryCount++;
+      subTask.retryCount = (subTask.retryCount ?? 0) + 1;
       await this.taskTreeManager.save(taskTree);
       console.log(
         `[Orchestrator] 🔄 onTaskFailed: ${subTask.id} retryable, attempt ${subTask.retryCount}/${maxRetries}`,

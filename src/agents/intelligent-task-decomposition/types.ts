@@ -582,6 +582,9 @@ export interface SubTaskMetadata {
   fallbackReason?: string;
   
   // 🆕 质量评估相关字段
+
+  /** overthrow 累计次数（首次降级为 restart，连续 2 次才真正 failed） */
+  overthrowCount?: number;
   
   /** 质量评估结果（子任务完成后由 QualityReviewer 填充） */
   qualityReview?: {

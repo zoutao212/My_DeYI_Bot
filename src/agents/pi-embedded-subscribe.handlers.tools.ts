@@ -294,4 +294,57 @@ export function handleToolExecutionEnd(
       ctx.emitToolOutput(toolName, meta, outputText);
     }
   }
+
+  // ── 工具调用熔断器：防止 LLM 无限重试返回软失败的工具（如 send_file） ──
+  // 检测软失败：工具返回 { success: false } 的 JSON 结果（isError=false）
+  const isSoftFailure = detectToolSoftFailure(result);
+  const cb = ctx.state.toolCircuitBreaker;
+  if (isToolError || isSoftFailure) {
+    if (cb.lastToolName === toolName) {
+      cb.consecutiveFailures += 1;
+    } else {
+      cb.lastToolName = toolName;
+      cb.consecutiveFailures = 1;
+    }
+  } else {
+    // 成功调用，重置熔断器
+    cb.lastToolName = null;
+    cb.consecutiveFailures = 0;
+  }
+
+  const TOOL_CIRCUIT_BREAKER_THRESHOLD = 3;
+  if (cb.consecutiveFailures >= TOOL_CIRCUIT_BREAKER_THRESHOLD) {
+    ctx.log.warn(
+      `[CircuitBreaker] 工具 "${toolName}" 连续失败 ${cb.consecutiveFailures} 次，触发熔断，abort session。` +
+      ` runId=${ctx.params.runId}`,
+    );
+    void ctx.params.session.abort();
+  }
+}
+
+/**
+ * 检测工具返回的"软失败"：JSON 结果中 success === false。
+ * 这类结果 pi-agent-core 不视为错误（isError=false），但 LLM 可能无限重试。
+ */
+function detectToolSoftFailure(result: unknown): boolean {
+  if (!result || typeof result !== "object") return false;
+  const record = result as Record<string, unknown>;
+  // jsonResult() 把 payload 放在 details 字段
+  const details = record.details;
+  if (details && typeof details === "object") {
+    return (details as Record<string, unknown>).success === false;
+  }
+  // 兜底：检查 content[0].text 中的 JSON
+  const content = Array.isArray(record.content) ? record.content : null;
+  if (!content || content.length === 0) return false;
+  const first = content[0];
+  if (!first || typeof first !== "object") return false;
+  const text = (first as Record<string, unknown>).text;
+  if (typeof text !== "string") return false;
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    return parsed.success === false;
+  } catch {
+    return false;
+  }
 }

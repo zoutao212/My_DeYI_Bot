@@ -187,7 +187,8 @@ export function createSendFileTool(options: {
         if (!currentFollowupRun) {
           return jsonResult({
             success: false,
-            error: "无法获取会话信息（系统内部错误）",
+            status: "error",
+            error: `无法获取会话上下文（系统内部错误）。⚠️ 这是不可恢复的系统错误，重复调用 send_file 不会解决此问题。请勿重试，改为告知用户文件已保存到本地路径：${resolvedPath}`,
           });
         }
 
@@ -198,25 +199,15 @@ export function createSendFileTool(options: {
           originatingThreadId,
         } = currentFollowupRun;
 
-        if (!originatingChannel || !originatingTo) {
-          return jsonResult({
-            success: false,
-            error: "无法获取频道信息（系统内部错误）",
-          });
-        }
-
-        // 7. 检查文件大小限制
-        const maxSize =
-          MAX_FILE_SIZE[originatingChannel as keyof typeof MAX_FILE_SIZE];
-        if (maxSize && fileSize > maxSize) {
-          return jsonResult({
-            success: false,
-            error: `文件太大（${formatFileSize(fileSize)}），超过 ${originatingChannel} 的限制（${formatFileSize(maxSize)}）`,
-          });
-        }
-
-        // 8. 根据频道类型发送文件
+        // 🔧 P14 修复：webchat 频道不需要 originatingTo，提前处理
         if (originatingChannel === "webchat") {
+          const maxSize = MAX_FILE_SIZE.web;
+          if (maxSize && fileSize > maxSize) {
+            return jsonResult({
+              success: false,
+              error: `文件太大（${formatFileSize(fileSize)}），超过 webchat 的限制（${formatFileSize(maxSize)}）。⚠️ 这是系统限制，请勿重试此操作。`,
+            });
+          }
           // Web 网关：返回文件元信息，前端通过 chat.file.download 接口获取内容
           const mimeType = resolveMimeType(ext);
           return jsonResult({
@@ -241,7 +232,28 @@ export function createSendFileTool(options: {
           });
         }
 
-        // 需要实际发送的频道，读取文件内容
+        // 🔧 P15 修复：非 webchat 频道需要 originatingTo
+        if (!originatingChannel || !originatingTo) {
+          return jsonResult({
+            success: false,
+            status: "error",
+            error: `无法获取频道路由信息（originatingChannel=${originatingChannel ?? "空"}, originatingTo=${originatingTo ?? "空"}）。` +
+              `这是系统内部配置问题，重复调用 send_file 不会解决此问题。⚠️ 请勿重试，改为告知用户文件已保存到本地路径：${resolvedPath}`,
+          });
+        }
+
+        // 7. 检查文件大小限制
+        const maxSize =
+          MAX_FILE_SIZE[originatingChannel as keyof typeof MAX_FILE_SIZE];
+        if (maxSize && fileSize > maxSize) {
+          return jsonResult({
+            success: false,
+            status: "error",
+            error: `文件太大（${formatFileSize(fileSize)}），超过 ${originatingChannel} 的限制（${formatFileSize(maxSize)}）。⚠️ 这是系统限制，请勿重试此操作。改为告知用户文件已保存到本地路径：${resolvedPath}`,
+          });
+        }
+
+        // 8. 根据频道类型发送文件（需要实际发送的频道）
         const fileBuffer = await readFile(resolvedPath);
 
         if (originatingChannel === "telegram") {
@@ -265,18 +277,21 @@ export function createSendFileTool(options: {
           // TODO: 实现 Discord 文件发送
           return jsonResult({
             success: false,
-            error: `暂不支持 ${originatingChannel} 频道的文件发送`,
+            status: "error",
+            error: `暂不支持 ${originatingChannel} 频道的文件发送。⚠️ 请勿重试，改为告知用户文件已保存到本地路径：${resolvedPath}`,
           });
         } else if (originatingChannel === "slack") {
           // TODO: 实现 Slack 文件发送
           return jsonResult({
             success: false,
-            error: `暂不支持 ${originatingChannel} 频道的文件发送`,
+            status: "error",
+            error: `暂不支持 ${originatingChannel} 频道的文件发送。⚠️ 请勿重试，改为告知用户文件已保存到本地路径：${resolvedPath}`,
           });
         } else {
           return jsonResult({
             success: false,
-            error: `不支持的频道类型：${originatingChannel}`,
+            status: "error",
+            error: `不支持的频道类型：${originatingChannel}。⚠️ 请勿重试，改为告知用户文件已保存到本地路径：${resolvedPath}`,
           });
         }
       } catch (err) {

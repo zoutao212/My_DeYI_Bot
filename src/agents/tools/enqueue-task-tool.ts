@@ -290,8 +290,11 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
         let taskTree = await globalOrchestrator.loadTaskTree(targetSessionId);
         if (!taskTree) {
           // 第一次调用 enqueue_task，初始化任务树
+          // 🔧 P17 修复：rootTask 应是用户原始请求，而非第一个子任务的 prompt
+          // isNewRootTask=true 时 prompt 是第一个子任务的参数（如"创作第1章"），
+          // 用户原始消息在 currentFollowupRun.prompt 中（如"创作完整长篇小说"）
           const rootTaskPrompt = isNewRootTask 
-            ? prompt // 新根任务：使用当前 prompt 作为根任务
+            ? (currentFollowupRun.prompt || prompt) // 新根任务：优先用用户原始消息
             : currentFollowupRun.prompt; // 子任务：使用原始用户消息作为根任务
           
           taskTree = await globalOrchestrator.initializeTaskTree(
@@ -331,9 +334,12 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
         }
 
         // 🆕 V2: 确保 Round 对象存在（幂等操作：已存在则复用，不存在则创建）
-        // Round.goal 使用用户原始 prompt 或 summary，作为质量评审的对比基准
+        // 🔧 P16 修复：Round.goal 必须使用用户原始请求，而非第一个子任务的摘要
+        // isNewRootTask=true 时 summary/prompt 是第一个子任务的参数，
+        // 用户原始消息在 currentFollowupRun.prompt 中
+        const userOriginalPrompt = currentFollowupRun.prompt?.substring(0, 300) || currentFollowupRun.summaryLine;
         const roundGoal = isNewRootTask
-          ? (summary || prompt.substring(0, 200))   // 新根任务：用 summary 或 prompt 截断
+          ? (userOriginalPrompt || summary || prompt.substring(0, 200))   // 新根任务：优先用用户原始消息
           : (currentFollowupRun.summaryLine || currentFollowupRun.prompt?.substring(0, 200) || prompt.substring(0, 200));  // 子任务：用原始用户消息
         globalOrchestrator.getOrCreateRound(taskTree, rootTaskId, roundGoal);
 

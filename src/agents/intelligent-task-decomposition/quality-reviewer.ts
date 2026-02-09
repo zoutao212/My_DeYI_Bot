@@ -500,6 +500,11 @@ ${prompts.completionReview.aspectsTitle}
 
 ${aspectsStr}
 
+⚠️ 决策指引（overthrow vs restart）：
+- "overthrow"（推翻）仅用于任务本身不可能完成的结构性错误（如需求矛盾、技术上不可行）。
+- 如果输出存在风格偏差（如出现不合时代/世界观的元素、语气不当、角色人格泄露导致的不当内容），应使用 "restart"（重新执行），因为这类问题在重试时通常可以修正。
+- 只评估子任务自身的输出质量，不要因为输出风格与你的偏好不同就判定 overthrow。
+
 ${prompts.jsonFormatInstruction}
 
 \`\`\`json

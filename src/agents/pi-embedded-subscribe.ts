@@ -65,6 +65,10 @@ export function subscribeEmbeddedPiSession(params: SubscribeEmbeddedPiSessionPar
     messagingToolSentTargets: [],
     pendingMessagingTexts: new Map(),
     pendingMessagingTargets: new Map(),
+    toolCircuitBreaker: {
+      lastToolName: null,
+      consecutiveFailures: 0,
+    },
   };
 
   const assistantTexts = state.assistantTexts;

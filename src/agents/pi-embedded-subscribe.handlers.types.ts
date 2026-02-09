@@ -58,6 +58,12 @@ export type EmbeddedPiSubscribeState = {
   messagingToolSentTargets: MessagingToolSend[];
   pendingMessagingTexts: Map<string, string>;
   pendingMessagingTargets: Map<string, MessagingToolSend>;
+
+  /** 工具调用熔断器：追踪同名工具连续软失败次数，防止 LLM 无限重试 */
+  toolCircuitBreaker: {
+    lastToolName: string | null;
+    consecutiveFailures: number;
+  };
 };
 
 export type EmbeddedPiSubscribeContext = {

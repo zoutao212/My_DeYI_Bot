@@ -39,6 +39,51 @@ import { deriveExecutionRole, createExecutionContext } from "../../agents/intell
 import type { SubTask, TaskTree, ExecutionContext } from "../../agents/intelligent-task-decomposition/types.js";
 import type { Orchestrator } from "../../agents/intelligent-task-decomposition/orchestrator.js";
 
+// ── P10: 输出验证门（OutputValidator）──
+// 规则驱动，零 LLM 调用。在标记 completed 之前拦截明显无效输出。
+type OutputFailureCode = "hallucinated_tool_calls" | "output_too_short" | "context_overflow_signal";
+interface OutputValidationResult {
+  valid: boolean;
+  failureCode?: OutputFailureCode;
+  failureReason?: string;
+  suggestedAction?: "retry" | "skip";
+}
+
+function validateSubTaskOutput(
+  outputText: string,
+  toolMetas: Array<{ toolName: string; [k: string]: unknown }>,
+): OutputValidationResult {
+  // 规则 1：检测 LLM 把 tool call 幻觉为纯文本
+  const hallucinationPatterns = [
+    /\[Historical context:.*called tool/i,
+    /Do not mimic this format.*use proper function calling/i,
+    /a different model called tool/i,
+  ];
+  if (hallucinationPatterns.some((p) => p.test(outputText))) {
+    return {
+      valid: false,
+      failureCode: "hallucinated_tool_calls",
+      failureReason: "LLM 将 tool call 幻觉为纯文本输出，非真实工具调用",
+      suggestedAction: "retry",
+    };
+  }
+
+  // 规则 2：上下文溢出信号 — 输出极短且无文件工具调用
+  const FILE_TOOLS = new Set(["write", "send_file", "read", "exec"]);
+  const usedAnyTool = toolMetas.some((m) => FILE_TOOLS.has(m.toolName));
+  if (!usedAnyTool && outputText.length < 200 && outputText.length > 0) {
+    // 极短输出 + 无工具调用 = 疑似上下文溢出
+    return {
+      valid: false,
+      failureCode: "context_overflow_signal",
+      failureReason: `输出仅 ${outputText.length} 字符且无工具调用，疑似上下文溢出`,
+      suggestedAction: "retry",
+    };
+  }
+
+  return { valid: true };
+}
+
 /**
  * 判断错误是否可重试
  */
@@ -476,6 +521,41 @@ export function createFollowupRunner(params: {
         if (taskTree && subTask) {
           const payloadArray = runResult.payloads ?? [];
           const outputText = payloadArray.map((p) => p.text).filter(Boolean).join("\n");
+
+          // 🆕 P10: 输出验证门 — 在标记 completed 之前拦截明显无效输出
+          const validation = validateSubTaskOutput(outputText, runResult.toolMetas ?? []);
+          if (!validation.valid) {
+            console.warn(
+              `[followup-runner] ⚠️ OutputValidator 拦截: ${validation.failureCode} — ${validation.failureReason}`,
+            );
+            subTask.output = outputText;
+            subTask.status = "failed";
+            subTask.error = `OutputValidator: ${validation.failureReason}`;
+            subTask.retryCount = (subTask.retryCount ?? 0) + 1;
+
+            // 收集并清理文件追踪
+            collectTrackedFiles(subTask.id);
+            await orchestrator.saveTaskTree(taskTree);
+
+            // 如果建议重试且重试次数未超限，重新入队
+            if (validation.suggestedAction === "retry" && subTask.retryCount < 3) {
+              subTask.status = "pending";
+              await orchestrator.saveTaskTree(taskTree);
+              console.log(
+                `[followup-runner] 🔄 OutputValidator 建议重试 (${subTask.retryCount}/3)`,
+              );
+              if (queued.run.sessionKey) {
+                finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
+              }
+              return;
+            }
+            // 否则标记失败，继续处理下一个任务
+            if (queued.run.sessionKey) {
+              finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
+            }
+            return;
+          }
+
           subTask.output = outputText;
           subTask.completedAt = Date.now();
           subTask.status = "completed";
@@ -522,6 +602,11 @@ export function createFollowupRunner(params: {
                 `[followup-runner] ❌ 子任务 ${subTask.id} 质量严重不通过 (overthrow): ` +
                 `${JSON.stringify(postResult.findings)}`,
               );
+              // 🔧 即使当前子任务被 overthrow，也要触发队列继续执行剩余兄弟任务
+              // 修复前：直接 return 导致队列停滞，drain 无法推进后续任务
+              if (queued.run.sessionKey) {
+                finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
+              }
               return;
             }
 
@@ -535,16 +620,35 @@ export function createFollowupRunner(params: {
               // 委托 onRoundCompleted 钩子：合并输出 + 交付报告
               const roundResult = await orchestrator.onRoundCompleted(taskTree, postResult.completedRoundId);
 
-              // 发送合并文件
+              // 发送合并文件 + 复制到用户工作目录
               if (roundResult.mergedFilePath) {
+                // 🆕 P8 临时措施：将系统合并文件复制到用户工作目录
+                let userCopyPath: string | undefined;
+                try {
+                  const wsDir = queued.run.workspaceDir;
+                  if (wsDir) {
+                    const outputDir = path.join(wsDir, "output");
+                    await fs.mkdir(outputDir, { recursive: true });
+                    // 从任务树目标生成语义化文件名
+                    const rootGoal = taskTree.rootTask?.substring(0, 30)?.replace(/[\\/:*?"<>|\n\r]/g, "_") ?? "output";
+                    const copyName = `${rootGoal}_完整版.txt`;
+                    userCopyPath = path.join(outputDir, copyName);
+                    await fs.copyFile(roundResult.mergedFilePath, userCopyPath);
+                    console.log(`[followup-runner] 📄 合并文件已复制到用户工作目录: ${userCopyPath}`);
+                  }
+                } catch (copyErr) {
+                  console.warn(`[followup-runner] ⚠️ 复制合并文件到工作目录失败（不阻塞）: ${copyErr}`);
+                }
+
                 const mergedSendResult = await sendFallbackFile({
                   filePath: roundResult.mergedFilePath,
                   caption: `📝 完整输出（子任务合并）`,
                   queued,
                 });
                 if (!mergedSendResult.ok) {
+                  const displayPath = userCopyPath ?? roundResult.mergedFilePath;
                   await sendFollowupPayloads([{
-                    text: `📝 子任务输出已合并保存到：\n${roundResult.mergedFilePath}`,
+                    text: `📝 子任务输出已合并保存到：\n${displayPath}`,
                   }], queued);
                 }
               }

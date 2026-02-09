@@ -197,12 +197,15 @@ export class TaskTreeManager {
     const allCompleted = scopedTasks.length > 0 && scopedTasks.every((t) => t.status === "completed");
     const anyFailed = scopedTasks.some((t) => t.status === "failed");
     const anyActive = scopedTasks.some((t) => t.status === "active");
+    const anyPending = scopedTasks.some((t) => t.status === "pending");
 
     if (allCompleted) {
       taskTree.status = "completed";
-    } else if (anyFailed) {
+    } else if (anyFailed && !anyActive && !anyPending) {
+      // 🔧 只在所有任务都已终结（无 pending/active）时才标记树为 failed
+      // 防止单个子任务失败导致整棵树被 drain.ts 级联丢弃，让其他兄弟任务继续执行
       taskTree.status = "failed";
-    } else if (anyActive) {
+    } else if (anyActive || anyPending) {
       taskTree.status = "active";
     }
 

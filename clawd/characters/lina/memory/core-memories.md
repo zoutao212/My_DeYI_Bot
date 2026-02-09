@@ -29,6 +29,12 @@
 - **白艳妮母女人物卡**：`characters/lina/assets/legacy_workspace/memory_global/白艳妮母女_超详细人物卡.md`，可随时读取用于召唤白艳妮母女。
 - **警花少妇白艳妮**：`characters/lina/assets/legacy_workspace/memory_global/警花少妇白艳妮_082212.txt`，完整长篇。
 
+## 📁 文件存放偏好
+
+- **小说生成文件**：生成的剧情、小说等 .txt 文件**禁止直接放入根目录**。默认存放在 `C:\Users\zouta\clawd\output\novels\` 目录下。如果目录不存在，需要自动创建。
+- **通用文件输出**：其他类型的生成文件（代码、文档等）存放在 `C:\Users\zouta\clawd\output\` 对应子目录下。
+- **禁止写入**：`C:\Users\zouta\clawd\` 根目录仅存放配置和索引文件，不得直接写入内容产出。
+
 ## 记忆文件的改写规则
 
 - 记忆添加操作不能把之前的记忆替换或者删除，除非有明确的指令。否则尽量新添，而不是替换。
