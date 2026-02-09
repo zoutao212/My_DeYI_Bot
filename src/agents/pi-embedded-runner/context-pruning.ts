@@ -14,6 +14,7 @@
  */
 
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { Round } from "../../agents/intelligent-task-decomposition/types.js";
 
 // ── 类型定义 ──
 
@@ -61,6 +62,8 @@ export interface ContextPruningOptions {
   ) => Promise<number>;
   /** 是否为队列任务（followup-runner 执行的子任务） */
   isQueueTask?: boolean;
+  /** 🆕 V2: Round 数据（有值时直接用 Round 边界，跳过启发式检测） */
+  rounds?: Round[];
 }
 
 // ── 核心函数 ──
@@ -89,8 +92,8 @@ export function pruneIrrelevantContext(
     };
   }
 
-  // Step 1: 检测任务边界，切分为段落
-  const segments = detectTaskSegments(messages);
+  // Step 1: 检测任务边界，切分为段落（🆕 V2: 优先使用 Round 数据）
+  const segments = detectTaskSegments(messages, options?.rounds);
 
   // 只有一个段落（或没有明确边界），不剪枝
   if (segments.length <= keepRecent) {
@@ -152,7 +155,13 @@ export function pruneIrrelevantContext(
  * 2. 用户消息中包含 [任务目标] 标记 → 被 limitHistoryTurns 插入的任务边界
  * 3. 大量 enqueue_task 调用后跟新的用户消息 → 任务切换
  */
-function detectTaskSegments(messages: AgentMessage[]): TaskSegment[] {
+function detectTaskSegments(messages: AgentMessage[], rounds?: Round[]): TaskSegment[] {
+  // 🆕 V2: 有 Round 数据时，直接用 Round 边界（精确，不需要启发式猜测）
+  if (rounds && rounds.length > 0) {
+    return detectTaskSegmentsFromRounds(messages, rounds);
+  }
+
+  // 向后兼容：无 Round 数据时回退到启发式规则检测
   const boundaries: number[] = [0]; // 第一个段落从 0 开始
 
   for (let i = 0; i < messages.length; i++) {
@@ -204,6 +213,87 @@ function detectTaskSegments(messages: AgentMessage[]): TaskSegment[] {
       estimatedTokens: estimateTokensForMessages(segmentMessages),
     });
   }
+
+  return segments;
+}
+
+// ── 🆕 V2: Round 数据驱动的边界检测 ──
+
+/**
+ * 使用 Round 元数据精确切分消息段落（V2 核心改进）
+ *
+ * 不再用正则/启发式猜任务边界，而是：
+ * 1. 按 Round.createdAt 时间戳将消息归属到对应 Round
+ * 2. Round 之间的间隙自动成为段落边界
+ * 3. Round.goal 直接作为 taskGoal（不再从消息中提取）
+ */
+function detectTaskSegmentsFromRounds(
+  messages: AgentMessage[],
+  rounds: Round[],
+): TaskSegment[] {
+  if (rounds.length === 0 || messages.length === 0) return [];
+
+  // 按创建时间排序
+  const sortedRounds = [...rounds].sort((a, b) => a.createdAt - b.createdAt);
+  const segments: TaskSegment[] = [];
+
+  // 为每个 Round 找到消息范围（基于时间戳）
+  for (let ri = 0; ri < sortedRounds.length; ri++) {
+    const round = sortedRounds[ri];
+    const nextRound = sortedRounds[ri + 1];
+
+    // 找到属于当前 Round 的消息范围
+    let startIdx = -1;
+    let endIdx = -1;
+
+    for (let mi = 0; mi < messages.length; mi++) {
+      const msgTime = messages[mi].timestamp ?? 0;
+      const afterRoundStart = msgTime >= round.createdAt;
+      const beforeNextRound = !nextRound || msgTime < nextRound.createdAt;
+
+      if (afterRoundStart && beforeNextRound) {
+        if (startIdx === -1) startIdx = mi;
+        endIdx = mi + 1;
+      }
+    }
+
+    // 没有找到消息的 Round 跳过
+    if (startIdx === -1) continue;
+
+    const segmentMessages = messages.slice(startIdx, endIdx);
+    segments.push({
+      startIndex: startIdx,
+      endIndex: endIdx,
+      taskGoal: round.goal || extractTaskGoalFromSegment(segmentMessages),
+      rootTaskId: round.id,
+      isCurrent: round.status === "active",
+      messageCount: endIdx - startIdx,
+      estimatedTokens: estimateTokensForMessages(segmentMessages),
+    });
+  }
+
+  // 如果 Round 之前有未归属的消息（Round 创建前的历史），归为第一个段落
+  if (segments.length > 0 && segments[0].startIndex > 0) {
+    const preMessages = messages.slice(0, segments[0].startIndex);
+    segments.unshift({
+      startIndex: 0,
+      endIndex: segments[0].startIndex,
+      taskGoal: extractTaskGoalFromSegment(preMessages),
+      rootTaskId: undefined,
+      isCurrent: false,
+      messageCount: segments[0].startIndex,
+      estimatedTokens: estimateTokensForMessages(preMessages),
+    });
+  }
+
+  // 如果没有段落被标记为 current，标记最后一个
+  if (segments.length > 0 && !segments.some((s) => s.isCurrent)) {
+    segments[segments.length - 1].isCurrent = true;
+  }
+
+  console.log(
+    `[context-pruning] 🆕 Round 数据驱动: ${segments.length} 个段落 (${rounds.length} Rounds)`,
+  );
 
   return segments;
 }

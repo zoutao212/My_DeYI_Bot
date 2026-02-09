@@ -64,6 +64,236 @@ export interface TaskTree {
   
   /** 任务批次列表 */
   batches?: TaskBatch[];
+  
+  // 🆕 V2: Round 支持（向后兼容，可选字段）
+
+  /** 轮次列表（V2 新增，按创建时间排序） */
+  rounds?: Round[];
+}
+
+// ========================================
+// 🆕 V2: Round — 任务轮次（一等公民）
+// ========================================
+
+/**
+ * 轮次状态
+ *
+ * active   → 有 pending/active 子任务
+ * completed→ 所有子任务 completed（且无 overthrow）
+ * failed   → 有子任务 failed 或被 overthrow
+ * cancelled→ 用户主动取消
+ */
+export type RoundStatus = "active" | "completed" | "failed" | "cancelled";
+
+/**
+ * 轮次质量评审摘要
+ */
+export interface RoundQualityReview {
+  /** 评审状态 */
+  status: QualityStatus;
+  /** 评审决策 */
+  decision: ReviewDecision;
+  /** 发现的问题 */
+  findings: string[];
+  /** 改进建议 */
+  suggestions: string[];
+  /** 评审时间 */
+  reviewedAt: number;
+}
+
+/**
+ * 任务轮次 — 用户一次请求产生的所有子任务的容器
+ *
+ * 替代散落在 SubTask 上的 rootTaskId 字段，
+ * 让"轮次"成为显式数据结构而非隐式标记。
+ */
+export interface Round {
+  /** 轮次 ID（替代散落在 SubTask 上的 rootTaskId） */
+  id: string;
+
+  /** 轮次目标（用户实际要做的事，质量评审用这个对比） */
+  goal: string;
+
+  /** 轮次状态（有限状态机） */
+  status: RoundStatus;
+
+  /** 该轮次的所有子任务 ID */
+  subTaskIds: string[];
+
+  /** 创建时间 */
+  createdAt: number;
+
+  /** 完成时间 */
+  completedAt?: number;
+
+  /** 是否有任务被 overthrow（级联守卫用） */
+  hasOverthrow: boolean;
+
+  /** 该轮次的质量评审摘要 */
+  qualityReview?: RoundQualityReview;
+
+  /** 熔断器状态（Phase 7 扩展） */
+  circuitBreaker?: {
+    /** 累计失败次数 */
+    totalFailures: number;
+    /** 累计 token 消耗 */
+    totalTokensUsed: number;
+    /** 是否已熔断 */
+    tripped: boolean;
+    /** 熔断原因 */
+    tripReason?: string;
+  };
+}
+
+// ========================================
+// 🆕 V2: FSM 转换规则（Phase 1 状态机实现的类型基础）
+// ========================================
+
+/**
+ * SubTask 状态类型别名（方便引用）
+ */
+export type SubTaskStatus = SubTask["status"];
+
+/**
+ * FSM 转换规则
+ *
+ * from → to 的合法转换，附带可选的守卫函数。
+ * Phase 1 实现时会用这个类型构建实际的转换表。
+ */
+export interface FSMTransitionRule<S extends string> {
+  /** 起始状态 */
+  from: S;
+  /** 目标状态 */
+  to: S;
+  /** 守卫条件描述（人读） */
+  guard?: string;
+}
+
+/**
+ * Round FSM 合法转换列表（常量，设计时确定，运行时只读）
+ *
+ * Phase 1 中会实现实际的 transition() 函数，这里只定义类型。
+ */
+export const ROUND_TRANSITIONS: ReadonlyArray<FSMTransitionRule<RoundStatus>> = [
+  { from: "active",    to: "completed", guard: "allSubTasksDone && !hasOverthrow" },
+  { from: "active",    to: "failed",    guard: "anySubTaskOverthrown" },
+  { from: "active",    to: "cancelled", guard: "userCancelled" },
+] as const;
+
+/**
+ * SubTask FSM 合法转换列表
+ */
+export const SUBTASK_TRANSITIONS: ReadonlyArray<FSMTransitionRule<SubTaskStatus>> = [
+  { from: "pending",  to: "active",    guard: "taskPickedUp" },
+  { from: "active",   to: "completed", guard: "executionSuccess" },
+  { from: "active",   to: "failed",    guard: "executionFailed" },
+  { from: "pending",  to: "skipped",   guard: "roundOverthrown (cascade)" },
+  { from: "active",   to: "skipped",   guard: "roundOverthrown (cascade)" },
+] as const;
+
+// ========================================
+// 🆕 V2: ExecutionContext — 执行上下文（替代布尔标记海洋）
+// ========================================
+
+/**
+ * 执行角色
+ *
+ * user   → 用户直接发消息，完整权限
+ * root   → 根任务（用户消息触发的第一层 LLM 调用），可分解
+ * leaf   → 叶子子任务（队列执行的具体工作），仅执行，禁止 enqueue
+ * system → 系统自动分解（shouldAutoDecompose），受控分解
+ */
+export type ExecutionRole = "user" | "root" | "leaf" | "system";
+
+/**
+ * 执行权限集
+ */
+export interface ExecutionPermissions {
+  /** 是否允许调用 enqueue_task */
+  canEnqueue: boolean;
+  /** 是否允许触发分解 */
+  canDecompose: boolean;
+  /** 是否允许创建新 Round */
+  canCreateNewRound: boolean;
+}
+
+/**
+ * 权限矩阵（设计时确定，运行时只读）
+ *
+ * 替代 isQueueTask/isRootTask/isNewRootTask 布尔标记组合。
+ * 4 个角色 = 4 种明确行为，无歧义。
+ */
+export const PERMISSION_MATRIX: Record<ExecutionRole, ExecutionPermissions> = {
+  user:   { canEnqueue: true,  canDecompose: true,  canCreateNewRound: true  },
+  root:   { canEnqueue: true,  canDecompose: true,  canCreateNewRound: false },
+  leaf:   { canEnqueue: false, canDecompose: false, canCreateNewRound: false },
+  system: { canEnqueue: true,  canDecompose: true,  canCreateNewRound: false },
+};
+
+/**
+ * 执行上下文 — 决定当前 agent 调用的权限边界
+ *
+ * 由 Orchestrator.onTaskStarting() 在任务执行前构建。
+ * 传递给 followup-runner，followup-runner 再传递给工具上下文。
+ */
+export interface ExecutionContext {
+  /** 执行角色 */
+  role: ExecutionRole;
+
+  /** 所属轮次 ID */
+  roundId: string;
+
+  /** 当前任务深度 */
+  depth: number;
+
+  /** 权限集（由 role 推导，不可手动覆盖） */
+  permissions: ExecutionPermissions;
+}
+
+// ========================================
+// 🆕 V2: TaskType — 任务类型感知
+// ========================================
+
+/**
+ * 任务类型 — 决定执行策略和质量评审标准
+ *
+ * 设计原则：按"执行方式"分类，而非"内容领域"分类。
+ * （"科幻小说"和"游记"都是 writing，执行方式相同）
+ */
+export type TaskType =
+  | "writing"      // 创作型：LLM 生成内容并写入文件
+  | "coding"       // 编码型：LLM 编写/修改代码
+  | "analysis"     // 分析型：LLM 阅读内容并产出结论
+  | "merge"        // 合并型：系统拼接多个文件（不应走 LLM）
+  | "delivery"     // 交付型：系统发送文件到用户（不应走 LLM）
+  | "planning"     // 规划型：LLM 产出大纲/计划
+  | "review"       // 审校型：LLM 阅读并校对/修改
+  | "generic";     // 通用型：无法分类，走标准 LLM
+
+// ========================================
+// 🆕 V2: 工厂函数类型签名（Phase 1/2 实现）
+// ========================================
+
+/**
+ * 创建 Round 的参数
+ */
+export interface CreateRoundParams {
+  /** 轮次目标（用户原始 prompt 或摘要） */
+  goal: string;
+  /** 会话 ID（用于生成唯一 Round ID） */
+  sessionId: string;
+}
+
+/**
+ * 创建 ExecutionContext 的参数
+ */
+export interface CreateExecutionContextParams {
+  /** 执行角色 */
+  role: ExecutionRole;
+  /** 所属轮次 ID */
+  roundId: string;
+  /** 当前任务深度 */
+  depth: number;
 }
 
 /**
@@ -82,7 +312,7 @@ export interface SubTask {
   summary: string;
   
   /** 任务状态 */
-  status: "pending" | "active" | "completed" | "failed" | "interrupted";
+  status: "pending" | "active" | "completed" | "failed" | "interrupted" | "skipped";
   
   /** 任务输出 */
   output?: string;
@@ -136,6 +366,20 @@ export interface SubTask {
   /** 质量状态 */
   qualityStatus?: QualityStatus;
   
+  // 🆕 V2: 新增字段（向后兼容，全部可选）
+
+  /** 所属轮次 ID（V2 新增，与 Round.id 关联） */
+  roundId?: string;
+
+  /** 任务类型（分解时由系统自动分类或 LLM 标注） */
+  taskType?: TaskType;
+
+  /** 执行角色（由 ExecutionContext 在执行时填入） */
+  executionRole?: ExecutionRole;
+
+  /** 执行策略偏好（由 StrategyRouter 在 preflight 阶段填入） */
+  preferredStrategy?: string;
+
   /** 元数据（复杂度、优先级、时长估算等） */
   metadata?: SubTaskMetadata;
 }
@@ -623,6 +867,79 @@ export interface PostProcessResult {
   needsRequeue: boolean;
   /** 是否已标记失败（overthrow 决策时为 true） */
   markedFailed: boolean;
+  /** 🆕 V2 Phase 4: 轮次是否已完成（onTaskCompleted 设置） */
+  roundCompleted?: boolean;
+  /** 🆕 V2 Phase 4: 完成的轮次 ID（roundCompleted=true 时必填） */
+  completedRoundId?: string;
+}
+
+// ========================================
+// 🆕 V2 Phase 4: 生命周期钩子决策类型
+// ========================================
+
+/**
+ * 任务创建决策 — onTaskCreating() 的返回值
+ *
+ * 集中了 drain.ts 和 enqueue-task-tool.ts 中散落的守卫逻辑：
+ * - 权限检查（ExecutionContext.permissions.canEnqueue）
+ * - 深度检查（depth < maxDepth）
+ * - Round 状态检查（round.hasOverthrow → 拒绝）
+ */
+export interface CreateDecision {
+  /** 是否允许创建 */
+  allowed: boolean;
+  /** 拒绝原因（allowed=false 时必填） */
+  reason?: string;
+  /** 拒绝类型（用于调用方分类处理） */
+  denyType?: "permission" | "depth" | "round_overthrown" | "round_completed" | "tree_terminated";
+}
+
+/**
+ * 任务启动决策 — onTaskStarting() 的返回值
+ *
+ * 替代 followup-runner 中手动构建 ExecutionContext 和启动文件追踪的散装逻辑。
+ */
+export interface StartDecision {
+  /** 是否允许启动 */
+  allowed: boolean;
+  /** 拒绝原因 */
+  reason?: string;
+  /** 构建好的执行上下文（allowed=true 时必填） */
+  executionContext?: ExecutionContext;
+  /** 是否应该先自动分解（而非直接执行） */
+  shouldDecompose?: boolean;
+}
+
+/**
+ * 任务失败决策 — onTaskFailed() 的返回值
+ *
+ * 集中了 followup-runner 中的重试逻辑和 drain.ts 中的级联丢弃逻辑。
+ */
+export interface FailureDecision {
+  /** 决策类型 */
+  action: "retry" | "cascade_fail" | "stop";
+  /** 决策原因 */
+  reason: string;
+  /** 是否需要重新入队（retry 时为 true） */
+  needsRequeue: boolean;
+  /** 是否需要级联跳过同 Round 的 pending 任务 */
+  cascadeSkip: boolean;
+}
+
+/**
+ * 轮次完成结果 — onRoundCompleted() 的返回值
+ *
+ * 集中了 followup-runner 中轮次完成后的合并+交付+归档逻辑。
+ */
+export interface RoundCompletedResult {
+  /** 合并后的文件路径（如果有） */
+  mergedFilePath?: string;
+  /** 交付报告 Markdown */
+  deliveryReportMarkdown?: string;
+  /** 归档是否成功 */
+  archiveSuccess: boolean;
+  /** Round 最终状态 */
+  roundStatus: RoundStatus;
 }
 
 // ========================================

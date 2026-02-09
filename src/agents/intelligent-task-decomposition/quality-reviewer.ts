@@ -137,7 +137,8 @@ export class QualityReviewer {
    */
   async reviewSubTaskCompletion(
     taskTree: TaskTree,
-    subTaskId: string
+    subTaskId: string,
+    rootTaskOverride?: string,
   ): Promise<QualityReviewResult> {
     const prompts = getPrompts();
     try {
@@ -147,8 +148,8 @@ export class QualityReviewer {
         throw new Error(`${prompts.qualityReviewer.errors.subTaskNotFound} ${subTaskId}`);
       }
 
-      // 2. 构建评估提示词
-      const prompt = this.buildCompletionReviewPrompt(taskTree, subTask);
+      // 2. 构建评估提示词（使用轮次根任务描述替代可能过期的 taskTree.rootTask）
+      const prompt = this.buildCompletionReviewPrompt(taskTree, subTask, rootTaskOverride);
       
       // 3. 调用 LLM 进行评估
       const llmResponse = await this.callLLM(prompt);
@@ -196,12 +197,13 @@ export class QualityReviewer {
    * @returns 质量评估结果
    */
   async reviewOverallCompletion(
-    taskTree: TaskTree
+    taskTree: TaskTree,
+    rootTaskOverride?: string,
   ): Promise<QualityReviewResult> {
     const prompts = getPrompts();
     try {
-      // 1. 构建评估提示词
-      const prompt = this.buildOverallReviewPrompt(taskTree);
+      // 1. 构建评估提示词（支持 Round.goal 覆盖过期的 taskTree.rootTask）
+      const prompt = this.buildOverallReviewPrompt(taskTree, rootTaskOverride);
       
       // 2. 调用 LLM 进行评估
       const llmResponse = await this.callLLM(prompt);
@@ -474,15 +476,19 @@ ${prompts.jsonOnlyReminder}`;
    */
   private buildCompletionReviewPrompt(
     taskTree: TaskTree,
-    subTask: SubTask
+    subTask: SubTask,
+    rootTaskOverride?: string,
   ): string {
     const prompts = getPrompts();
     const aspects = prompts.completionReview.aspects;
     const aspectsStr = Object.values(aspects).map((aspect, index) => `${index + 1}. ${aspect}`).join("\n\n");
 
+    // 🔧 BUG5 修复：优先使用轮次根任务描述，避免跨轮次误判
+    const effectiveRootTask = rootTaskOverride || taskTree.rootTask;
+
     return `${prompts.completionReview.expertRole} ${prompts.completionReview.instruction}
 
-${prompts.labels.rootTask}：${taskTree.rootTask}
+${prompts.labels.rootTask}：${effectiveRootTask}
 
 ${prompts.labels.subTaskInfo}：
 - ID: ${subTask.id}
@@ -512,8 +518,10 @@ ${prompts.jsonOnlyReminder}`;
   /**
    * 构建整体完成评估提示词
    */
-  private buildOverallReviewPrompt(taskTree: TaskTree): string {
+  private buildOverallReviewPrompt(taskTree: TaskTree, rootTaskOverride?: string): string {
     const prompts = getPrompts();
+    // 🆕 V2: 优先使用 Round.goal 覆盖可能过期的 taskTree.rootTask
+    const effectiveRootTask = rootTaskOverride || taskTree.rootTask;
     const completedTasksStr = taskTree.subTasks
       .filter(st => st.status === "completed")
       .map(st => `- ${st.id}: ${st.summary}\n  ${prompts.labels.output}: ${st.output || prompts.labels.noOutput}`)
@@ -524,7 +532,7 @@ ${prompts.jsonOnlyReminder}`;
 
     return `${prompts.overallReview.expertRole} ${prompts.overallReview.instruction}
 
-${prompts.labels.rootTask}：${taskTree.rootTask}
+${prompts.labels.rootTask}：${effectiveRootTask}
 
 ${prompts.labels.completedSubTasks}：
 ${completedTasksStr}

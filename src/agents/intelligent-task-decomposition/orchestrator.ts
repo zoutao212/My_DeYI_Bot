@@ -5,7 +5,7 @@
  */
 
 import crypto from "node:crypto";
-import type { TaskTree, SubTask, TaskTreeChange, QualityReviewResult, TaskBatch, BatchExecutionResult, BatchExecutionOptions, PostProcessResult } from "./types.js";
+import type { TaskTree, SubTask, TaskTreeChange, QualityReviewResult, TaskBatch, BatchExecutionResult, BatchExecutionOptions, PostProcessResult, Round, RoundStatus, ExecutionContext, CreateDecision, StartDecision, FailureDecision, RoundCompletedResult } from "./types.js";
 import { TaskTreeManager } from "./task-tree-manager.js";
 import { RetryManager } from "./retry-manager.js";
 import { ErrorHandler } from "./error-handler.js";
@@ -22,6 +22,7 @@ import { ComplexityScorer } from "./complexity-scorer.js";
 import { beginTracking, collectTrackedFiles, clearTracking } from "./file-tracker.js";
 import { createSystemLLMCaller, type SystemLLMCallerConfig } from "./system-llm-caller.js";
 import { classifyTaskIntent, type TaskIntentResult } from "./task-intent-classifier.js";
+import { deriveExecutionRole, createExecutionContext } from "./execution-context.js";
 import type { ClawdbotConfig } from "../../config/config.js";
 
 /**
@@ -143,9 +144,14 @@ export class Orchestrator {
    */
   async reviewRoundCompletion(
     taskTree: TaskTree,
+    rootTaskId?: string,
   ): Promise<QualityReviewResult> {
     try {
-      const result = await this.qualityReviewer.reviewOverallCompletion(taskTree);
+      // 🆕 V2: 优先从 Round.goal 获取轮次目标，避免跨轮次误判
+      const roundGoal = rootTaskId
+        ? this.getRoundRootDescription(taskTree, rootTaskId)
+        : undefined;
+      const result = await this.qualityReviewer.reviewOverallCompletion(taskTree, roundGoal);
       console.log(
         `[Orchestrator] 📋 轮次整体质量评估: status=${result.status}, decision=${result.decision}`,
       );
@@ -216,9 +222,14 @@ export class Orchestrator {
     if (taskTree.qualityReviewEnabled !== false) {
       try {
         console.log(`[Orchestrator] 🔍 开始质量评估：${subTask.id}`);
+        // 🔧 BUG5 修复：使用子任务所属轮次的实际根任务描述，而非可能过期的 taskTree.rootTask
+        const roundRootDesc = subTask.rootTaskId
+          ? this.getRoundRootDescription(taskTree, subTask.rootTaskId)
+          : undefined;
         const review = await this.qualityReviewer.reviewSubTaskCompletion(
           taskTree,
           subTask.id,
+          roundRootDesc,
         );
 
         result.decision = review.decision;
@@ -352,6 +363,11 @@ export class Orchestrator {
   async initializeTaskTree(rootTask: string, sessionId: string): Promise<TaskTree> {
     const taskTree = await this.taskTreeManager.initialize(rootTask, sessionId);
     
+    // 🆕 V2: 初始化 rounds 数组（确保后续 Round CRUD 操作无需判空）
+    if (!taskTree.rounds) {
+      taskTree.rounds = [];
+    }
+    
     // 🆕 初始化文件管理器
     this.fileManager = new FileManager(sessionId);
     await this.fileManager.initialize();
@@ -415,7 +431,16 @@ export class Orchestrator {
       waitForChildren: waitForChildren,
       depth: 0,
       rootTaskId,                           // 🆕 轮次隔离 ID
+      roundId: rootTaskId,                   // 🆕 V2: 与 Round.id 关联（过渡期与 rootTaskId 相同）
     };
+
+    // 🆕 V2: 将子任务关联到 Round（如果存在）
+    if (rootTaskId) {
+      const round = this.findRound(taskTree, rootTaskId);
+      if (round) {
+        round.subTaskIds.push(subTask.id);
+      }
+    }
 
     // 🆕 计算任务深度
     if (parentId) {
@@ -695,8 +720,131 @@ export class Orchestrator {
   }
 
   // ========================================
+  // 🆕 V2: Round CRUD — 轮次一等公民管理
+  // ========================================
+
+  /**
+   * 创建新的 Round 并添加到任务树
+   * 
+   * @param taskTree 任务树
+   * @param goal 轮次目标（用户原始 prompt 或摘要）
+   * @param roundId 轮次 ID（通常与 rootTaskId 相同，保持向后兼容）
+   * @returns 新创建的 Round
+   */
+  createRound(taskTree: TaskTree, goal: string, roundId: string): Round {
+    const round: Round = {
+      id: roundId,
+      goal,
+      status: "active",
+      subTaskIds: [],
+      createdAt: Date.now(),
+      hasOverthrow: false,
+    };
+
+    if (!taskTree.rounds) {
+      taskTree.rounds = [];
+    }
+    taskTree.rounds.push(round);
+    console.log(`[Orchestrator] 🆕 Round created: ${roundId} (goal: ${goal.substring(0, 80)})`);
+    return round;
+  }
+
+  /**
+   * 通过 ID 查找 Round（向后兼容：支持 rootTaskId 查找）
+   * 
+   * @param taskTree 任务树
+   * @param roundId 轮次 ID（等价于旧的 rootTaskId）
+   * @returns Round 对象，未找到时返回 undefined
+   */
+  findRound(taskTree: TaskTree, roundId: string): Round | undefined {
+    return taskTree.rounds?.find((r) => r.id === roundId);
+  }
+
+  /**
+   * 获取或创建 Round（幂等操作）
+   * 
+   * 如果 Round 已存在则返回，否则创建新的。
+   * 用于 enqueue-task-tool 中确保每个 rootTaskId 都有对应的 Round。
+   * 
+   * @param taskTree 任务树
+   * @param roundId 轮次 ID
+   * @param goal 轮次目标（仅在创建时使用）
+   * @returns Round 对象
+   */
+  getOrCreateRound(taskTree: TaskTree, roundId: string, goal: string): Round {
+    const existing = this.findRound(taskTree, roundId);
+    if (existing) return existing;
+    return this.createRound(taskTree, goal, roundId);
+  }
+
+  /**
+   * 获取当前活跃的 Round
+   * 
+   * @param taskTree 任务树
+   * @returns 最新的 active Round，无则返回 undefined
+   */
+  getActiveRound(taskTree: TaskTree): Round | undefined {
+    return taskTree.rounds
+      ?.filter((r) => r.status === "active")
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+  }
+
+  /**
+   * 更新 Round 状态（FSM 转换）
+   * 
+   * @param taskTree 任务树
+   * @param roundId 轮次 ID
+   * @param newStatus 新状态
+   */
+  updateRoundStatus(taskTree: TaskTree, roundId: string, newStatus: RoundStatus): void {
+    const round = this.findRound(taskTree, roundId);
+    if (!round) return;
+    
+    const oldStatus = round.status;
+    round.status = newStatus;
+    if (newStatus === "completed" || newStatus === "failed" || newStatus === "cancelled") {
+      round.completedAt = Date.now();
+    }
+    console.log(`[Orchestrator] 🔄 Round ${roundId} status: ${oldStatus} → ${newStatus}`);
+  }
+
+  // ========================================
   // 🆕 轮次隔离：集中式完成判定
   // ========================================
+
+  /**
+   * 获取指定轮次的实际根任务描述
+   * 
+   * 从该轮次最早创建的子任务的 summary/prompt 中提取任务目标。
+   * 当 taskTree.rootTask 已过期（例如用户在同一 session 中发了新任务）时，
+   * 质量评审应使用此方法获取的描述，而非全局 taskTree.rootTask。
+   * 
+   * @param taskTree 任务树
+   * @param rootTaskId 轮次 ID
+   * @returns 该轮次的根任务描述，未找到时返回 taskTree.rootTask
+   */
+  getRoundRootDescription(taskTree: TaskTree, rootTaskId: string): string {
+    // 🆕 V2: 优先从 Round.goal 获取（显式数据，最可靠）
+    const round = this.findRound(taskTree, rootTaskId);
+    if (round?.goal) {
+      return round.goal;
+    }
+
+    // 向后兼容：无 Round 对象时回退到旧的启发式逻辑
+    const roundTasks = taskTree.subTasks
+      .filter((t) => t.rootTaskId === rootTaskId && !t.metadata?.isSummaryTask)
+      .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+    
+    if (roundTasks.length === 0) return taskTree.rootTask;
+    
+    // 取第一个子任务的 summary（较短）或 prompt（较长）作为轮次目标
+    const first = roundTasks[0];
+    // 如果有 waitForChildren=true 的任务（合并/汇总任务），它通常是父任务，优先使用
+    const parentTask = roundTasks.find((t) => t.waitForChildren);
+    const representative = parentTask ?? first;
+    
+    return representative.summary || representative.prompt?.substring(0, 200) || taskTree.rootTask;
+  }
 
   /**
    * 检查指定轮次是否已完成
@@ -737,6 +885,16 @@ export class Orchestrator {
       (t) => t.rootTaskId === rootTaskId && !t.metadata?.isSummaryTask,
     );
     const hasFailed = roundTasks.some((t) => t.status === "failed");
+
+    // 🆕 V2: 同步更新 Round 对象状态
+    const round = this.findRound(taskTree, rootTaskId);
+    if (round) {
+      const roundStatus = hasFailed ? "failed" as const : "completed" as const;
+      this.updateRoundStatus(taskTree, rootTaskId, roundStatus);
+      if (hasFailed) {
+        round.hasOverthrow = true;
+      }
+    }
 
     // 🔧 检查是否有其他轮次的 pending/active 任务
     // 如果有，不能把整棵树标记为 completed，否则 drain Guard A/B 会误杀新任务
@@ -1579,7 +1737,10 @@ ${childOutputs.join("\n\n---\n\n")}
     if (taskTree.qualityReviewEnabled !== false) {
       console.log(`[Orchestrator] 🔍 开始整体质量评估`);
       
-      const review = await this.qualityReviewer.reviewOverallCompletion(taskTree);
+      // 🆕 V2: 使用活跃 Round 的 goal 作为评审基准
+      const activeRound = this.getActiveRound(taskTree);
+      const roundGoal = activeRound?.goal;
+      const review = await this.qualityReviewer.reviewOverallCompletion(taskTree, roundGoal);
 
       // 根据评估结果决定后续操作
       switch (review.decision) {
@@ -1859,6 +2020,363 @@ ${childOutputs.join("\n\n---\n\n")}
     }
 
     return { valid: errors.length === 0, errors };
+  }
+
+  // ========================================
+  // 🆕 V2 Phase 4: 生命周期钩子 — 集中决策逻辑
+  // ========================================
+
+  /**
+   * 🆕 onTaskCreating — 任务创建前的守卫
+   *
+   * 集中了 drain.ts 和 enqueue-task-tool.ts 中散落的检查逻辑：
+   * 1. 权限检查：ctx.permissions.canEnqueue?
+   * 2. 深度检查：task.depth < maxDepth?
+   * 3. Round 状态检查：round.hasOverthrow → 拒绝
+   * 4. 任务树终结检查：tree.status === completed/failed → 拒绝
+   * 5. 轮次完成检查：round 已完成 → 拒绝
+   *
+   * @param taskTree 任务树
+   * @param ctx 执行上下文（可选，无则跳过权限检查）
+   * @param rootTaskId 轮次 ID（可选）
+   * @param depth 当前深度
+   * @returns CreateDecision
+   */
+  onTaskCreating(
+    taskTree: TaskTree,
+    ctx?: ExecutionContext,
+    rootTaskId?: string,
+    depth?: number,
+  ): CreateDecision {
+    // 守卫 1：任务树已终结
+    if (taskTree.status === "completed" || taskTree.status === "failed") {
+      const hasPending = taskTree.subTasks.some(
+        (t) => t.status === "pending" || t.status === "active",
+      );
+      if (!hasPending) {
+        return {
+          allowed: false,
+          reason: `任务树已 ${taskTree.status}，无 pending 子任务`,
+          denyType: "tree_terminated",
+        };
+      }
+    }
+
+    // 守卫 2：权限检查（ExecutionContext 可用时）
+    if (ctx && !ctx.permissions.canEnqueue) {
+      return {
+        allowed: false,
+        reason: `角色 ${ctx.role} 无 enqueue 权限`,
+        denyType: "permission",
+      };
+    }
+
+    // 守卫 3：深度检查
+    const maxDepth = taskTree.maxDepth ?? 3;
+    const currentDepth = depth ?? ctx?.depth ?? 0;
+    if (currentDepth >= maxDepth) {
+      return {
+        allowed: false,
+        reason: `深度 ${currentDepth} 已达上限 ${maxDepth}`,
+        denyType: "depth",
+      };
+    }
+
+    // 守卫 4：Round 状态检查
+    if (rootTaskId) {
+      const round = this.findRound(taskTree, rootTaskId);
+      if (round) {
+        if (round.hasOverthrow) {
+          return {
+            allowed: false,
+            reason: `Round ${rootTaskId} 已被 overthrow`,
+            denyType: "round_overthrown",
+          };
+        }
+        if (round.status === "completed" || round.status === "failed" || round.status === "cancelled") {
+          return {
+            allowed: false,
+            reason: `Round ${rootTaskId} 已 ${round.status}`,
+            denyType: "round_completed",
+          };
+        }
+      }
+
+      // 守卫 5：轮次完成检查（兼容无 Round 对象的旧数据）
+      if (this.isRoundCompleted(taskTree, rootTaskId)) {
+        return {
+          allowed: false,
+          reason: `Round ${rootTaskId} 所有子任务已完成`,
+          denyType: "round_completed",
+        };
+      }
+    }
+
+    return { allowed: true };
+  }
+
+  /**
+   * 🆕 onTaskStarting — 任务执行前的准备
+   *
+   * 替代 followup-runner 中手动构建 ExecutionContext、
+   * 检查自动分解、启动文件追踪的散装逻辑。
+   *
+   * @param taskTree 任务树
+   * @param subTask 即将执行的子任务
+   * @param legacyFlags 旧布尔标记（过渡期兼容）
+   * @returns StartDecision
+   */
+  onTaskStarting(
+    taskTree: TaskTree,
+    subTask: SubTask,
+    legacyFlags?: {
+      isQueueTask?: boolean;
+      isRootTask?: boolean;
+      isNewRootTask?: boolean;
+      taskDepth?: number;
+      rootTaskId?: string;
+    },
+  ): StartDecision {
+    // 1. 构建 ExecutionContext
+    const role = deriveExecutionRole({
+      isQueueTask: legacyFlags?.isQueueTask,
+      isRootTask: legacyFlags?.isRootTask ?? legacyFlags?.isNewRootTask,
+      isNewRootTask: legacyFlags?.isNewRootTask,
+      taskDepth: legacyFlags?.taskDepth,
+    });
+    const execCtx = createExecutionContext({
+      role,
+      roundId: legacyFlags?.rootTaskId ?? subTask.rootTaskId ?? "",
+      depth: legacyFlags?.taskDepth ?? subTask.depth ?? 0,
+    });
+
+    // 2. 检查是否应该先自动分解
+    const shouldDecompose = this.shouldAutoDecompose(taskTree, subTask);
+
+    // 3. 启动文件追踪
+    beginTracking(subTask.id);
+
+    // 4. 更新子任务状态为 active
+    subTask.status = "active";
+
+    // 5. 记录执行角色到子任务元数据
+    subTask.executionRole = execCtx.role;
+
+    console.log(
+      `[Orchestrator] 🚀 onTaskStarting: ${subTask.id} role=${execCtx.role} depth=${execCtx.depth} shouldDecompose=${shouldDecompose}`,
+    );
+
+    return {
+      allowed: true,
+      executionContext: execCtx,
+      shouldDecompose,
+    };
+  }
+
+  /**
+   * 🆕 onTaskCompleted — 任务完成后的统一后处理
+   *
+   * 编排已有的 postProcessSubTaskCompletion() + 轮次完成检查逻辑。
+   * followup-runner 只需调用此方法，不再自己编排。
+   *
+   * @param taskTree 任务树
+   * @param subTask 已完成的子任务（output/status 已设置）
+   * @param rootTaskId 轮次 ID
+   * @returns PostProcessResult（复用现有类型，向后兼容）
+   */
+  async onTaskCompleted(
+    taskTree: TaskTree,
+    subTask: SubTask,
+    rootTaskId?: string,
+  ): Promise<PostProcessResult> {
+    // 1. 委托现有的后处理逻辑（质量评估 + 决策 + 文件验证 + 持久化）
+    const result = await this.postProcessSubTaskCompletion(taskTree, subTask);
+
+    // 2. 如果后处理决定 restart 或 overthrow，直接返回（不做轮次检查）
+    if (result.needsRequeue || result.markedFailed) {
+      return result;
+    }
+
+    // 3. 轮次完成检查
+    const effectiveRoundId = rootTaskId ?? subTask.rootTaskId;
+    if (effectiveRoundId && this.isRoundCompleted(taskTree, effectiveRoundId)) {
+      await this.markRoundCompleted(taskTree, effectiveRoundId);
+      result.roundCompleted = true;
+      result.completedRoundId = effectiveRoundId;
+      console.log(`[Orchestrator] 🏁 onTaskCompleted → Round ${effectiveRoundId} completed`);
+    }
+
+    return result;
+  }
+
+  /**
+   * 🆕 onTaskFailed — 任务失败后的集中处理
+   *
+   * 集中了 followup-runner 中的重试判断和 drain.ts 中的级联丢弃逻辑。
+   *
+   * @param taskTree 任务树
+   * @param subTask 失败的子任务
+   * @param error 错误对象
+   * @returns FailureDecision
+   */
+  async onTaskFailed(
+    taskTree: TaskTree,
+    subTask: SubTask,
+    error: unknown,
+  ): Promise<FailureDecision> {
+    const message = error instanceof Error ? error.message : String(error);
+
+    // 1. 判断是否可重试
+    const isRetryable = this.isRetryableError(error);
+    const maxRetries = 3;
+
+    if (isRetryable && subTask.retryCount < maxRetries) {
+      // 可重试：标记 pending + retryCount++
+      subTask.status = "pending";
+      subTask.error = message;
+      subTask.retryCount++;
+      await this.taskTreeManager.save(taskTree);
+      console.log(
+        `[Orchestrator] 🔄 onTaskFailed: ${subTask.id} retryable, attempt ${subTask.retryCount}/${maxRetries}`,
+      );
+      return {
+        action: "retry",
+        reason: `可重试错误 (${subTask.retryCount}/${maxRetries}): ${message}`,
+        needsRequeue: true,
+        cascadeSkip: false,
+      };
+    }
+
+    // 2. 不可重试或重试耗尽：标记 failed
+    subTask.status = "failed";
+    subTask.error = message;
+    await this.taskTreeManager.save(taskTree);
+
+    // 3. 级联检查：同 Round 是否需要级联 skip
+    const roundId = subTask.rootTaskId;
+    if (roundId) {
+      const round = this.findRound(taskTree, roundId);
+      if (round) {
+        round.hasOverthrow = true;
+        // 级联跳过同 Round 所有 pending 子任务
+        let cascadedCount = 0;
+        for (const t of taskTree.subTasks) {
+          if (t.rootTaskId === roundId && t.status === "pending") {
+            t.status = "skipped" as SubTask["status"];
+            t.error = `级联跳过：兄弟任务 ${subTask.id} 失败`;
+            cascadedCount++;
+          }
+        }
+        this.updateRoundStatus(taskTree, roundId, "failed");
+        await this.taskTreeManager.save(taskTree);
+
+        if (cascadedCount > 0) {
+          console.log(
+            `[Orchestrator] ⚡ onTaskFailed: 级联跳过 ${cascadedCount} 个 pending 子任务 (Round ${roundId})`,
+          );
+          return {
+            action: "cascade_fail",
+            reason: `任务 ${subTask.id} 失败，级联跳过 ${cascadedCount} 个同轮次任务`,
+            needsRequeue: false,
+            cascadeSkip: true,
+          };
+        }
+      }
+    }
+
+    // 4. 更新任务树全局状态
+    taskTree.status = "failed";
+    await this.taskTreeManager.save(taskTree);
+
+    console.log(`[Orchestrator] ❌ onTaskFailed: ${subTask.id} - ${message}`);
+    return {
+      action: "stop",
+      reason: `不可重试或重试耗尽: ${message}`,
+      needsRequeue: false,
+      cascadeSkip: false,
+    };
+  }
+
+  /**
+   * 🆕 onRoundCompleted — 轮次完成后的集中处理
+   *
+   * 集中了 followup-runner 中轮次完成后的合并输出+交付报告+归档逻辑。
+   * followup-runner 只需调用此方法并发送返回的 payload。
+   *
+   * @param taskTree 任务树
+   * @param rootTaskId 完成的轮次 ID
+   * @returns RoundCompletedResult
+   */
+  async onRoundCompleted(
+    taskTree: TaskTree,
+    rootTaskId: string,
+  ): Promise<RoundCompletedResult> {
+    const result: RoundCompletedResult = {
+      archiveSuccess: false,
+      roundStatus: "completed",
+    };
+
+    // 确定 Round 状态
+    const round = this.findRound(taskTree, rootTaskId);
+    result.roundStatus = round?.status ?? "completed";
+
+    // 1. 合并子任务输出
+    const completedTasks = taskTree.subTasks.filter(
+      (t) => t.status === "completed" && t.rootTaskId === rootTaskId,
+    );
+    if (completedTasks.length > 0) {
+      try {
+        const mergedFile = await this.mergeRoundOutputs(taskTree);
+        result.mergedFilePath = mergedFile;
+        console.log(
+          `[Orchestrator] 📝 onRoundCompleted: 合并 ${completedTasks.length} 个子任务输出 → ${mergedFile}`,
+        );
+      } catch (err) {
+        console.warn(`[Orchestrator] ⚠️ onRoundCompleted: 合并输出失败:`, err);
+      }
+    }
+
+    // 2. 生成交付报告
+    try {
+      const reporter = new DeliveryReporter();
+      const report = reporter.generateReport(taskTree);
+      result.deliveryReportMarkdown = reporter.formatAsMarkdown(report);
+      console.log(
+        `[Orchestrator] 📦 onRoundCompleted: 交付报告已生成 (${report.statistics?.successRate ?? "N/A"} 成功率)`,
+      );
+    } catch (err) {
+      console.warn(`[Orchestrator] ⚠️ onRoundCompleted: 交付报告生成失败:`, err);
+    }
+
+    // 3. 归档标记（实际归档由调用方执行，因为需要 config/sessionId 等上下文）
+    result.archiveSuccess = true;
+
+    return result;
+  }
+
+  /**
+   * 判断错误是否可重试（从 followup-runner 搬入 Orchestrator）
+   *
+   * @private
+   */
+  private isRetryableError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+    const nonRetryable = [
+      "prohibited_content", "safety", "recitation", "blocked",
+      "content_filter", "policy_violation", "invalid_request_error",
+      "authentication_error", "invalid_argument", "permission_denied",
+    ];
+    for (const p of nonRetryable) {
+      if (message.includes(p)) return false;
+    }
+    const retryable = [
+      "timeout", "network", "rate_limit", "overloaded",
+      "internal_error", "503", "502", "504",
+    ];
+    for (const p of retryable) {
+      if (message.includes(p)) return true;
+    }
+    return false;
   }
 
   // ========================================

@@ -6,6 +6,8 @@ import { resolveQueueSettings } from "../../auto-reply/reply/queue/settings.js";
 import type { ClawdbotConfig } from "../../config/config.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import { Orchestrator } from "../intelligent-task-decomposition/orchestrator.js";
+import { deriveExecutionRole, createExecutionContext } from "../intelligent-task-decomposition/execution-context.js";
+import { PERMISSION_MATRIX } from "../intelligent-task-decomposition/types.js";
 
 const EnqueueTaskSchema = Type.Object({
   prompt: Type.String({
@@ -224,22 +226,27 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
         llmCallerModel = runModel;
       }
 
-      // 🔧 循环检测（融合方案 1+2+3）
-      // 判断维度：isQueueTask / isRootTask / isNewRootTask / taskDepth
+      // 🆕 V2: 使用 ExecutionContext 替代布尔标记组合判断
+      // 从旧字段推导执行角色，通过 PERMISSION_MATRIX 获取权限
       const isQueueTask = currentFollowupRun.isQueueTask ?? false;
       const isCurrentRootTask = currentFollowupRun.isRootTask ?? false;
       const isCurrentNewRoot = currentFollowupRun.isNewRootTask ?? false;
       const currentDepth = currentFollowupRun.taskDepth ?? 0;
       const MAX_ENQUEUE_DEPTH = 3;
+
+      // 🆕 V2: 优先从 ExecutionContext 获取权限，回退到旧逻辑推导
+      const executionRole = currentFollowupRun.executionContext?.role
+        ?? deriveExecutionRole({
+          isQueueTask,
+          isRootTask: isCurrentRootTask,
+          isNewRootTask: isCurrentNewRoot,
+          taskDepth: currentDepth,
+        });
+      const permissions = currentFollowupRun.executionContext?.permissions
+        ?? PERMISSION_MATRIX[executionRole];
+      const canEnqueue = permissions.canEnqueue;
       
-      // 允许 enqueue 的条件（满足任一即可）：
-      // 1. 不是队列任务（用户直接发消息）
-      // 2. 是根任务（isRootTask=true）
-      // 3. 是新根任务树（isNewRootTask=true，方案 2 双保险）
-      // 4. 深度未超限（方案 3 兜底 → 升级为主判据：depth < MAX 即放行）
-      const canEnqueue = !isQueueTask || isCurrentRootTask || isCurrentNewRoot || currentDepth < MAX_ENQUEUE_DEPTH;
-      
-      // 方案 3 兜底：即使标记允许，深度超限也拒绝
+      // 深度兜底：即使角色允许，深度超限也拒绝（防止根任务无限递归）
       if (canEnqueue && currentDepth >= MAX_ENQUEUE_DEPTH) {
         console.warn(`[enqueue_task] ⚠️ Task depth ${currentDepth} >= ${MAX_ENQUEUE_DEPTH}, refusing to enqueue (depth guard)`);
         return jsonResult({
@@ -249,20 +256,17 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
       }
       
       if (!canEnqueue) {
-        console.warn(`[enqueue_task] ⚠️ Cannot enqueue task while executing a non-root queue task (isQueueTask=${isQueueTask}, isRootTask=${isCurrentRootTask}, isNewRootTask=${isCurrentNewRoot}, depth=${currentDepth})`);
+        console.warn(`[enqueue_task] ⚠️ Cannot enqueue: role=${executionRole}, canEnqueue=false (isQueueTask=${isQueueTask}, isRootTask=${isCurrentRootTask}, depth=${currentDepth})`);
         return jsonResult({
           success: false,
-          error: `❌ 不能在执行子任务时加入新任务。
+          error: `❌ 不能在执行子任务时创建新的子任务（防止套娃分解）。
 
 ✅ 正确做法：
-1. 直接生成当前任务要求的内容
-2. 不要调用任何工具（包括 enqueue_task）
+1. 直接使用 write 工具生成当前任务要求的内容并写入文件
+2. 在聊天中回复简短确认
 3. 完成后系统会自动执行下一个任务
 
-示例：
-任务提示词：请生成第 1 段内容
-→ 正确：直接输出"这是第 1 段内容..."
-→ 错误：调用 enqueue_task 生成更多任务`,
+⚠️ 如果任务太复杂需要分解，系统会自动判断并处理，无需你手动调用 enqueue_task。`,
         });
       }
 
@@ -325,6 +329,13 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
         } else {
           console.log(`[enqueue_task] 🆔 Inherited rootTaskId: ${rootTaskId}`);
         }
+
+        // 🆕 V2: 确保 Round 对象存在（幂等操作：已存在则复用，不存在则创建）
+        // Round.goal 使用用户原始 prompt 或 summary，作为质量评审的对比基准
+        const roundGoal = isNewRootTask
+          ? (summary || prompt.substring(0, 200))   // 新根任务：用 summary 或 prompt 截断
+          : (currentFollowupRun.summaryLine || currentFollowupRun.prompt?.substring(0, 200) || prompt.substring(0, 200));  // 子任务：用原始用户消息
+        globalOrchestrator.getOrCreateRound(taskTree, rootTaskId, roundGoal);
 
         // 添加子任务到任务树（携带 rootTaskId 实现轮次隔离）
         const subTask = await globalOrchestrator.addSubTask(

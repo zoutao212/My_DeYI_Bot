@@ -4,6 +4,7 @@ import type { SessionEntry } from "../../../config/sessions.js";
 import type { OriginatingChannelType } from "../../templating.js";
 import type { ElevatedLevel, ReasoningLevel, ThinkLevel, VerboseLevel } from "../directives.js";
 import type { ExecToolDefaults } from "../../../agents/bash-tools.js";
+import type { ExecutionContext } from "../../../agents/intelligent-task-decomposition/types.js";
 
 export type QueueMode = "steer" | "followup" | "collect" | "steer-backlog" | "interrupt" | "queue";
 
@@ -142,6 +143,10 @@ export type FollowupRun = {
    * @since v2026.2.6 - 任务系统轮次隔离
    */
   rootTaskId?: string;
+
+  // 🆕 V2: ExecutionContext（Phase 2 新增，替代 isQueueTask/isRootTask/isNewRootTask/taskDepth）
+  // 过渡期：旧布尔标记保留（@deprecated），优先读取 executionContext
+  executionContext?: ExecutionContext;
 };
 
 export type ResolveQueueSettingsParams = {

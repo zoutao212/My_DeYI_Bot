@@ -33,9 +33,11 @@ import { setCurrentFollowupRunContext } from "../../agents/tools/enqueue-task-to
 import { getGlobalOrchestrator } from "../../agents/tools/enqueue-task-tool.js";
 import { buildSiblingContext } from "../../agents/memory/pipeline-integration.js";
 import { createMemoryService } from "../../agents/memory/factory.js";
-import { DeliveryReporter } from "../../agents/intelligent-task-decomposition/delivery-reporter.js";
 import { sendFallbackFile } from "./send-fallback-file.js";
-import { beginTracking, collectTrackedFiles, clearTracking } from "../../agents/intelligent-task-decomposition/file-tracker.js";
+import { collectTrackedFiles, clearTracking } from "../../agents/intelligent-task-decomposition/file-tracker.js";
+import { deriveExecutionRole, createExecutionContext } from "../../agents/intelligent-task-decomposition/execution-context.js";
+import type { SubTask, TaskTree, ExecutionContext } from "../../agents/intelligent-task-decomposition/types.js";
+import type { Orchestrator } from "../../agents/intelligent-task-decomposition/orchestrator.js";
 
 /**
  * 判断错误是否可重试
@@ -85,6 +87,131 @@ function isRetryableError(error: unknown): boolean {
   
   // 默认不重试
   return false;
+}
+
+/**
+ * 🆕 V2 Phase 4: 兜底落盘（提取自主循环，减少嵌套深度）
+ *
+ * 检测 LLM 是否偷懒（生成了大段内容但未调用 write 工具落盘），
+ * 如果偷懒则自动保存到兜底目录并发送给用户，同时截断 session 中的超长 assistant 消息。
+ */
+async function handleFallbackPersistence(opts: {
+  subTask: SubTask;
+  outputText: string;
+  toolMetas: Array<{ toolName: string; [k: string]: unknown }>;
+  sessionId: string;
+  queued: FollowupRun;
+}): Promise<void> {
+  const FILE_TOOLS = new Set(["write", "send_file"]);
+  const MIN_FALLBACK_CHARS = 500;
+  const { subTask, outputText, toolMetas, sessionId, queued } = opts;
+
+  const usedFileTool = toolMetas.some((m) => FILE_TOOLS.has(m.toolName));
+  if (usedFileTool || outputText.length < MIN_FALLBACK_CHARS) return;
+
+  try {
+    const taskDir = path.join(os.homedir(), ".clawdbot", "tasks", sessionId, "fallback-outputs");
+    await fs.mkdir(taskDir, { recursive: true });
+    const safeId = (subTask.id ?? crypto.randomUUID()).replace(/[^a-zA-Z0-9_-]/g, "_");
+    const fallbackFile = path.join(taskDir, `${safeId}.txt`);
+    await fs.writeFile(fallbackFile, outputText, "utf-8");
+    console.log(
+      `[followup-runner] 📝 兜底落盘：LLM 未调用 write 工具，已自动保存 ${outputText.length} 字到 ${fallbackFile}`,
+    );
+
+    if (!subTask.metadata) subTask.metadata = {};
+    subTask.metadata.fallbackFilePath = fallbackFile;
+    subTask.metadata.fallbackReason = "LLM 未调用 write 工具，系统自动兜底落盘";
+
+    // 发送兜底文件到用户频道
+    const sendResult = await sendFallbackFile({
+      filePath: fallbackFile,
+      caption: subTask.summary
+        ? `📝 ${subTask.summary}（系统自动保存）`
+        : `📝 子任务输出（系统自动保存）`,
+      queued,
+    });
+    if (!sendResult.ok) {
+      console.warn(
+        `[followup-runner] ⚠️ 兜底文件发送失败 (${sendResult.method}): ${sendResult.error}`,
+      );
+    }
+
+    // Session 瘦身：截断 session 文件中的最后一条超长 assistant 消息
+    try {
+      const sessionFilePath = queued.run.sessionFile;
+      if (sessionFilePath) {
+        const rawSession = await fs.readFile(sessionFilePath, "utf-8");
+        const lines = rawSession.split("\n");
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          try {
+            const entry = JSON.parse(line);
+            if (entry.role === "assistant" && Array.isArray(entry.content)) {
+              const textPart = entry.content.find((c: { type: string }) => c.type === "text");
+              if (textPart && typeof textPart.text === "string" && textPart.text.length > 500) {
+                const truncated = textPart.text.substring(0, 200) +
+                  `\n\n[内容已落盘到文件: ${fallbackFile}，此处截断以控制 session 大小]`;
+                textPart.text = truncated;
+                lines[i] = JSON.stringify(entry);
+                await fs.writeFile(sessionFilePath, lines.join("\n"), "utf-8");
+                console.log(
+                  `[followup-runner] ✂️ Session 瘦身：截断 assistant 消息 ${outputText.length} → ${truncated.length} 字`,
+                );
+              }
+              break;
+            }
+          } catch { /* 非 JSON 行，跳过 */ }
+        }
+      }
+    } catch (trimErr) {
+      console.warn(`[followup-runner] ⚠️ Session 瘦身失败（不阻塞）: ${trimErr}`);
+    }
+  } catch (fallbackErr) {
+    console.warn(`[followup-runner] ⚠️ 兜底落盘失败: ${fallbackErr}`);
+  }
+}
+
+/**
+ * 🆕 V2 Phase 4: 异步归档轮次记忆（提取自主循环，减少嵌套深度）
+ *
+ * fire-and-forget：归档失败不影响主流程。
+ */
+function archiveRoundMemory(
+  orchestrator: Orchestrator,
+  taskTree: TaskTree,
+  roundId: string,
+  queued: FollowupRun,
+  sessionId: string,
+): void {
+  try {
+    const memService = createMemoryService(queued.run.config, "main");
+    if (!memService) return;
+    const roundGoal = orchestrator.getRoundRootDescription(taskTree, roundId);
+    const completedCount = taskTree.subTasks.filter((t) => t.status === "completed").length;
+    const totalCount = taskTree.subTasks.length;
+    memService.archive({
+      summary: {
+        taskGoal: roundGoal || taskTree.rootTask || "任务树",
+        keyActions: taskTree.subTasks
+          .filter((t) => t.status === "completed")
+          .map((t) => t.summary ?? t.prompt?.substring(0, 60) ?? "子任务"),
+        keyDecisions: [] as string[],
+        blockers: taskTree.subTasks
+          .filter((t) => t.status === "failed")
+          .map((t) => t.error ?? "未知错误"),
+        totalTurns: totalCount,
+        createdAt: Date.now(),
+        progress: {
+          completed: completedCount,
+          total: totalCount,
+          percentage: totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0,
+        },
+      },
+      context: { userId: queued.run.agentAccountId ?? "default", sessionId },
+    }).catch((err: unknown) => console.warn(`[followup-runner] Memory archive failed: ${err}`));
+  } catch { /* 归档失败不影响主流程 */ }
 }
 
 export function createFollowupRunner(params: {
@@ -189,7 +316,7 @@ export function createFollowupRunner(params: {
       // 🔧 尝试从任务树中找到对应的子任务
       // 优先用 subTaskId 精确匹配，回退到 prompt 匹配（向后兼容）
       let taskTree = await orchestrator.loadTaskTree(sessionId);
-      let subTask: import("../../agents/intelligent-task-decomposition/types.js").SubTask | undefined;
+      let subTask: SubTask | undefined;
       if (taskTree) {
         if (queued.subTaskId) {
           subTask = taskTree.subTasks.find((t) => t.id === queued.subTaskId);
@@ -201,33 +328,38 @@ export function createFollowupRunner(params: {
         }
       }
       
-      // 🔧 如果找到了子任务，更新状态为 "active" 并启动文件追踪
+      // 🆕 V2 Phase 4: 通过 onTaskStarting 钩子统一处理任务启动前的准备
+      let startDecisionCtx: ExecutionContext | undefined;
       if (taskTree && subTask) {
         console.log(`[followup-runner] 🔍 Found sub task in tree: ${subTask.id}`);
 
-        // 🔧 P2: 自动触发递归分解 — 复杂子任务执行前检测复杂度
-        // 如果分解成功，跳过当前任务的直接执行，让子任务通过队列执行
-        try {
-          if (orchestrator.shouldAutoDecompose(taskTree, subTask)) {
+        const startDecision = orchestrator.onTaskStarting(taskTree, subTask, {
+          isQueueTask: queued.isQueueTask,
+          isRootTask: queued.isRootTask ?? queued.isNewRootTask,
+          isNewRootTask: queued.isNewRootTask,
+          taskDepth: queued.taskDepth,
+          rootTaskId: queued.rootTaskId,
+        });
+        startDecisionCtx = startDecision.executionContext;
+
+        // 钩子判断应先自动分解 → 委托分解后跳过直接执行
+        if (startDecision.shouldDecompose) {
+          try {
             const decomposed = await orchestrator.decomposeSubTask(taskTree, subTask.id);
             if (decomposed.length > 0) {
               console.log(
                 `[followup-runner] ✅ P2: 子任务 ${subTask.id} 已自动分解为 ${decomposed.length} 个子任务，跳过直接执行`,
               );
-              // 触发队列继续（分解后的子任务会作为 pending 被后续 drain 拾取）
               if (queued.run.sessionKey) {
                 finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
               }
               return;
             }
+          } catch (decompErr) {
+            console.warn(`[followup-runner] ⚠️ P2: 自动递归分解失败（继续正常执行）: ${decompErr}`);
           }
-        } catch (decompErr) {
-          console.warn(`[followup-runner] ⚠️ P2: 自动递归分解失败（继续正常执行）: ${decompErr}`);
         }
 
-        // 🔧 启动文件追踪（与 orchestrator.executeSubTask 对齐）
-        // write 工具调用 trackFileWrite() 时会自动关联到此 taskId
-        beginTracking(subTask.id);
         await orchestrator.saveTaskTree(taskTree);
       }
       
@@ -236,18 +368,27 @@ export function createFollowupRunner(params: {
       let fallbackProvider = queued.run.provider;
       let fallbackModel = queued.run.model;
       try {
-        // 🔧 设置全局上下文（融合方案 1+2+3）
-        // 只有 isNewRootTask=true 才视为"用户级根任务"（可自由 enqueue）；
-        // 普通子任务保持 isQueueTask=true，通过 depth guard 控制递归分解。
+        // 🆕 V2 Phase 4: ExecutionContext 由 onTaskStarting 钩子构建，回退到旧推导
         const isNewRoot = queued.isNewRootTask ?? false;
-        
+        const effectiveIsQueueTask = isNewRoot ? false : (queued.isQueueTask ?? true);
+        const effectiveDepth = queued.taskDepth ?? 0;
+
+        const execCtx = startDecisionCtx
+          ?? queued.executionContext
+          ?? createExecutionContext({
+              role: deriveExecutionRole({ isQueueTask: effectiveIsQueueTask, isRootTask: isNewRoot, isNewRootTask: isNewRoot, taskDepth: effectiveDepth }),
+              roundId: queued.rootTaskId ?? "",
+              depth: effectiveDepth,
+            });
+
         setCurrentFollowupRunContext({ 
           ...queued, 
-          isQueueTask: isNewRoot ? false : (queued.isQueueTask ?? true),  // 🔧 只有新根任务才允许自由入队
-          isRootTask: isNewRoot,             // 🔧 只有新根任务标记为根任务
-          isNewRootTask: isNewRoot,          // 传播 isNewRootTask 标记
-          taskDepth: queued.taskDepth ?? 0,  // 传播任务树深度
-          rootTaskId: queued.rootTaskId,     // 传播轮次 ID（递归分解时继承）
+          isQueueTask: effectiveIsQueueTask,
+          isRootTask: isNewRoot,
+          isNewRootTask: isNewRoot,
+          taskDepth: effectiveDepth,
+          rootTaskId: queued.rootTaskId,
+          executionContext: execCtx,
         });
         
         const fallbackResult = await runWithModelFallback({
@@ -351,84 +492,21 @@ export function createFollowupRunner(params: {
             );
           }
           
-          // 🆕 兜底落盘：检测 LLM 是否偷懒（生成了大段内容但未调用 write 工具落盘）
-          const FILE_TOOLS = new Set(["write", "send_file"]);
-          const MIN_FALLBACK_CHARS = 500;
-          const toolMetas = runResult.toolMetas ?? [];
-          const usedFileTool = toolMetas.some((m) => FILE_TOOLS.has(m.toolName));
+          // 🆕 V2 Phase 4: 兜底落盘（委托提取的辅助函数）
+          await handleFallbackPersistence({
+            subTask,
+            outputText,
+            toolMetas: runResult.toolMetas ?? [],
+            sessionId,
+            queued,
+          });
           
-          if (!usedFileTool && outputText.length >= MIN_FALLBACK_CHARS) {
-            try {
-              const taskDir = path.join(
-                os.homedir(), ".clawdbot", "tasks", sessionId, "fallback-outputs",
-              );
-              await fs.mkdir(taskDir, { recursive: true });
-              const safeId = (subTask.id ?? crypto.randomUUID()).replace(/[^a-zA-Z0-9_-]/g, "_");
-              const fallbackFile = path.join(taskDir, `${safeId}.txt`);
-              await fs.writeFile(fallbackFile, outputText, "utf-8");
-              console.log(
-                `[followup-runner] 📝 兜底落盘：LLM 未调用 write 工具，已自动保存 ${outputText.length} 字到 ${fallbackFile}`,
-              );
-              // 记录到子任务元数据
-              if (!subTask.metadata) subTask.metadata = {};
-              subTask.metadata.fallbackFilePath = fallbackFile;
-              subTask.metadata.fallbackReason = "LLM 未调用 write 工具，系统自动兜底落盘";
-              
-              // 🆕 立即发送兜底文件到用户的聊天频道
-              const sendResult = await sendFallbackFile({
-                filePath: fallbackFile,
-                caption: subTask.summary
-                  ? `📝 ${subTask.summary}（系统自动保存）`
-                  : `📝 子任务输出（系统自动保存）`,
-                queued,
-              });
-              if (!sendResult.ok) {
-                console.warn(
-                  `[followup-runner] ⚠️ 兜底文件发送失败 (${sendResult.method}): ${sendResult.error}`,
-                );
-              }
-              // 🔧 Session 瘦身：截断 session 文件中的最后一条 assistant 消息
-              // 防止子任务输出累积导致 payload 无限膨胀 → LLM 超时
-              try {
-                const sessionFilePath = queued.run.sessionFile;
-                if (sessionFilePath) {
-                  const rawSession = await fs.readFile(sessionFilePath, "utf-8");
-                  const lines = rawSession.split("\n");
-                  // 反向查找最后一条 assistant 消息
-                  for (let i = lines.length - 1; i >= 0; i--) {
-                    const line = lines[i].trim();
-                    if (!line) continue;
-                    try {
-                      const entry = JSON.parse(line);
-                      if (entry.role === "assistant" && Array.isArray(entry.content)) {
-                        const textPart = entry.content.find((c: { type: string }) => c.type === "text");
-                        if (textPart && typeof textPart.text === "string" && textPart.text.length > 500) {
-                          const truncated = textPart.text.substring(0, 200) + `\n\n[内容已落盘到文件: ${fallbackFile}，此处截断以控制 session 大小]`;
-                          textPart.text = truncated;
-                          lines[i] = JSON.stringify(entry);
-                          await fs.writeFile(sessionFilePath, lines.join("\n"), "utf-8");
-                          console.log(`[followup-runner] ✂️ Session 瘦身：截断 assistant 消息 ${outputText.length} → ${truncated.length} 字`);
-                        }
-                        break;
-                      }
-                    } catch { /* 非 JSON 行，跳过 */ }
-                  }
-                }
-              } catch (trimErr) {
-                console.warn(`[followup-runner] ⚠️ Session 瘦身失败（不阻塞）: ${trimErr}`);
-              }
-            } catch (fallbackErr) {
-              console.warn(`[followup-runner] ⚠️ 兜底落盘失败: ${fallbackErr}`);
-            }
-          }
-          
-          // 🔧 P0+P1: 统一后处理（质量评估 + 决策响应 + 文件验证 + 交付产物 + 持久化）
-          // postProcessSubTaskCompletion() 内部已保存 taskTree
+          // 🆕 V2 Phase 4: 统一后处理（onTaskCompleted 钩子替代散装逻辑）
+          // 内部编排：postProcess + 质量评估 + 轮次完成检查 + markRoundCompleted
           try {
-            const postResult = await orchestrator.postProcessSubTaskCompletion(taskTree, subTask);
+            const postResult = await orchestrator.onTaskCompleted(taskTree, subTask, queued.rootTaskId);
 
             if (postResult.needsRequeue) {
-              // restart 决策：重新入队执行
               console.log(
                 `[followup-runner] 🔄 子任务 ${subTask.id} 质量不达标，重新入队 (restart): ` +
                 `${JSON.stringify(postResult.findings)}`,
@@ -440,152 +518,67 @@ export function createFollowupRunner(params: {
             }
 
             if (postResult.markedFailed) {
-              // overthrow 决策：标记失败，停止后续执行
               console.error(
                 `[followup-runner] ❌ 子任务 ${subTask.id} 质量严重不通过 (overthrow): ` +
                 `${JSON.stringify(postResult.findings)}`,
               );
               return;
             }
-          } catch (ppErr) {
-            // 后处理失败不影响已保存的子任务输出，兜底保存
-            console.warn(`[followup-runner] ⚠️ 子任务后处理异常（不阻塞）: ${ppErr}`);
-            await orchestrator.saveTaskTree(taskTree);
-          }
 
-          console.log(`[followup-runner] ✅ Sub task completed: ${subTask.id}`);
-          
-          // 🆕 检查当前轮次是否全部完成（用 rootTaskId 隔离，不受其它轮次影响）
-          const currentRootTaskId = queued.rootTaskId ?? subTask?.rootTaskId;
-          const allDone = currentRootTaskId
-            ? orchestrator.isRoundCompleted(taskTree, currentRootTaskId)
-            : false; // 无 rootTaskId 的旧任务不做完成判定
-          if (allDone && currentRootTaskId) {
-            await orchestrator.markRoundCompleted(taskTree, currentRootTaskId);
-            console.log(`[followup-runner] 🏁 Round completed: ${currentRootTaskId} (tree: ${taskTree.id})`);
-            // 重新加载以获取最新状态
-            taskTree = (await orchestrator.loadTaskTree(sessionId)) ?? taskTree;
-            
-            // 异步归档（fire-and-forget，不阻塞主流程）
-            try {
-              const memService = createMemoryService(queued.run.config, "main");
-              if (memService) {
-                const completedCount = taskTree.subTasks.filter((t) => t.status === "completed").length;
-                const totalCount = taskTree.subTasks.length;
-                const archiveSummary = {
-                  taskGoal: taskTree.rootTask ?? "任务树",
-                  keyActions: taskTree.subTasks
-                    .filter((t) => t.status === "completed")
-                    .map((t) => t.summary ?? t.prompt?.substring(0, 60) ?? "子任务"),
-                  keyDecisions: [] as string[],
-                  blockers: taskTree.subTasks
-                    .filter((t) => t.status === "failed")
-                    .map((t) => t.error ?? "未知错误"),
-                  totalTurns: totalCount,
-                  createdAt: Date.now(),
-                  progress: {
-                    completed: completedCount,
-                    total: totalCount,
-                    percentage: totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0,
-                  },
-                };
-                memService.archive({
-                  summary: archiveSummary,
-                  context: {
-                    userId: queued.run.agentAccountId ?? "default",
-                    sessionId,
-                  },
-                }).catch((err) => console.warn(`[followup-runner] Memory archive failed: ${err}`));
-              }
-            } catch {
-              // 归档失败不影响主流程
-            }
+            console.log(`[followup-runner] ✅ Sub task completed: ${subTask.id}`);
 
-            // 🔧 P4: 统一合并逻辑 — 使用 FileManager.mergeTaskOutputs() 多策略合并
-            // （producedFilePaths → artifacts → output.txt），替代简单文本拼接
-            const completedTasks = taskTree.subTasks.filter(
-              (t) => t.status === "completed",
-            );
-            if (completedTasks.length > 0) {
-              try {
-                const mergedFile = await orchestrator.mergeRoundOutputs(taskTree);
-                console.log(
-                  `[followup-runner] 📝 已合并 ${completedTasks.length} 个子任务输出到 ${mergedFile}`,
-                );
+            // 轮次完成后续处理（由 onTaskCompleted 内部判定并设置标志）
+            if (postResult.roundCompleted && postResult.completedRoundId) {
+              console.log(`[followup-runner] 🏁 Round completed: ${postResult.completedRoundId} (tree: ${taskTree.id})`);
+              taskTree = (await orchestrator.loadTaskTree(sessionId)) ?? taskTree;
+
+              // 委托 onRoundCompleted 钩子：合并输出 + 交付报告
+              const roundResult = await orchestrator.onRoundCompleted(taskTree, postResult.completedRoundId);
+
+              // 发送合并文件
+              if (roundResult.mergedFilePath) {
                 const mergedSendResult = await sendFallbackFile({
-                  filePath: mergedFile,
-                  caption: `📝 完整输出（${completedTasks.length} 个子任务合并）`,
+                  filePath: roundResult.mergedFilePath,
+                  caption: `📝 完整输出（子任务合并）`,
                   queued,
                 });
                 if (!mergedSendResult.ok) {
-                  console.warn(
-                    `[followup-runner] ⚠️ 合并文件发送失败 (${mergedSendResult.method}): ${mergedSendResult.error}`,
-                  );
                   await sendFollowupPayloads([{
-                    text: `📝 ${completedTasks.length} 个子任务输出已合并保存到：\n${mergedFile}`,
+                    text: `📝 子任务输出已合并保存到：\n${roundResult.mergedFilePath}`,
                   }], queued);
                 }
-              } catch (mergeErr) {
-                console.warn(`[followup-runner] ⚠️ 合并子任务输出失败: ${mergeErr}`);
               }
-            }
 
-            // 🆕 Step 6b: 生成并发送结构化交付报告
-            try {
-              const reporter = new DeliveryReporter();
-              const report = reporter.generateReport(taskTree);
-              const formattedReport = reporter.formatAsMarkdown(report);
-              
-              await sendFollowupPayloads([{ text: formattedReport }], queued);
-              
-              console.log(`[followup-runner] 📦 Delivery report sent (${report.statistics.successRate} success)`);
-            } catch (reportErr) {
-              console.warn(`[followup-runner] ⚠️ Delivery report failed: ${reportErr}`);
+              // 发送交付报告
+              if (roundResult.deliveryReportMarkdown) {
+                await sendFollowupPayloads([{ text: roundResult.deliveryReportMarkdown }], queued);
+                console.log(`[followup-runner] 📦 Delivery report sent`);
+              }
+
+              // 异步归档（fire-and-forget，委托辅助函数）
+              archiveRoundMemory(orchestrator, taskTree, postResult.completedRoundId, queued, sessionId);
             }
+          } catch (ppErr) {
+            console.warn(`[followup-runner] ⚠️ 子任务后处理异常（不阻塞）: ${ppErr}`);
+            await orchestrator.saveTaskTree(taskTree);
           }
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         defaultRuntime.error?.(`Followup agent failed before reply: ${message}`);
         
-        // 🔧 检查错误类型
-        const isRetryable = isRetryableError(err);
-        
-        // 🔧 如果找到了子任务，更新状态并保存错误信息
+        // 🆕 V2 Phase 4: 委托 onTaskFailed 钩子集中处理重试/级联/停止
         if (taskTree && subTask) {
-          // 🔧 异常时清理文件追踪（防止内存泄漏）
           clearTracking(subTask.id);
-          subTask.error = message;
-          subTask.retryCount++;
-          
-          if (isRetryable && subTask.retryCount < 3) {
-            // ✅ 可重试错误，标记为 "pending" 并重新入队
-            subTask.status = "pending";
-            await orchestrator.saveTaskTree(taskTree);
-            console.warn(`[followup-runner] ⚠️ Sub task failed (retryable), will retry: ${subTask.id} (attempt ${subTask.retryCount}/3)`);
-            
-            // 重新入队
+          const failDecision = await orchestrator.onTaskFailed(taskTree, subTask, err);
+
+          if (failDecision.needsRequeue) {
+            console.warn(`[followup-runner] ⚠️ ${failDecision.reason}`);
             if (queued.run.sessionKey) {
-              const queueKey = queued.run.sessionKey;
-              finalizeWithFollowup(undefined, queueKey, createFollowupRunner(params));
+              finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
             }
           } else {
-            // ❌ 不可重试错误或重试次数用尽，标记为 "failed"
-            subTask.status = "failed";
-            await orchestrator.saveTaskTree(taskTree);
-            
-            // 更新任务树状态
-            const anyFailed = taskTree.subTasks.some((t) => t.status === "failed");
-            if (anyFailed) {
-              taskTree.status = "failed";
-              await orchestrator.saveTaskTree(taskTree);
-            }
-            
-            console.error(`[followup-runner] ❌ Sub task failed (non-retryable or max retries): ${subTask.id} - ${message}`);
-            
-            // ❌ 停止执行后续任务
-            console.error(`[followup-runner] ❌ Task tree failed, stopping queue: ${taskTree.id}`);
-            // 不再调用 finalizeWithFollowup，停止队列执行
+            console.error(`[followup-runner] ❌ ${failDecision.reason}`);
           }
         } else {
           // 没有找到子任务，继续执行下一个任务（保持原有行为）
