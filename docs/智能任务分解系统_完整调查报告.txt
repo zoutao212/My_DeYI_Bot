@@ -1,0 +1,996 @@
+================================================================================
+  Clawdbot 智能任务分解系统 - 完整调查报告
+  生成时间: 2026-02-09（P0-P4 修复后更新）
+================================================================================
+
+目录
+  第一部分：系统概述与架构总览
+  第二部分：核心组件清单与职责
+  第三部分：完整调用链梳理（7个阶段）
+  第四部分：数据模型分析
+  第五部分：断裂点与已知问题
+  第六部分：改进方向与建议
+  第七部分：设计文档vs实际代码对照表
+  第八部分：结论与优先级排序
+  第九部分：端到端验收测试任务（30步 · 长篇小说生成+Telegram交付）
+
+================================================================================
+第一部分：系统概述与架构总览
+================================================================================
+
+1.1 系统定位
+  LLM驱动的自动化任务管理框架，核心能力：
+  - 任务识别与分解：LLM自主判断，自动拆分复杂任务
+  - 递归分解：支持最多3层（自适应深度控制）
+  - 自动队列执行：子任务自动排队、执行、推进
+  - AI自主质量评估：分解后、子任务完成后、整体完成后
+  - 动态调整：continue/adjust/restart/overthrow
+  - 失败学习：记录失败经验，下次参考
+  - 文件产出追踪与兜底落盘
+  - 合并输出与交付报告生成
+
+1.2 技术栈
+  TypeScript(ESM), Node22+/Bun, completeSimple(pi-ai)+auth profiles
+  持久化:JSON文件(~/.clawdbot/tasks/{sessionId}/)
+  队列:内存队列(FOLLOWUP_QUEUES Map)
+  并行:Promise.allSettled
+
+1.3 核心目录
+  src/agents/intelligent-task-decomposition/ (核心，20+文件)
+  src/agents/tools/enqueue-task-tool.ts (入口工具)
+  src/auto-reply/reply/followup-runner.ts (执行引擎)
+  src/auto-reply/reply/queue/drain.ts (队列调度)
+  .kiro/specs/ (设计文档3组)
+
+================================================================================
+第二部分：核心组件清单与职责
+================================================================================
+
+2.1 Orchestrator（任务协调器）- 中枢大脑
+  文件：orchestrator.ts（~1885行，最大文件；P0-P4修复后增加约130行）
+  职责：协调所有组件，管理完整任务生命周期
+  主要方法：
+    initializeTaskTree()                - 创建任务树+FileManager+复杂度评分
+    addSubTask()                        - 添加子任务（深度计算、状态守卫）
+    executeSubTask()                    - 执行子任务（重试+文件追踪+委托postProcess）
+    ★ postProcessSubTaskCompletion()   - [P0新增] 公共后处理（质检+决策+文件验证+交付+持久化）
+    ★ ensureFileManager()              - [P0新增] 延迟初始化FileManager（followup-runner路径兜底）
+    ★ shouldAutoDecompose()            - [P2新增] 轻量前置检查（prompt>500字符+深度未满）
+    ★ mergeRoundOutputs()              - [P4新增] 统一合并入口（委托FileManager.mergeTaskOutputs）
+    decomposeSubTask()                  - 递归分解（LLM分解+质量评估）
+    adjustTaskTree()                    - 动态调整（验证+应用变更）
+    isRoundCompleted()                  - 轮次完成判定（rootTaskId隔离）
+    markRoundCompleted()                - 标记轮次完成
+    getExecutableTasks()                - 获取可执行任务（依赖检查+汇总注入+批量分组）
+    reviewSubTaskCompletion()           - 子任务质量评估
+    reviewRoundCompletion()             - 轮次整体质量评估
+    generateFinalDeliverable()          - 生成最终交付产物
+    generateDeliveryReport()            - 生成结构化交付报告
+    calculateAdaptiveMaxDepth()         - 自适应深度控制
+    validateDecomposition()             - 分解验证（循环依赖检测）
+    renderTaskBoard()                   - 任务看板渲染
+    buildTaskContextPrompt()            - 构建任务上下文注入SystemPrompt
+
+2.2 enqueue_task工具 - 入口大门
+  文件：enqueue-task-tool.ts（409行）
+  核心逻辑：
+    全局Orchestrator单例（globalOrchestrator）
+    全局FollowupRun上下文（currentFollowupRunContext）
+    循环检测（融合3层：isQueueTask + isRootTask + depth guard）
+    轮次隔离（rootTaskId: UUID，同一次用户消息共享）
+    自适应深度控制（首次入队自动计算maxDepth）
+    参数验证（isNewRootTask与parentId互斥）
+    构建FollowupRun并enqueueFollowupRun()
+
+2.3 followup-runner - 执行引擎
+  文件：followup-runner.ts（~701行；P0-P4修复后约+20行）
+  核心流程（修复后）：
+    1)  加载任务树，查找子任务（subTaskId精确匹配/prompt回退）
+    2)  ★[P2] shouldAutoDecompose() 前置检查 → 命中则调 decomposeSubTask() 并跳过直接执行
+    3)  启动文件追踪 beginTracking()
+    4)  设置全局上下文 setCurrentFollowupRunContext()
+    5)  注入强制落盘指令到prompt本体
+    6)  注入兄弟上下文到extraSystemPrompt（buildSiblingContext）
+    7)  调用runEmbeddedPiAgent()执行LLM（含model fallback）
+    8)  收集文件追踪结果 collectTrackedFiles()
+    9)  兜底落盘（LLM未调用write时自动保存）
+    10) Session瘦身（截断超长assistant消息）
+    11) ★[P0+P1] 调用 postProcessSubTaskCompletion()（统一质检+决策响应+文件验证+持久化）
+        - restart → 重置 pending + finalizeWithFollowup() 重新入队
+        - overthrow → 标记 failed + return 停止执行
+        - adjust → 内部自动应用 TaskAdjuster 变更
+    12) 轮次完成检查
+    13) ★[P4] 轮次完成后：mergeRoundOutputs()统一合并+交付报告+内存归档
+
+2.4 drain.ts - 队列调度器
+  文件：drain.ts（281行）
+  守卫机制：
+    守卫A：任务树全局status已终结 -> 丢弃残留
+    守卫B：rootTaskId轮次完成 -> 逐项检查，丢弃已完成的
+    守卫C：单个子任务已completed/failed -> 跳过
+  并行执行：
+    dependency-analyzer.findParallelGroups() 检测无依赖任务
+    Promise.allSettled() 并发执行
+
+2.5 LLMTaskDecomposer - 分解大脑
+  文件：llm-task-decomposer.ts（616行）
+  核心方法：
+    canDecompose()          - 判断可分解性（深度/已分解/复杂度）
+    decomposeRecursively()  - 递归分解（构建prompt->LLM->解析）
+    decomposeWithLessons()  - 基于失败经验改进分解
+    generateAdjustments()   - 生成调整方案
+    estimateTask()          - 估算复杂度和时长
+    detectWritingTask()     - 自动识别写作任务
+  降级：LLM失败时降级到规则驱动（返回2个默认子任务）
+
+2.6 QualityReviewer - 质检官
+  文件：quality-reviewer.ts（714行）
+  评估触发点：
+    reviewDecomposition()       - 初始分解后
+    reviewSubTaskCompletion()   - 子任务完成后
+    reviewOverallCompletion()   - 所有子任务完成后
+    analyzeFailure()            - 任务失败后
+  决策：continue / adjust / restart / overthrow
+  降级：LLM失败时默认"passed"+"continue"
+
+2.7 TaskTreeManager - 持久化管家
+  文件：task-tree-manager.ts（986行）
+  特性：原子写入(.tmp->rename), 自动备份(.bak), 检查点(最多10个),
+        rootTaskId作用域更新, Markdown同步渲染
+
+2.8 FileManager - 文件系统
+  文件：file-manager.ts（558行）
+  目录：~/.clawdbot/tasks/{sessionId}/
+    TASK_TREE.json, metadata/, checkpoints/, logs/,
+    tasks/{subTaskId}/, deliverables/, fallback-outputs/, temp/
+
+2.9 其他辅助组件
+  SystemLLMCaller(120行)   - LLM调用桥接层
+  BatchExecutor(372行)     - 批量执行器（合并prompt，拆分输出）
+  TaskGrouper              - 任务分组器
+  DeliveryReporter(178行)  - 结构化交付报告
+  ComplexityScorer         - 复杂度评分器
+  DependencyAnalyzer       - 依赖分析+并行组检测
+  FileTracker              - 文件追踪器
+  TaskAdjuster(397行)      - 任务动态调整器
+  OutputFormatter          - 输出格式化器
+  RetryManager             - 重试管理器（指数退避）
+  ErrorHandler             - 错误处理器
+  RecoveryManager          - 恢复管理器（断点恢复）
+
+================================================================================
+第三部分：完整调用链梳理（7个阶段）
+================================================================================
+
+阶段1：任务创建
+  触发：用户消息 -> LLM判断需要分解 -> 调用enqueue_task
+  调用链：
+    用户消息 -> agent-runner -> LLM -> enqueue_task.execute()
+      -> 循环检测(isQueueTask/isRootTask/depth guard)
+      -> 参数验证(isNewRootTask与parentId互斥)
+      -> orchestrator.loadTaskTree() / initializeTaskTree()
+      -> calculateAdaptiveMaxDepth()（首次）
+      -> 轮次ID管理（生成/继承rootTaskId）
+      -> orchestrator.addSubTask()
+      -> 构建FollowupRun(isQueueTask/isRootTask/taskDepth/subTaskId/rootTaskId)
+      -> enqueueFollowupRun() 入队
+
+  数据流：
+    prompt+summary+parentId+waitForChildren+isNewRootTask
+      -> SubTask{id,prompt,summary,status:"pending",depth,rootTaskId}
+      -> FollowupRun{prompt,subTaskId,rootTaskId,isQueueTask,taskDepth}
+      -> FOLLOWUP_QUEUES.get(key).items.push(followupRun)
+
+阶段2：任务分解（可选的递归分解）
+  触发：orchestrator.decomposeSubTask()被调用
+  调用链：
+    orchestrator.decomposeSubTask(taskTree, subTaskId)
+      -> llmDecomposer.canDecompose()
+      -> llmDecomposer.decomposeRecursively()
+        -> buildDecompositionPrompt()（含祖先上下文）
+        -> callLLM()（优先系统管线，降级规则驱动）
+        -> parseDecompositionResponse()（JSON解析+写作检测）
+      -> qualityReviewer.reviewDecomposition()
+        -> continue: 通过
+        -> adjust: adjustTaskTree()
+        -> restart: restartDecomposition()（保留经验重新分解）
+        -> overthrow: overthrowDecomposition()（完全推翻）
+      -> taskTreeManager.addSubTask()
+      -> markAsDecomposed()
+
+  ★ [P2修复后] 递归分解已在 followup-runner 中自动触发：
+    shouldAutoDecompose() 判断 prompt>500字符且深度未满 → 命中时调用 decomposeSubTask()
+    分解成功后跳过直接执行，子任务作为 pending 被后续 drain 拾取。
+    LLM通过 enqueue_task 直接创建的扁平子任务(depth=0)如果 prompt较短，
+    仍然直接执行不会被分解，这是符合预期的行为。
+
+阶段3：任务执行
+  触发：drain.ts调度 -> followup-runner执行
+  调用链：
+    scheduleFollowupDrain(key, runFollowup)
+      -> drain while循环
+        -> 守卫A：任务树全局status检查
+        -> 守卫B：rootTaskId轮次完成检查
+        -> 守卫C：单个子任务状态检查
+        -> 并行组检测 findParallelGroups()
+          -> Promise.allSettled() 并发
+        -> 逐个执行 runFollowup(next)
+
+    followup-runner(queued)
+      -> 1.加载任务树+查找子任务(subTaskId精确/prompt回退)
+      -> 2.启动文件追踪 beginTracking(subTask.id)
+      -> 3.设置全局上下文 setCurrentFollowupRunContext()
+      -> 4.注入强制落盘指令到prompt本体
+      -> 5.注入兄弟上下文到extraSystemPrompt
+      -> 6.调用runEmbeddedPiAgent()执行LLM(含model fallback)
+      -> 7.收集结果+更新子任务状态
+      -> 8.收集文件追踪 collectTrackedFiles()
+      -> 9.兜底落盘（见阶段5）
+      -> 10.质量评估（见阶段4）
+      -> 11.轮次完成检查（见阶段6）
+      -> 12.发送回复 sendFollowupPayloads()
+
+阶段4：质量评估
+  触发点1：followup-runner中子任务执行完成后（通过postProcessSubTaskCompletion）
+  触发点2：followup-runner中轮次完成后（整体评估）
+  调用链（P0+P1修复后）：
+    orchestrator.postProcessSubTaskCompletion(taskTree, subTask)
+      -> qualityReviewer.reviewSubTaskCompletion()
+        -> 构建评估prompt
+        -> 调用LLM评估
+        -> parseReviewResponse()
+        -> 保存到quality-reviews.jsonl + subTask.metadata.qualityReview
+    结果处理（决策已真正生效）：
+      continue  -> 正常继续
+      adjust    -> 自动调用 adjustTaskTree() 应用 TaskAdjuster 变更
+      restart   -> 重置 pending + retryCount++ + needsRequeue=true → followup-runner 重新入队
+      overthrow -> 标记 failed + markedFailed=true → followup-runner 停止后续执行
+
+  ★ [已修复] followup-runner 不再自己调用 reviewSubTaskCompletion()，
+    而是统一委托 postProcessSubTaskCompletion()，质检决策与 executeSubTask()
+    完全对齐，4种决策分支均真正生效。
+
+阶段5：落盘（文件持久化）
+  三层落盘策略：
+
+  第1层：LLM主动落盘（理想情况）
+    LLM遵循prompt强制规则 -> 调用write工具写文件
+    file-tracker.ts自动追踪 -> collectTrackedFiles()收集路径
+
+  第2层：系统兜底落盘（LLM偷懒时）
+    followup-runner检测LLM是否调用write/send_file
+    未调用且输出>500字 -> 自动保存到fallback-outputs/{subTaskId}.txt
+    记录到metadata.fallbackFilePath
+    立即sendFallbackFile()发送到用户频道
+    Session瘦身：截断超长assistant消息
+
+  第3层：Orchestrator输出保存
+    orchestrator.executeSubTask()中 -> fileManager.saveTaskOutput()
+    保存到tasks/{subTaskId}/output.txt
+    保存元数据+时间线事件
+
+阶段6：总结与合并
+  触发：followup-runner检测到轮次完成后
+  调用链：
+    orchestrator.isRoundCompleted() === true
+      -> orchestrator.markRoundCompleted()
+
+    ★[P4修复后] 统一合并逻辑：
+      -> orchestrator.mergeRoundOutputs(taskTree)
+        -> ensureFileManager() 延迟初始化
+        -> FileManager.mergeTaskOutputs() 三策略合并：
+           策略1：producedFilePaths（LLM主动写入的文件）
+           策略2：artifacts（子任务产物目录）
+           策略3：output.txt（兜底文本输出）
+      -> sendFallbackFile() 发送合并文件
+
+    生成交付报告：
+      -> DeliveryReporter.generateReport()
+      -> reporter.formatAsMarkdown()
+      -> sendFollowupPayloads()发送
+
+    内存归档（异步fire-and-forget）：
+      -> createMemoryService().archive()
+
+  汇总任务机制（getExecutableTasks中）：
+    所有非根任务完成 -> 根任务变为可执行
+    自动收集子任务输出注入根任务prompt
+    添加汇总指令（整合内容、保持连贯）
+
+  ★ [P4修复后] 合并逻辑已统一为两层：
+    1) mergeRoundOutputs()（轮次级合并，替代旧的三套逻辑）
+    2) getExecutableTasks汇总注入（仍保留，用于根任务prompt组装，定位不同）
+
+阶段7：交付与发送
+  交付产物类型：
+    1) 兜底落盘文件（单个.txt）
+    2) 合并兜底文件（merged_output.txt）
+    3) 交付报告（Markdown）
+    4) 最终交付产物（generateFinalDeliverable）
+    5) 汇总任务文件输出
+  发送通道：
+    sendFallbackFile() - 多频道路由
+    sendFollowupPayloads() - 文本/媒体
+    Orchestrator.sendFileToChannel() - 仅Telegram
+    Orchestrator.sendFileToTelegram() - Telegram Bot API
+
+================================================================================
+第四部分：数据模型分析
+================================================================================
+
+4.1 核心类型层次
+  TaskTree
+    id: string (sessionId)
+    rootTask: string
+    subTasks: SubTask[]
+    status: "pending"|"active"|"completed"|"failed"
+    checkpoints: string[]
+    version?, maxDepth?(默认3), qualityReviewEnabled?
+    qualityStatus?, failureHistory?, restartCount?(最多2), overthrowCount?(最多1)
+    metadata?: TaskTreeMetadata, batches?: TaskBatch[]
+
+  SubTask
+    id, prompt, summary
+    status: "pending"|"active"|"completed"|"failed"|"interrupted"
+    output?, error?, retryCount
+    parentId?, depth?, children?, dependencies?
+    canDecompose?, decomposed?, waitForChildren?
+    rootTaskId? (轮次隔离ID)
+    qualityStatus?, metadata?: SubTaskMetadata
+
+  SubTaskMetadata
+    estimatedDuration?, actualDuration?, complexity?, priority?
+    estimatedTokens?, canBatch?, batchId?, batchIndex?
+    isSummaryTask?, isRootTask?
+    requiresFileOutput?, expectedFileTypes?
+    producedFiles?, producedFilePaths?
+    fallbackFilePath?, fallbackReason?
+    qualityReview?: {status, decision, findings, suggestions}
+
+4.2 FollowupRun（队列项）
+  prompt, summaryLine?, enqueuedAt, run: RunContext
+  isQueueTask?, isRootTask?, isNewRootTask?
+  taskDepth?, subTaskId?, rootTaskId?
+  originatingChannel?, originatingTo?, originatingAccountId?
+  originatingThreadId?, originatingChatType?
+
+4.3 持久化文件结构
+  ~/.clawdbot/tasks/{sessionId}/
+    TASK_TREE.json          (主文件)
+    TASK_TREE.json.bak      (备份)
+    TASK_TREE.md            (Markdown可视化)
+    README.md
+    metadata/               (配置、统计、时间线)
+    checkpoints/            ({uuid}.json, 最多10个)
+    logs/                   (execution.log, failures.log, errors.log)
+    tasks/{subTaskId}/      (output.txt, artifacts/, diff.txt)
+    deliverables/           (最终交付产物)
+    fallback-outputs/       (兜底文件, merged_output.txt)
+    quality-reviews.jsonl   (质量评估记录)
+    temp/                   (临时文件)
+
+================================================================================
+第五部分：断裂点与已知问题
+================================================================================
+
+断裂点1：followup-runner vs orchestrator.executeSubTask() 双轨问题（严重）
+  ✅ [已修复 - P0]
+  修复方案：
+    - 新增 postProcessSubTaskCompletion() 公共方法（约130行），
+      封装质量评估+决策响应+文件验证+交付产物+持久化
+    - 新增 ensureFileManager() 延迟初始化，解决 followup-runner 路径
+      FileManager 为 null 的问题
+    - executeSubTask() 内联逻辑重构为委托 postProcessSubTaskCompletion()
+      （减少约110行重复代码）
+    - followup-runner 统一调用 postProcessSubTaskCompletion()，
+      两条路径共享完全一致的后处理逻辑
+  效果：质检决策、文件验证、交付产物生成、文件发送在两条路径中完全对齐
+
+断裂点2：递归分解功能未实际启用（中等）
+  ✅ [已修复 - P2]
+  修复方案：
+    - 新增 shouldAutoDecompose() 轻量前置检查
+      （prompt > 500字符 + 深度未满 + 未被分解过）
+    - followup-runner 执行前调用，命中时调 decomposeSubTask() 并跳过直接执行
+    - 分解后的子任务作为 pending 被后续 drain 拾取
+  效果：maxDepth/canDecompose/decomposed字段真正生效，复杂任务自动递归分解
+
+断裂点3：三套合并逻辑（低）
+  ✅ [已修复 - P4]
+  修复方案：
+    - 新增 mergeRoundOutputs() 公共方法，委托 FileManager.mergeTaskOutputs()
+    - followup-runner 轮次完成合并：从简单文本拼接 → 三策略合并
+      （producedFilePaths → artifacts → output.txt）
+  效果：合并逻辑统一为两层（轮次级合并 + prompt汇总注入），消除不一致风险
+
+断裂点4：质量评估降级过于宽松（低）
+  ⚠️ [未修复 - 低优先级]
+  描述：QualityReviewer和LLMTaskDecomposer在LLM调用失败时都降级为"默认通过"。
+  后果：LLM服务不稳定时质量评估形同虚设。
+  注：P1修复后质检决策已真正生效，降级问题的影响面已大幅降低。
+
+断裂点5：文件发送只支持Telegram（低）
+  ⚠️ [未修复 - 低优先级]
+  描述：Orchestrator.sendFileToChannel()仅实现Telegram，其他频道打印警告。
+  注：sendFallbackFile()已通过routeReply支持多频道。
+
+断裂点6：批量执行未实际启用（低）
+  ✅ [已修复 - P3]
+  修复方案：
+    - initializeLLMCaller() 中同时创建 new BatchExecutor(caller)
+    - executeBatches() 不再抛出"批量执行器未初始化"错误
+  效果：BatchExecutor 已完成初始化，批量执行管线可用
+
+断裂点7：并行执行prompt匹配精度（低）
+  ⚠️ [已改进 - 低优先级]
+  描述：drain.ts并行组检测中prompt匹配可能不准确。
+  已改进为优先subTaskId匹配，保留prompt回退。
+
+================================================================================
+第六部分：改进方向与建议
+================================================================================
+
+6.1 高优先级（P0-P1） ✅ 全部已完成
+
+  [P0] 统一执行路径 ✅ 已完成
+    实现：postProcessSubTaskCompletion() + ensureFileManager()
+    变更文件：orchestrator.ts (+130行)、followup-runner.ts (替换质检调用)
+    关键代码：orchestrator.ts:195-340, followup-runner.ts:425-454
+
+  [P1] 启用质检决策响应 ✅ 已完成（随P0一同落地）
+    实现：postProcessSubTaskCompletion() 内部 switch(review.decision)
+    4种决策分支：continue/adjust/restart/overthrow 均真正生效
+    关键代码：orchestrator.ts:231-256, followup-runner.ts:430-449
+
+6.2 中等优先级（P2-P4） ✅ 全部已完成
+
+  [P2] 自动触发递归分解 ✅ 已完成
+    实现：shouldAutoDecompose() + followup-runner 前置检查
+    触发条件：prompt > 500字符 + 深度未满 + 未被分解过
+    关键代码：orchestrator.ts:589-601, followup-runner.ts:208-226
+
+  [P3] 初始化BatchExecutor ✅ 已完成
+    实现：initializeLLMCaller() 中同时 new BatchExecutor(caller)
+    关键代码：orchestrator.ts:88-92
+
+  [P4] 统一合并逻辑 ✅ 已完成
+    实现：mergeRoundOutputs() 委托 FileManager.mergeTaskOutputs()
+    三策略合并：producedFilePaths → artifacts → output.txt
+    关键代码：orchestrator.ts:614-617, followup-runner.ts:504-531
+
+6.3 低优先级（P5-P8） ⚠️ 待后续迭代
+
+  [P5] 扩展文件发送频道：统一使用sendFallbackFile()的routeReply路径
+  [P6] 增强降级质检：实现规则驱动基础质检（长度、格式、关键词）
+  [P7] 会话膨胀治理：考虑session分片
+  [P8] 任务看板UI：利用renderTaskBoard()和show_task_board工具
+
+================================================================================
+第七部分：设计文档 vs 实际代码对照表
+================================================================================
+
+功能                          设计  代码  实际运行  备注
+LLM驱动任务识别               Y     Y     Y        通过enqueue_task
+System Prompt引导             Y     Y     Y        含任务分解引导
+enqueue_task工具              Y     Y     Y        完整实现
+队列自动执行                  Y     Y     Y        drain+followup-runner
+循环检测                      Y     Y     Y        3层融合方案
+任务树持久化                  Y     Y     Y        原子写入+备份
+检查点管理                    Y     Y     Y        最多10个快照
+断点恢复                      Y     Y     部分     RecoveryManager已实现
+递归分解                      Y     Y     Y        ★P2修复：shouldAutoDecompose()自动触发
+质量评估(子任务)              Y     Y     Y        ★P0修复：postProcessSubTaskCompletion统一
+质量评估(整体)                Y     Y     Y        轮次完成时触发
+动态调整(adjust)              Y     Y     Y        ★P1修复：质检决策→adjustTaskTree()
+重启机制(restart)             Y     Y     Y        ★P1修复：质检决策→重置pending+重新入队
+推翻机制(overthrow)           Y     Y     Y        ★P1修复：质检决策→标记failed+停止执行
+失败学习                      Y     Y     部分     decomposeWithLessons可在P2递归路径中触发
+自适应深度控制                Y     Y     Y        ComplexityScorer
+批量执行                      Y     Y     Y        ★P3修复：BatchExecutor已初始化
+任务分组                      Y     Y     N        TaskGrouper未启用（待P5+迭代）
+并行执行                      Y     Y     Y        drain中实现
+文件产出追踪                  Y     Y     Y        file-tracker
+兜底落盘                      N     Y     Y        followup-runner实现
+Session瘦身                   N     Y     Y        截断超长消息
+合并输出                      Y     Y     Y        ★P4修复：mergeRoundOutputs()三策略合并
+交付报告                      Y     Y     Y        DeliveryReporter
+文件发送(Telegram)            Y     Y     Y        sendFileToTelegram
+文件发送(多频道)              Y     部分  部分     sendFallbackFile支持（待P5扩展）
+内存归档                      N     Y     Y        fire-and-forget
+任务看板渲染                  Y     Y     Y        renderTaskBoard
+汇总任务                      Y     Y     Y        getExecutableTasks
+轮次隔离(rootTaskId)          Y     Y     Y        新增设计
+兄弟上下文共享                N     Y     Y        buildSiblingContext
+
+  Y=已实现/已启用  N=未实现/未启用  部分=部分实现
+
+================================================================================
+第八部分：结论与优先级排序
+================================================================================
+
+8.1 系统成熟度评估（P0-P4 修复后）
+  整体架构设计完善，核心功能链（创建->入队->分解->执行->质检->落盘->合并->交付）
+  已完整贯通。P0-P4修复消除了关键断裂点，设计功能与实际运行高度对齐。
+
+  已完全可用的功能（P0-P4修复后新增 ★ 标记项）：
+    - 任务创建与入队（enqueue_task）
+    - 队列调度与执行（drain + followup-runner）
+    - 文件追踪与兜底落盘
+    - 轮次管理与完成检测
+    - 交付报告生成
+    - 并行执行（无依赖任务并发）
+    - 兄弟上下文共享
+    - ★ 统一后处理（postProcessSubTaskCompletion，两条路径对齐）
+    - ★ 质检决策响应（adjust/restart/overthrow 真正生效）
+    - ★ 递归分解（shouldAutoDecompose 自动触发）
+    - ★ 批量执行（BatchExecutor 已初始化）
+    - ★ 统一合并（mergeRoundOutputs 三策略合并）
+
+  仍待启用/完善的功能：
+    - 任务分组（TaskGrouper 未启用）
+    - 失败学习（decomposeWithLessons 部分可触发）
+    - 多频道文件发送（仅Telegram完整，其他频道需P5扩展）
+    - 降级质检增强（P6）
+    - 会话膨胀治理（P7）
+    - 任务看板UI（P8）
+
+  核心断裂点修复摘要：
+    P0: postProcessSubTaskCompletion() 统一 followup-runner 与 executeSubTask() 后处理
+    P1: 质检4种决策分支（continue/adjust/restart/overthrow）在两条路径中均真正生效
+    P2: shouldAutoDecompose() 在 followup-runner 执行前自动检测复杂度并触发分解
+    P3: initializeLLMCaller() 中同时初始化 BatchExecutor
+    P4: mergeRoundOutputs() 统一合并入口，三策略合并替代旧的三套逻辑
+
+8.2 优先级排序（更新后）
+  ✅ P0: 统一执行路径 — 已完成
+  ✅ P1: 启用质检决策响应 — 已完成
+  ✅ P2: 自动触发递归分解 — 已完成
+  ✅ P3: 初始化BatchExecutor — 已完成
+  ✅ P4: 统一合并逻辑 — 已完成
+  ⚠️ P5-P8: 频道扩展、降级质检、Session治理、看板UI — 待后续迭代
+
+8.3 代码量统计（修复后）
+  核心系统总计约 7500+ 行TypeScript代码（P0-P4新增约200行）
+  设计文档总计约 5000+ 行
+  涉及文件 20+ 个
+  设计完备度：约 85%（大部分设计已有代码实现）
+  实际启用率：约 85%（P0-P4修复后从约60%提升至约85%）
+
+================================================================================
+第九部分：端到端验收测试任务（30步 · 长篇小说生成 + Telegram交付）
+================================================================================
+
+9.0 测试目标与覆盖矩阵
+  本测试任务以"创作一部完整的长篇玄幻小说（约3万字）并通过Telegram交付完整txt文件"
+  为载体，端到端覆盖智能任务分解系统的所有核心能力与P0-P4修复点。
+
+  覆盖能力矩阵：
+    能力                              覆盖步骤
+    enqueue_task 入队                 #1
+    自适应深度控制                     #1（复杂度评分→maxDepth计算）
+    LLM自主任务分解                   #2-#3
+    ★P2 自动递归分解                  #4（prompt>500字符自动触发）
+    任务树持久化                       #5
+    并行执行（无依赖任务并发）         #6
+    兄弟上下文共享                     #7-#8
+    文件追踪 + LLM主动落盘            #9-#18
+    ★P0 统一后处理                    #9-#18（每个子任务完成后调postProcess）
+    ★P1 质检决策响应(continue)         #10（正常质检通过）
+    ★P1 质检决策响应(adjust)           #15（故意写短→质检建议调整）
+    ★P1 质检决策响应(restart)          #19（模拟质量不达标→重新执行）
+    兜底落盘                           #12（如果LLM偷懒未write）
+    Session瘦身                        #13（截断超长消息）
+    轮次完成检测                       #20
+    ★P4 统一合并(mergeRoundOutputs)    #21
+    交付报告(DeliveryReporter)          #22
+    ★P3 BatchExecutor可用性            #23（验证初始化不报错）
+    汇总任务(getExecutableTasks)        #24
+    最终交付产物(generateFinalDeliverable) #25
+    Telegram文件发送                    #26
+    sendFallbackFile多频道路由           #27
+    内存归档                            #28
+    任务看板渲染                        #29
+    最终验收                            #30
+
+9.1 测试用 Prompt（发送给 Telegram Bot 的消息）
+  ──────────────────────────────────────────────────────────────────
+  请帮我创作一部完整的长篇玄幻小说《九天星辰录》，要求如下：
+
+  1. 总字数：约3万字（30000字），分为15个章节
+  2. 每章约2000字，包含完整的场景描写、对话和情节推进
+  3. 世界观：修仙世界，九重天域，主角从凡人逆袭成仙
+  4. 主要人物：
+     - 林天辰（主角，废体少年，意外获得远古传承）
+     - 苏瑶（女主，冰雪宫圣女，冷艳外表下藏着温柔）
+     - 萧战（亦敌亦友，天才剑修，世家公子）
+     - 玄天老人（师父，隐世高人，身份成谜）
+  5. 核心剧情线：
+     - 第1-3章：废体觉醒，获得传承，踏上修仙路
+     - 第4-6章：宗门试炼，初露锋芒，结识苏瑶
+     - 第7-9章：秘境探险，生死危机，实力突破
+     - 第10-12章：宗门大比，对战萧战，名震天下
+     - 第13-15章：魔族入侵，终极决战，飞升成仙
+  6. 写作风格：行文流畅，对话生动，战斗描写热血，感情线细腻
+  7. 每章必须写入文件（write工具），文件名格式：九天星辰录_第XX章.txt
+  8. 全部完成后，合并为一个完整的txt文件：《九天星辰录》完整版.txt
+  9. 通过Telegram发送完整版txt文件给我
+
+  这是一个大型创作任务，请自动分解为子任务并逐步完成。
+  ──────────────────────────────────────────────────────────────────
+
+9.2 预期系统行为（30个验证步骤）
+
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  阶段A：任务创建与分解（步骤 #1 - #5）
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  步骤 #1 — enqueue_task入队 + 自适应深度控制
+    预期行为：
+      - LLM识别这是复杂任务，调用 enqueue_task(isNewRootTask=true)
+      - 生成 rootTaskId（UUID）
+      - ComplexityScorer 计算复杂度评分（预期>70/100）
+      - calculateAdaptiveMaxDepth() 计算 maxDepth（预期=2或3）
+      - 创建任务树，FileManager初始化目录结构
+    验证点：
+      ✓ TASK_TREE.json 已创建
+      ✓ metadata/complexity 有复杂度评分
+      ✓ maxDepth 已计算
+
+  步骤 #2 — LLM自主任务分解（第一层）
+    预期行为：
+      - LLM将15章拆分为多个子任务（预期5-8个子任务）
+      - 可能的分组：章节组1(1-3章) + 章节组2(4-6章) + ... + 合并任务
+      - 每个子任务通过 enqueue_task(parentId=rootTask) 入队
+      - 循环检测通过（isQueueTask=false，首次入队）
+    验证点：
+      ✓ subTasks 数组长度 5-8
+      ✓ 每个子任务有 rootTaskId（相同）
+      ✓ 无循环检测报错
+
+  步骤 #3 — 写作任务检测
+    预期行为：
+      - detectWritingTask() 识别为写作任务
+      - 子任务 metadata.requiresFileOutput = true
+      - 子任务 metadata.expectedFileTypes 包含 "txt"
+    验证点：
+      ✓ 至少80%子任务标记为写作任务
+
+  步骤 #4 — ★P2自动递归分解
+    预期行为：
+      - 章节组子任务（如"创作第1-3章"）prompt长度>500字符
+      - shouldAutoDecompose() 返回 true
+      - decomposeSubTask() 将其拆分为单章子任务
+      - 拆分后跳过直接执行，子任务进入队列
+    验证点：
+      ✓ 控制台出现"P2: 子任务 xxx 已自动分解为 N 个子任务"
+      ✓ 任务树depth出现>0的子任务
+      ✓ 被分解的父任务标记 decomposed=true
+
+  步骤 #5 — 任务树持久化验证
+    预期行为：
+      - TASK_TREE.json 原子写入成功
+      - TASK_TREE.json.bak 备份存在
+      - TASK_TREE.md Markdown渲染同步更新
+      - 检查点已创建（checkpoints/目录非空）
+    验证点：
+      ✓ ~/.clawdbot/tasks/{sessionId}/ 目录结构完整
+      ✓ TASK_TREE.json 可JSON.parse
+      ✓ 至少1个checkpoint文件
+
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  阶段B：并行与上下文（步骤 #6 - #8）
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  步骤 #6 — 并行执行（无依赖任务并发）
+    预期行为：
+      - drain.ts 检测到无依赖关系的子任务
+      - findParallelGroups() 返回可并发组
+      - Promise.allSettled() 并发执行（如第1章和第4章可能并行）
+    验证点：
+      ✓ 控制台出现并行执行日志
+      ✓ 多个子任务近乎同时进入active状态
+
+  步骤 #7 — 兄弟上下文共享（前序章节）
+    预期行为：
+      - 第2章执行时，buildSiblingContext() 注入第1章的输出摘要
+      - extraSystemPrompt 包含已完成兄弟任务的上下文
+      - 确保情节连贯性（角色名、剧情线不冲突）
+    验证点：
+      ✓ extraSystemPrompt 非空且包含前序章节信息
+      ✓ 第2章内容与第1章人物/情节衔接
+
+  步骤 #8 — 兄弟上下文累积（中后期章节）
+    预期行为：
+      - 第10章执行时，上下文包含前9章的关键摘要
+      - Session瘦身机制防止上下文超长
+    验证点：
+      ✓ 后期章节仍能获取前期关键信息
+      ✓ 不会因上下文过长导致LLM截断
+
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  阶段C：逐章执行与落盘（步骤 #9 - #18）
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  步骤 #9 — 第1章：LLM主动落盘 + ★P0统一后处理
+    预期行为：
+      - followup-runner 执行第1章子任务
+      - LLM遵循prompt规则，调用write工具写入 "九天星辰录_第01章.txt"
+      - file-tracker 追踪到写入操作
+      - collectTrackedFiles() 收集路径
+      - ★ postProcessSubTaskCompletion() 被调用
+      - 质量评估+文件验证+持久化一体完成
+    验证点：
+      ✓ tasks/{subTaskId}/ 目录下有 output.txt
+      ✓ metadata.producedFilePaths 包含章节文件路径
+      ✓ metadata.qualityReview 有评估结果
+
+  步骤 #10 — 第2章：★P1质检决策(continue)
+    预期行为：
+      - 第2章正常执行，质量评估通过
+      - qualityReviewer.reviewSubTaskCompletion() 返回 decision="continue"
+      - postProcessSubTaskCompletion() 正常走完全部流程
+    验证点：
+      ✓ quality-reviews.jsonl 记录 decision="continue"
+      ✓ 子任务状态为 completed
+
+  步骤 #11 — 第3章：文件追踪验证
+    预期行为：
+      - beginTracking(subTask.id) 启动追踪
+      - write工具调用时 trackFileWrite() 自动关联
+      - collectTrackedFiles() 返回实际路径列表
+    验证点：
+      ✓ producedFilePaths 非空
+      ✓ 文件路径包含 "九天星辰录_第03章"
+
+  步骤 #12 — 第4章：兜底落盘验证
+    预期行为：
+      - 如果LLM未调用write工具（偷懒只输出文本）
+      - followup-runner 检测到 output>500字
+      - 自动保存到 fallback-outputs/{subTaskId}.txt
+      - sendFallbackFile() 发送兜底文件
+    验证点：
+      ✓ fallback-outputs/ 目录下有文件（如触发兜底）
+      ✓ 或 producedFilePaths 非空（如LLM正常落盘）
+
+  步骤 #13 — 第5章：Session瘦身
+    预期行为：
+      - 到第5章时session已积累大量消息
+      - 超长assistant消息被截断（保留首尾摘要）
+      - 不影响后续章节的执行
+    验证点：
+      ✓ 无OOM或context overflow错误
+      ✓ 后续章节正常执行
+
+  步骤 #14 — 第6章：文件系统持久化
+    预期行为：
+      - postProcessSubTaskCompletion() 中：
+        ensureFileManager() → saveTaskOutput() → saveTaskMetadata()
+        → recordTimelineEvent() → logExecution()
+    验证点：
+      ✓ tasks/{subTaskId}/output.txt 存在
+      ✓ metadata/ 目录有更新
+      ✓ logs/execution.log 有记录
+
+  步骤 #15 — 第7章：★P1质检决策(adjust)
+    说明：此步骤验证adjust决策路径。如果LLM生成的章节偏短或质量偏低，
+      质量评估可能返回 adjust 决策。
+    预期行为（如触发）：
+      - reviewSubTaskCompletion() 返回 decision="adjust" + modifications
+      - postProcessSubTaskCompletion() 调用 adjustTaskTree()
+      - TaskAdjuster 应用变更（可能修改prompt或添加补充要求）
+    验证点：
+      ✓ 如触发：quality-reviews.jsonl 记录 decision="adjust"
+      ✓ 如触发：任务树有调整记录
+
+  步骤 #16 — 第8-9章：正常执行积累
+    预期行为：
+      - 持续正常执行，每章完成后走统一后处理
+      - 任务树progressively更新
+      - 检查点定期创建
+    验证点：
+      ✓ 已完成子任务数量持续增长
+      ✓ checkpoints/ 有多个快照
+
+  步骤 #17 — 第10-12章：战斗描写质量
+    预期行为：
+      - 宗门大比、对战萧战等战斗场景
+      - LLM应生成热血的战斗描写
+      - 兄弟上下文确保前期伏笔在此处有呼应
+    验证点：
+      ✓ 内容包含对战描写
+      ✓ 角色名与前期一致
+
+  步骤 #18 — 第13-15章：终章 + 高潮
+    预期行为：
+      - 魔族入侵、终极决战、飞升成仙
+      - 最后一个非根子任务完成
+      - 所有章节子任务均为 completed
+    验证点：
+      ✓ 15个章节全部有对应txt文件
+      ✓ 所有章节子任务 status=completed
+
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  阶段D：质检决策极端路径（步骤 #19）
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  步骤 #19 — ★P1质检决策(restart/overthrow)路径验证
+    说明：此步骤为被动观测。在整个15章执行过程中，如果任何章节质量严重不达标：
+      - restart: 子任务重置pending + retryCount++ + 重新入队
+      - overthrow: 子任务标记failed + 停止执行
+    预期行为（正常情况不触发）：
+      - 如果触发restart：subTask.retryCount > 0，且有重新执行记录
+      - 如果触发overthrow：subTask.status="failed", error字段有内容
+    验证点：
+      ✓ restart路径：检查是否有 retryCount>0 的子任务
+      ✓ overthrow路径：检查是否有 status=failed 的子任务
+      ✓ 控制台日志检索 "restart" / "overthrow" 关键词
+
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  阶段E：轮次完成与合并（步骤 #20 - #22）
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  步骤 #20 — 轮次完成检测
+    预期行为：
+      - isRoundCompleted(taskTree, rootTaskId) 返回 true
+      - markRoundCompleted() 标记轮次完成
+      - 控制台出现 "🏁 Round completed"
+    验证点：
+      ✓ 轮次完成日志存在
+      ✓ 所有rootTaskId下的子任务均为终态(completed/failed)
+
+  步骤 #21 — ★P4统一合并(mergeRoundOutputs)
+    预期行为：
+      - orchestrator.mergeRoundOutputs(taskTree)
+      - ensureFileManager() 创建/获取 FileManager
+      - FileManager.mergeTaskOutputs() 三策略合并：
+        优先 producedFilePaths（各章节txt文件）
+        其次 artifacts 目录
+        兜底 output.txt
+      - 合并为一个完整的txt文件
+      - sendFallbackFile() 发送合并文件
+    验证点：
+      ✓ 合并文件存在（如 deliverables/ 或 fallback-outputs/merged_output.txt）
+      ✓ 合并文件包含所有15章内容
+      ✓ 控制台出现 "已合并 N 个子任务输出到"
+
+  步骤 #22 — 交付报告生成
+    预期行为：
+      - DeliveryReporter.generateReport(taskTree)
+      - formatAsMarkdown(report) 生成结构化报告
+      - 报告包含：总览、各子任务完成状态、耗时、文件产出列表
+      - sendFollowupPayloads() 发送报告到Telegram
+    验证点：
+      ✓ Telegram收到Markdown格式的交付报告
+      ✓ 报告列出所有15章的完成状态
+
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  阶段F：高级功能验证（步骤 #23 - #25）
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  步骤 #23 — ★P3 BatchExecutor可用性
+    说明：被动验证。不要求本次任务一定触发批量执行，但验证不报错。
+    预期行为：
+      - initializeLLMCaller() 中 BatchExecutor 已创建
+      - 控制台出现 "✅ BatchExecutor 已初始化"
+      - executeBatches() 可被安全调用（不抛"未初始化"）
+    验证点：
+      ✓ 启动日志包含 "BatchExecutor 已初始化"
+      ✓ 无 "批量执行器未初始化" 错误
+
+  步骤 #24 — 汇总任务执行
+    预期行为：
+      - getExecutableTasks() 检测到所有非根任务已完成
+      - 根任务（汇总任务）变为可执行
+      - 子任务输出被注入根任务prompt
+      - 汇总指令："请整合以下15章内容为完整小说，保持连贯"
+      - LLM执行汇总，生成 《九天星辰录》完整版.txt
+    验证点：
+      ✓ 根任务 metadata.isSummaryTask = true
+      ✓ 根任务prompt包含子任务输出摘要
+      ✓ 最终文件包含所有章节
+
+  步骤 #25 — 最终交付产物生成
+    预期行为：
+      - postProcessSubTaskCompletion() 检测到根任务完成
+      - generateFinalDeliverable(taskTree, subTask) 生成最终产物
+      - FileManager.mergeTaskOutputs() 合并完整文件
+      - sendFileToChannel() 发送到Telegram
+      - taskTree.status = "completed"
+    验证点：
+      ✓ deliverables/ 目录有最终文件
+      ✓ 任务树全局 status = "completed"
+
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  阶段G：交付与归档（步骤 #26 - #30）
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  步骤 #26 — Telegram文件发送（完整txt）
+    预期行为：
+      - sendFileToTelegram() 调用 Telegram Bot API
+      - 发送 《九天星辰录》完整版.txt 到用户对话
+      - 文件大小预期 30KB-80KB（约3万字纯文本）
+    验证点：
+      ✓ Telegram对话中收到txt文件
+      ✓ 文件可下载并打开
+      ✓ 内容包含完整15章
+
+  步骤 #27 — sendFallbackFile多频道路由
+    预期行为：
+      - sendFallbackFile() 通过 routeReply 路由
+      - 根据 originatingChannel 选择发送通道
+      - Telegram频道：正常发送
+      - 其他频道：sendFallbackFile降级为文本路径通知
+    验证点：
+      ✓ sendFallbackFile 成功执行（ok=true）
+      ✓ 如Telegram：直接收到文件
+      ✓ method字段记录了使用的发送方式
+
+  步骤 #28 — 内存归档
+    预期行为：
+      - createMemoryService().archive() 异步执行
+      - 归档摘要包含：
+        taskGoal: "创作长篇玄幻小说《九天星辰录》"
+        keyActions: 各章节完成记录
+        progress: { completed: 15, total: 15, percentage: 100 }
+    验证点：
+      ✓ 归档不阻塞主流程
+      ✓ 无 "Memory archive failed" 错误（或即使有也不影响结果）
+
+  步骤 #29 — 任务看板渲染
+    预期行为：
+      - renderTaskBoard() 生成可视化看板
+      - 所有子任务显示为 ✅ completed
+      - 任务树结构清晰（根任务 → 章节组 → 单章）
+    验证点：
+      ✓ TASK_TREE.md 内容完整
+      ✓ 看板显示所有任务为完成状态
+
+  步骤 #30 — 最终验收检查清单
+    人工验证项：
+      □ Telegram收到完整txt文件（可下载、可阅读）
+      □ 文件内容包含15章完整小说
+      □ 各章节2000字左右，总字数接近3万字
+      □ 人物名称全篇一致（林天辰、苏瑶、萧战、玄天老人）
+      □ 剧情连贯（废体觉醒→宗门试炼→秘境→大比→魔族→飞升）
+      □ Telegram收到交付报告（Markdown格式）
+      □ 无未捕获异常或系统崩溃
+
+    系统验证项：
+      □ TASK_TREE.json status = "completed"
+      □ 所有子任务 status = completed（或合理的 failed+restart 记录）
+      □ quality-reviews.jsonl 有评估记录
+      □ checkpoints/ 有快照文件
+      □ logs/execution.log 有完整执行记录
+      □ 合并文件存在且非空
+      □ 无 "批量执行器未初始化" 错误
+      □ 控制台有 "BatchExecutor 已初始化" 日志
+      □ 如有递归分解：depth>0 的子任务存在
+
+9.3 故障注入测试（可选，高级验证）
+
+  以下为可选的手动故障注入测试，用于验证系统韧性：
+
+  故障1：LLM偷懒测试
+    方法：在prompt中不强调write工具，观察兜底落盘是否触发
+    预期：fallback-outputs/ 有兜底文件 + sendFallbackFile发送
+
+  故障2：网络抖动测试
+    方法：在执行过程中短暂断开网络
+    预期：RetryManager 指数退避重试 + 最终恢复或优雅降级
+
+  故障3：质检严格模式
+    方法：修改 QualityReviewer prompt 要求"字数不足2000字必须restart"
+    预期：部分章节触发restart → retryCount++ → 重新执行 → 最终通过
+
+  故障4：深度限制测试
+    方法：设置 maxDepth=1，观察 shouldAutoDecompose() 深度守卫
+    预期：depth=1时不再递归分解，直接执行
+
+  故障5：超大输出测试
+    方法：要求每章5000字（总计7.5万字）
+    预期：Session瘦身机制激活 + 合并文件仍然完整
+
+================================================================================
+  报告结束
+  文件路径：Runtimelog/tempfile/智能任务分解系统_完整调查报告.txt
+================================================================================

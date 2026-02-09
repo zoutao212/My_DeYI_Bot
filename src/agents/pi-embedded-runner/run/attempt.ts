@@ -734,10 +734,23 @@ export async function runEmbeddedAttempt(
         });
         log.info(`[attempt] 🔍 After sanitizeSessionHistory: ${prior.length} messages (user: ${prior.filter(m => m.role === "user").length}, assistant: ${prior.filter(m => m.role === "assistant").length})`);
         
-        cacheTrace?.recordStage("session:sanitized", { messages: prior });
+        // 🆕 智能上下文剪枝：在 sanitize 之后、validate/limit 之前，
+        // 识别旧任务段落并压缩为摘要，防止旧上下文污染当前任务。
+        const { pruneIrrelevantContext } = await import("../context-pruning.js");
+        const pruneResult = pruneIrrelevantContext(prior, {
+          minMessagesThreshold: 20,
+          keepRecentSegments: 1,
+          isQueueTask,
+        });
+        const prunedMessages = pruneResult.messages;
+        if (pruneResult.prunedSegments > 0) {
+          log.info(`[attempt] ✂️ Context pruning: ${pruneResult.prunedSegments} segments compressed, ${prior.length} → ${prunedMessages.length} messages, ~${pruneResult.savedTokens} tokens saved`);
+        }
+        
+        cacheTrace?.recordStage("session:sanitized", { messages: prunedMessages });
         const validatedGemini = transcriptPolicy.validateGeminiTurns
-          ? validateGeminiTurns(prior)
-          : prior;
+          ? validateGeminiTurns(prunedMessages)
+          : prunedMessages;
         log.info(`[attempt] 🔍 After validateGeminiTurns: ${validatedGemini.length} messages`);
         
         const validated = transcriptPolicy.validateAnthropicTurns

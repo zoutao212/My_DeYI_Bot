@@ -212,23 +212,54 @@ export async function runReplyAgent(params: {
 
   await typingSignals.signalRunStart();
 
-  // 🔧 检查是否有未完成的任务树需要恢复
+  // 🆕 意图分类驱动的任务恢复/归档决策
+  // 解决核心问题：旧任务已完成时，系统总是把新任务塞进旧任务树
   const orchestrator = getGlobalOrchestrator();
   const sessionId = followupRun.run.sessionId;
   const hasUnfinished = await orchestrator.hasUnfinishedTasks(sessionId);
   
   if (hasUnfinished) {
-    console.log(`[agent-runner] 🔍 Found unfinished tasks for session: ${sessionId}`);
-    try {
-      const recoveredTaskTree = await orchestrator.recoverUnfinishedTasks(sessionId);
-      console.log(`[agent-runner] ✅ Task tree recovered: ${recoveredTaskTree.id}`);
+    // Step 1: 分类用户意图（规则预分类 + LLM 分类）
+    const userMessage = followupRun.prompt;
+    const intentResult = await orchestrator.classifyUserIntent(userMessage, sessionId);
+    
+    if (intentResult) {
+      console.log(
+        `[agent-runner] 🧠 意图分类：${intentResult.intent}（置信度=${intentResult.confidence}，` +
+        `降级=${intentResult.isFallback}），理由：${intentResult.reason}`
+      );
       
-      // 重新执行中断的任务
-      const interruptedTasks = await orchestrator.reexecuteInterruptedTasks(recoveredTaskTree);
-      console.log(`[agent-runner] ✅ Re-executed ${interruptedTasks.length} interrupted tasks`);
-    } catch (err) {
-      console.error(`[agent-runner] ❌ Failed to recover tasks:`, err);
-      // 继续执行，不阻塞用户消息
+      if (intentResult.intent === "new_task") {
+        // Step 2a: 新任务 → 归档旧任务树，跳过恢复
+        console.log(`[agent-runner] 📦 检测到新任务，归档旧任务树并跳过恢复`);
+        try {
+          await orchestrator.archiveTaskTree(sessionId, `用户发起新任务：${userMessage.substring(0, 100)}`);
+        } catch (err) {
+          console.warn(`[agent-runner] ⚠️ 归档旧任务树失败（不阻塞）:`, err);
+        }
+      } else {
+        // Step 2b: 续接/调整 → 正常恢复旧任务
+        console.log(`[agent-runner] 🔄 检测到续接/调整意图，恢复旧任务树`);
+        try {
+          const recoveredTaskTree = await orchestrator.recoverUnfinishedTasks(sessionId);
+          console.log(`[agent-runner] ✅ Task tree recovered: ${recoveredTaskTree.id}`);
+          const interruptedTasks = await orchestrator.reexecuteInterruptedTasks(recoveredTaskTree);
+          console.log(`[agent-runner] ✅ Re-executed ${interruptedTasks.length} interrupted tasks`);
+        } catch (err) {
+          console.error(`[agent-runner] ❌ Failed to recover tasks:`, err);
+        }
+      }
+    } else {
+      // 无旧任务树（不应该走到这里，因为 hasUnfinished=true）
+      console.log(`[agent-runner] 🔍 Found unfinished tasks but no task tree for intent classification`);
+      try {
+        const recoveredTaskTree = await orchestrator.recoverUnfinishedTasks(sessionId);
+        console.log(`[agent-runner] ✅ Task tree recovered: ${recoveredTaskTree.id}`);
+        const interruptedTasks = await orchestrator.reexecuteInterruptedTasks(recoveredTaskTree);
+        console.log(`[agent-runner] ✅ Re-executed ${interruptedTasks.length} interrupted tasks`);
+      } catch (err) {
+        console.error(`[agent-runner] ❌ Failed to recover tasks:`, err);
+      }
     }
   }
 

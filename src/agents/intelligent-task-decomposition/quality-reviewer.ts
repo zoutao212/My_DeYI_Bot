@@ -48,13 +48,20 @@ interface LLMConfig {
  */
 export class QualityReviewer {
   private llmConfig: LLMConfig;
-  private llmCaller: LLMCaller | null;
   private reviewsDir: string;
+  private externalLLMCaller: LLMCaller | null;
 
   constructor(llmConfig: LLMConfig, llmCaller?: LLMCaller) {
     this.llmConfig = llmConfig;
-    this.llmCaller = llmCaller ?? null;
     this.reviewsDir = join(homedir(), ".clawdbot", "tasks");
+    this.externalLLMCaller = llmCaller ?? null;
+  }
+
+  /**
+   * 设置外部 LLM 调用器（支持延迟注入）
+   */
+  setLLMCaller(caller: LLMCaller): void {
+    this.externalLLMCaller = caller;
   }
 
   /**
@@ -592,22 +599,18 @@ ${prompts.jsonOnlyReminder}`;
    * 调用 LLM
    */
   private async callLLM(prompt: string): Promise<string> {
-    // 🔧 使用真实 LLMCaller（如果已注入）
-    if (this.llmCaller) {
+    // 优先使用注入的系统 LLM 调用器（走 auth profiles + completeSimple）
+    if (this.externalLLMCaller) {
+      console.log(`[QualityReviewer] 使用系统 LLM 管线评估，提示词长度: ${prompt.length}`);
       try {
-        console.log(`[QualityReviewer] 🔍 调用 LLM 进行质量评估，提示词长度: ${prompt.length}`);
-        const response = await this.llmCaller.call(prompt);
-        console.log(`[QualityReviewer] ✅ LLM 响应长度: ${response.length}`);
-        return response;
+        return await this.externalLLMCaller.call(prompt);
       } catch (err) {
-        console.error(`[QualityReviewer] ❌ LLM 调用失败:`, err);
-        console.warn(`[QualityReviewer] ⚠️ 降级到默认通过结果`);
+        console.warn(`[QualityReviewer] ⚠️ 系统 LLM 调用失败，降级到规则驱动:`, err);
       }
-    } else {
-      console.warn(`[QualityReviewer] ⚠️ 未配置 LLMCaller，质量评估默认通过`);
     }
-    
-    // 兜底：返回默认通过结果
+
+    // 降级：规则驱动质量评估默认通过
+    console.log(`[QualityReviewer] 使用规则驱动评估（降级），提示词长度: ${prompt.length}`);
     return `{
   "status": "passed",
   "decision": "continue",

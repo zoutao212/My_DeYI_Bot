@@ -204,6 +204,27 @@ export function createFollowupRunner(params: {
       // 🔧 如果找到了子任务，更新状态为 "active" 并启动文件追踪
       if (taskTree && subTask) {
         console.log(`[followup-runner] 🔍 Found sub task in tree: ${subTask.id}`);
+
+        // 🔧 P2: 自动触发递归分解 — 复杂子任务执行前检测复杂度
+        // 如果分解成功，跳过当前任务的直接执行，让子任务通过队列执行
+        try {
+          if (orchestrator.shouldAutoDecompose(taskTree, subTask)) {
+            const decomposed = await orchestrator.decomposeSubTask(taskTree, subTask.id);
+            if (decomposed.length > 0) {
+              console.log(
+                `[followup-runner] ✅ P2: 子任务 ${subTask.id} 已自动分解为 ${decomposed.length} 个子任务，跳过直接执行`,
+              );
+              // 触发队列继续（分解后的子任务会作为 pending 被后续 drain 拾取）
+              if (queued.run.sessionKey) {
+                finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
+              }
+              return;
+            }
+          }
+        } catch (decompErr) {
+          console.warn(`[followup-runner] ⚠️ P2: 自动递归分解失败（继续正常执行）: ${decompErr}`);
+        }
+
         // 🔧 启动文件追踪（与 orchestrator.executeSubTask 对齐）
         // write 工具调用 trackFileWrite() 时会自动关联到此 taskId
         beginTracking(subTask.id);
@@ -401,7 +422,37 @@ export function createFollowupRunner(params: {
             }
           }
           
-          await orchestrator.saveTaskTree(taskTree);
+          // 🔧 P0+P1: 统一后处理（质量评估 + 决策响应 + 文件验证 + 交付产物 + 持久化）
+          // postProcessSubTaskCompletion() 内部已保存 taskTree
+          try {
+            const postResult = await orchestrator.postProcessSubTaskCompletion(taskTree, subTask);
+
+            if (postResult.needsRequeue) {
+              // restart 决策：重新入队执行
+              console.log(
+                `[followup-runner] 🔄 子任务 ${subTask.id} 质量不达标，重新入队 (restart): ` +
+                `${JSON.stringify(postResult.findings)}`,
+              );
+              if (queued.run.sessionKey) {
+                finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
+              }
+              return;
+            }
+
+            if (postResult.markedFailed) {
+              // overthrow 决策：标记失败，停止后续执行
+              console.error(
+                `[followup-runner] ❌ 子任务 ${subTask.id} 质量严重不通过 (overthrow): ` +
+                `${JSON.stringify(postResult.findings)}`,
+              );
+              return;
+            }
+          } catch (ppErr) {
+            // 后处理失败不影响已保存的子任务输出，兜底保存
+            console.warn(`[followup-runner] ⚠️ 子任务后处理异常（不阻塞）: ${ppErr}`);
+            await orchestrator.saveTaskTree(taskTree);
+          }
+
           console.log(`[followup-runner] ✅ Sub task completed: ${subTask.id}`);
           
           // 🆕 检查当前轮次是否全部完成（用 rootTaskId 隔离，不受其它轮次影响）
@@ -450,42 +501,32 @@ export function createFollowupRunner(params: {
               // 归档失败不影响主流程
             }
 
-            // 🆕 Step 6a: 合并兜底落盘文件并发送给用户
-            const fallbackTasks = taskTree.subTasks.filter(
-              (t) => t.status === "completed" && t.metadata?.fallbackFilePath,
+            // 🔧 P4: 统一合并逻辑 — 使用 FileManager.mergeTaskOutputs() 多策略合并
+            // （producedFilePaths → artifacts → output.txt），替代简单文本拼接
+            const completedTasks = taskTree.subTasks.filter(
+              (t) => t.status === "completed",
             );
-            if (fallbackTasks.length > 0) {
+            if (completedTasks.length > 0) {
               try {
-                const mergedDir = path.join(
-                  os.homedir(), ".clawdbot", "tasks", sessionId, "fallback-outputs",
-                );
-                await fs.mkdir(mergedDir, { recursive: true });
-                const mergedFile = path.join(mergedDir, "merged_output.txt");
-                const mergedContent = fallbackTasks
-                  .map((t) => t.output ?? "")
-                  .filter(Boolean)
-                  .join("\n\n---\n\n");
-                await fs.writeFile(mergedFile, mergedContent, "utf-8");
+                const mergedFile = await orchestrator.mergeRoundOutputs(taskTree);
                 console.log(
-                  `[followup-runner] 📝 已合并 ${fallbackTasks.length} 个兜底落盘文件到 ${mergedFile}（${mergedContent.length} 字）`,
+                  `[followup-runner] 📝 已合并 ${completedTasks.length} 个子任务输出到 ${mergedFile}`,
                 );
-                // 🆕 发送合并后的兜底文件到用户的聊天频道
                 const mergedSendResult = await sendFallbackFile({
                   filePath: mergedFile,
-                  caption: `📝 完整输出（${fallbackTasks.length} 个子任务合并）`,
+                  caption: `📝 完整输出（${completedTasks.length} 个子任务合并）`,
                   queued,
                 });
                 if (!mergedSendResult.ok) {
-                  // 文件发送失败时降级为文本通知
                   console.warn(
                     `[followup-runner] ⚠️ 合并文件发送失败 (${mergedSendResult.method}): ${mergedSendResult.error}`,
                   );
                   await sendFollowupPayloads([{
-                    text: `📝 系统检测到 ${fallbackTasks.length} 个子任务的内容未被 LLM 主动落盘为文件，已自动保存到：\n${mergedFile}`,
+                    text: `📝 ${completedTasks.length} 个子任务输出已合并保存到：\n${mergedFile}`,
                   }], queued);
                 }
               } catch (mergeErr) {
-                console.warn(`[followup-runner] ⚠️ 合并兜底落盘文件失败: ${mergeErr}`);
+                console.warn(`[followup-runner] ⚠️ 合并子任务输出失败: ${mergeErr}`);
               }
             }
 

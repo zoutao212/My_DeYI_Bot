@@ -336,6 +336,16 @@ export interface SubTaskMetadata {
   
   /** 兜底落盘原因 */
   fallbackReason?: string;
+  
+  // 🆕 质量评估相关字段
+  
+  /** 质量评估结果（子任务完成后由 QualityReviewer 填充） */
+  qualityReview?: {
+    status: string;
+    decision: string;
+    findings: string[];
+    suggestions: string[];
+  };
 }
 
 /**
@@ -588,6 +598,31 @@ export interface BatchExecutionResult {
   
   /** 实际消耗的 tokens */
   actualTokens?: number;
+}
+
+// ========================================
+// 🆕 子任务后处理结果
+// ========================================
+
+/**
+ * 子任务后处理结果
+ * 
+ * postProcessSubTaskCompletion() 的返回值，
+ * 告知调用方（followup-runner）需要执行的后续动作。
+ */
+export interface PostProcessResult {
+  /** 质量评估决策 */
+  decision: ReviewDecision;
+  /** 质量评估状态 */
+  status: QualityStatus;
+  /** 评估发现 */
+  findings: string[];
+  /** 改进建议 */
+  suggestions: string[];
+  /** 是否需要重新入队（restart 决策时为 true） */
+  needsRequeue: boolean;
+  /** 是否已标记失败（overthrow 决策时为 true） */
+  markedFailed: boolean;
 }
 
 // ========================================

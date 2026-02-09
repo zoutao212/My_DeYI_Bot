@@ -6,7 +6,6 @@ import { resolveQueueSettings } from "../../auto-reply/reply/queue/settings.js";
 import type { ClawdbotConfig } from "../../config/config.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import { Orchestrator } from "../intelligent-task-decomposition/orchestrator.js";
-import { createLLMCallerFromEnv } from "../intelligent-task-decomposition/llm-caller-impl.js";
 
 const EnqueueTaskSchema = Type.Object({
   prompt: Type.String({
@@ -64,13 +63,9 @@ let currentFollowupRunContext: FollowupRun | null = null;
  * 
  * 用于管理任务树的持久化和恢复
  */
-// 🔧 创建真实 LLMCaller 并注入 Orchestrator（修复 QC 桩函数 Bug）
-const globalLLMCaller = createLLMCallerFromEnv();
-const globalOrchestrator = new Orchestrator(
-  undefined,           // groupingOptions
-  undefined,           // batchExecutionOptions
-  globalLLMCaller ?? undefined,  // llmCaller → 透传给 QualityReviewer + LLMTaskDecomposer
-);
+const globalOrchestrator = new Orchestrator();
+let llmCallerProvider = "";
+let llmCallerModel = "";
 
 /**
  * 设置当前的 FollowupRun 上下文
@@ -217,7 +212,18 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
           error: "currentFollowupRun 未设置，无法加入队列（系统内部错误）",
         });
       }
-      
+
+      // 🔧 延迟注入 LLM 调用器：使用当前 session 的 provider/model（而非硬编码的 anthropic 默认值）
+      // 当 provider 或 model 变化时重新初始化，确保始终匹配当前会话
+      const runProvider = currentFollowupRun.run.provider;
+      const runModel = currentFollowupRun.run.model;
+      if (config && (llmCallerProvider !== runProvider || llmCallerModel !== runModel)) {
+        console.log(`[enqueue_task] 🔄 初始化系统 LLM 调用器: provider=${runProvider}, model=${runModel}`);
+        globalOrchestrator.initializeLLMCaller(config, runProvider, runModel);
+        llmCallerProvider = runProvider;
+        llmCallerModel = runModel;
+      }
+
       // 🔧 循环检测（融合方案 1+2+3）
       // 判断维度：isQueueTask / isRootTask / isNewRootTask / taskDepth
       const isQueueTask = currentFollowupRun.isQueueTask ?? false;

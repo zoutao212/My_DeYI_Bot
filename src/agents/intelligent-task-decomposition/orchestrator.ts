@@ -5,7 +5,7 @@
  */
 
 import crypto from "node:crypto";
-import type { TaskTree, SubTask, TaskTreeChange, QualityReviewResult, TaskBatch, BatchExecutionResult, BatchExecutionOptions } from "./types.js";
+import type { TaskTree, SubTask, TaskTreeChange, QualityReviewResult, TaskBatch, BatchExecutionResult, BatchExecutionOptions, PostProcessResult } from "./types.js";
 import { TaskTreeManager } from "./task-tree-manager.js";
 import { RetryManager } from "./retry-manager.js";
 import { ErrorHandler } from "./error-handler.js";
@@ -20,6 +20,9 @@ import { BatchExecutor, type LLMCaller } from "./batch-executor.js";
 import { DeliveryReporter, type DeliveryReport } from "./delivery-reporter.js";
 import { ComplexityScorer } from "./complexity-scorer.js";
 import { beginTracking, collectTrackedFiles, clearTracking } from "./file-tracker.js";
+import { createSystemLLMCaller, type SystemLLMCallerConfig } from "./system-llm-caller.js";
+import { classifyTaskIntent, type TaskIntentResult } from "./task-intent-classifier.js";
+import type { ClawdbotConfig } from "../../config/config.js";
 
 /**
  * 任务分解协调器
@@ -38,11 +41,13 @@ export class Orchestrator {
   // 🆕 批量执行相关组件
   private taskGrouper: TaskGrouper;
   private batchExecutor: BatchExecutor | null = null;
+  
+  // 🆕 系统 LLM 调用器（用于意图分类等轻量级调用）
+  private systemLLMCaller: LLMCaller | null = null;
 
   constructor(
     groupingOptions?: GroupingOptions,
-    batchExecutionOptions?: BatchExecutionOptions,
-    llmCaller?: LLMCaller
+    config?: ClawdbotConfig,
   ) {
     this.taskTreeManager = new TaskTreeManager();
     this.retryManager = new RetryManager();
@@ -50,23 +55,295 @@ export class Orchestrator {
     this.recoveryManager = new RecoveryManager(this.taskTreeManager);
     this.outputFormatter = new OutputFormatter();
     
-    // 初始化新组件（使用默认 LLM 配置）
+    // 初始化 LLM 调用器（如有 config 则走系统管线，否则降级到规则驱动）
     const llmConfig = {
       provider: "openai",
       model: "gpt-4",
     };
-    // 🔧 透传 LLMCaller 给 LLMTaskDecomposer 和 QualityReviewer
+    let llmCaller: LLMCaller | undefined;
+    if (config) {
+      try {
+        llmCaller = createSystemLLMCaller({ config });
+        console.log("[Orchestrator] ✅ 系统 LLM 调用器已初始化（走 auth profiles + completeSimple）");
+      } catch (err) {
+        console.warn("[Orchestrator] ⚠️ 系统 LLM 调用器初始化失败，降级到规则驱动:", err);
+      }
+    }
     this.llmDecomposer = new LLMTaskDecomposer(llmConfig, llmCaller);
     this.qualityReviewer = new QualityReviewer(llmConfig, llmCaller);
     this.taskAdjuster = new TaskAdjuster(this.taskTreeManager);
     
-    // 🆕 初始化批量执行组件
+    // 初始化批量执行组件
     this.taskGrouper = new TaskGrouper(groupingOptions);
-    
-    // 如果提供了 LLM 调用器，初始化批量执行器
-    if (llmCaller) {
-      this.batchExecutor = new BatchExecutor(llmCaller, batchExecutionOptions);
+  }
+
+  /**
+   * 延迟初始化 LLM 调用能力
+   * 
+   * 在 Orchestrator 被创建后（如全局单例），可以通过此方法注入 config 以启用真实 LLM 调用。
+   * 适用于 config 在构造时尚不可用的场景。
+   */
+  initializeLLMCaller(config: ClawdbotConfig, provider?: string, modelId?: string): void {
+    try {
+      const caller = createSystemLLMCaller({ config, provider, modelId });
+      this.llmDecomposer.setLLMCaller(caller);
+      this.qualityReviewer.setLLMCaller(caller);
+
+      // 🆕 P3: 同时初始化 BatchExecutor（消除 batchExecutor 始终为 null 的问题）
+      if (!this.batchExecutor) {
+        this.batchExecutor = new BatchExecutor(caller);
+        console.log("[Orchestrator] ✅ BatchExecutor 已初始化");
+      }
+
+      // 🆕 保存系统 LLM 调用器引用（用于意图分类等轻量级调用）
+      this.systemLLMCaller = caller;
+
+      console.log("[Orchestrator] ✅ LLM 调用器已延迟注入（走 auth profiles + completeSimple）");
+    } catch (err) {
+      console.warn("[Orchestrator] ⚠️ LLM 调用器延迟注入失败:", err);
     }
+  }
+
+  /**
+   * 评估单个子任务的完成质量
+   * 
+   * 在 followup-runner 中子任务完成后调用。
+   * 如果 LLM caller 未初始化，降级为规则驱动（默认通过）。
+   * 
+   * @returns 质量评估结果
+   */
+  async reviewSubTaskCompletion(
+    taskTree: TaskTree,
+    subTaskId: string,
+  ): Promise<QualityReviewResult> {
+    try {
+      const result = await this.qualityReviewer.reviewSubTaskCompletion(taskTree, subTaskId);
+      console.log(
+        `[Orchestrator] 📋 子任务 ${subTaskId} 质量评估: status=${result.status}, decision=${result.decision}`,
+      );
+      return result;
+    } catch (err) {
+      console.warn(`[Orchestrator] ⚠️ 子任务质量评估失败，默认通过:`, err);
+      return {
+        status: "passed",
+        decision: "continue",
+        criteria: [],
+        findings: [],
+        suggestions: [],
+      };
+    }
+  }
+
+  /**
+   * 评估整个轮次的完成质量
+   * 
+   * 在 followup-runner 中检测到 round completed 后调用。
+   * 
+   * @returns 质量评估结果
+   */
+  async reviewRoundCompletion(
+    taskTree: TaskTree,
+  ): Promise<QualityReviewResult> {
+    try {
+      const result = await this.qualityReviewer.reviewOverallCompletion(taskTree);
+      console.log(
+        `[Orchestrator] 📋 轮次整体质量评估: status=${result.status}, decision=${result.decision}`,
+      );
+      return result;
+    } catch (err) {
+      console.warn(`[Orchestrator] ⚠️ 轮次质量评估失败，默认通过:`, err);
+      return {
+        status: "passed",
+        decision: "continue",
+        criteria: [],
+        findings: [],
+        suggestions: [],
+      };
+    }
+  }
+
+  // ========================================
+  // 🆕 P0: 统一后处理路径
+  // ========================================
+
+  /**
+   * 确保 FileManager 已初始化（延迟初始化）
+   * 
+   * 当 followup-runner 路径未经过 initializeTaskTree() 时，
+   * FileManager 可能为 null。此方法按需创建并初始化。
+   */
+  private async ensureFileManager(sessionId: string): Promise<FileManager> {
+    if (!this.fileManager) {
+      this.fileManager = new FileManager(sessionId);
+      await this.fileManager.initialize();
+      console.log(`[Orchestrator] 📁 FileManager 延迟初始化: ${sessionId}`);
+    }
+    return this.fileManager;
+  }
+
+  /**
+   * 子任务完成后的统一后处理流程（P0 核心方法）
+   * 
+   * 由 followup-runner 在子任务执行完成后调用，统一处理：
+   * 1. 质量评估及决策响应（adjust/restart/overthrow）
+   * 2. 文件产出验证
+   * 3. 文件发送到聊天频道
+   * 4. 最终交付产物生成
+   * 5. FileManager 持久化（输出/元数据/时间线/执行日志）
+   * 
+   * 调用方根据返回值决定后续动作：
+   * - needsRequeue=true → 重新入队（restart 决策）
+   * - markedFailed=true → 停止执行（overthrow 决策）
+   * 
+   * @param taskTree 任务树
+   * @param subTask 已完成的子任务（output/completedAt/status 已设置）
+   * @returns PostProcessResult
+   */
+  async postProcessSubTaskCompletion(
+    taskTree: TaskTree,
+    subTask: SubTask,
+  ): Promise<PostProcessResult> {
+    const result: PostProcessResult = {
+      decision: "continue",
+      status: "passed",
+      findings: [],
+      suggestions: [],
+      needsRequeue: false,
+      markedFailed: false,
+    };
+
+    // ── 1. 质量评估及决策 ──
+    if (taskTree.qualityReviewEnabled !== false) {
+      try {
+        console.log(`[Orchestrator] 🔍 开始质量评估：${subTask.id}`);
+        const review = await this.qualityReviewer.reviewSubTaskCompletion(
+          taskTree,
+          subTask.id,
+        );
+
+        result.decision = review.decision;
+        result.status = review.status;
+        result.findings = review.findings;
+        result.suggestions = review.suggestions;
+
+        // 记录到子任务元数据
+        if (!subTask.metadata) subTask.metadata = {};
+        subTask.metadata.qualityReview = {
+          status: review.status,
+          decision: review.decision,
+          findings: review.findings,
+          suggestions: review.suggestions,
+        };
+
+        switch (review.decision) {
+          case "continue":
+            console.log(`[Orchestrator] ✅ 质量评估通过`);
+            break;
+
+          case "adjust":
+            console.log(`[Orchestrator] ⚠️ 质量需要调整`);
+            if (review.modifications && review.modifications.length > 0) {
+              await this.adjustTaskTree(taskTree, review.modifications, false);
+            }
+            break;
+
+          case "restart":
+            console.log(`[Orchestrator] 🔄 质量不满意，需要重新执行`);
+            await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
+            subTask.retryCount++;
+            result.needsRequeue = true;
+            break;
+
+          case "overthrow":
+            console.log(`[Orchestrator] ❌ 质量严重不满意，标记失败`);
+            await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
+            subTask.error = `质量评估严重不通过：${review.findings.join("; ")}`;
+            result.markedFailed = true;
+            break;
+        }
+      } catch (err) {
+        console.warn(`[Orchestrator] ⚠️ 子任务质量评估失败，默认通过:`, err);
+      }
+    }
+
+    // 如果决策是 restart 或 overthrow，跳过后续处理
+    if (result.needsRequeue || result.markedFailed) {
+      await this.taskTreeManager.save(taskTree);
+      return result;
+    }
+
+    // ── 2. 验证文件产出（针对写作任务） ──
+    if (subTask.metadata?.requiresFileOutput) {
+      const hasFileOutput = await this.verifyFileOutput(taskTree, subTask);
+      if (hasFileOutput) {
+        // ── 3. 发送子任务的文件到聊天频道 ──
+        await this.sendSubTaskFiles(taskTree, subTask);
+      } else {
+        console.warn(`[Orchestrator] ⚠️ 任务完成但未产生文件输出: ${subTask.id}`);
+      }
+    }
+
+    // ── 4. 如果是根任务（汇总任务），生成最终交付产物 ──
+    if (subTask.metadata?.isRootTask && subTask.metadata?.isSummaryTask) {
+      try {
+        const deliverablePath = await this.generateFinalDeliverable(taskTree, subTask);
+        console.log(`[Orchestrator] ✅ 根任务汇总完成，最终产物：${deliverablePath}`);
+
+        if (subTask.metadata?.requiresFileOutput && this.fileManager) {
+          const mergedFilePath = await this.fileManager.mergeTaskOutputs(taskTree);
+          await this.sendFileToChannel(mergedFilePath, `完整输出：${taskTree.rootTask}`);
+          console.log(`[Orchestrator] ✅ 已发送完整文件到聊天频道`);
+        }
+
+        taskTree.status = "completed";
+        await this.taskTreeManager.save(taskTree);
+      } catch (err) {
+        console.warn(`[Orchestrator] ⚠️ 生成最终交付产物失败`, err);
+      }
+    }
+
+    // ── 5. 如果是汇总任务（waitForChildren=true），生成最终交付产物 ──
+    if (subTask.waitForChildren && subTask.children && subTask.children.length > 0) {
+      try {
+        const deliverablePath = await this.generateFinalDeliverable(taskTree, subTask);
+        console.log(`[Orchestrator] ✅ 汇总任务完成，最终产物：${deliverablePath}`);
+
+        if (subTask.metadata?.requiresFileOutput && this.fileManager) {
+          const mergedFilePath = await this.fileManager.mergeTaskOutputs(taskTree);
+          await this.sendFileToChannel(mergedFilePath, `完整输出：${subTask.summary}`);
+          console.log(`[Orchestrator] ✅ 已发送完整文件到聊天频道`);
+        }
+      } catch (err) {
+        console.warn(`[Orchestrator] ⚠️ 生成汇总交付产物失败`, err);
+      }
+    }
+
+    // ── 6. 保存任务输出到文件系统 ──
+    try {
+      const fm = await this.ensureFileManager(taskTree.id);
+      const outputPath = await fm.saveTaskOutput(
+        subTask.id,
+        subTask.output || "",
+        "txt",
+      );
+      await fm.saveTaskMetadata(subTask);
+      await fm.recordTimelineEvent(
+        "task_completed",
+        subTask.id,
+        `任务完成：${subTask.summary}`,
+      );
+      await fm.logExecution(
+        `Task ${subTask.id} completed: ${subTask.summary}`,
+      );
+      console.log(`[Orchestrator] 💾 Task output saved to: ${outputPath}`);
+    } catch (err) {
+      console.warn(`[Orchestrator] ⚠️ 保存任务输出到文件系统失败:`, err);
+    }
+
+    // ── 7. 保存任务树 ──
+    await this.taskTreeManager.save(taskTree);
+
+    return result;
   }
 
   /**
@@ -156,11 +433,28 @@ export class Orchestrator {
 
     taskTree.subTasks.push(subTask);
 
-    // 🔧 不变量守卫：有 pending 子任务时，tree 不应为 completed/failed
-    // 场景：前一轮结束后 tree 被标记为 completed，新消息触发新一轮子任务时必须重置
-    if (taskTree.status === "completed" || taskTree.status === "failed") {
-      console.log(`[Orchestrator] 🔄 Tree status reset: ${taskTree.status} → active (new pending sub-task added)`);
+    // 🔧 不变量守卫：tree 状态与新子任务的关系
+    // - completed → active：新轮次开始，正常重置
+    // - failed → active：仅当新子任务属于不同轮次（新 rootTaskId）时重置
+    //   防止：同轮次 overthrow 后，LLM 继续添加错误子任务导致失败树"复活"
+    if (taskTree.status === "completed") {
+      console.log(`[Orchestrator] 🔄 Tree status reset: completed → active (new pending sub-task added)`);
       taskTree.status = "active";
+    } else if (taskTree.status === "failed") {
+      // 收集当前失败轮次的 rootTaskId 集合
+      const failedRoundIds = new Set(
+        taskTree.subTasks
+          .filter(t => t.status === "failed")
+          .map(t => t.rootTaskId)
+          .filter((id): id is string => Boolean(id)),
+      );
+      const isNewRound = rootTaskId && !failedRoundIds.has(rootTaskId);
+      if (isNewRound) {
+        console.log(`[Orchestrator] 🔄 Tree status reset: failed → active (new round: ${rootTaskId})`);
+        taskTree.status = "active";
+      } else {
+        console.warn(`[Orchestrator] ⚠️ Tree is failed (round ${rootTaskId ?? "unknown"}), new sub-task will NOT reset status`);
+      }
     }
 
     await this.taskTreeManager.save(taskTree);
@@ -214,120 +508,15 @@ export class Orchestrator {
         );
       }
 
-      // 🆕 自动触发质量评估
-      if (taskTree.qualityReviewEnabled !== false) {
-        console.log(`[Orchestrator] 🔍 开始质量评估：${subTask.id}`);
-        
-        const review = await this.qualityReviewer.reviewSubTaskCompletion(
-          taskTree,
-          subTask.id
-        );
+      // 🔧 P0: 统一后处理（质量评估 + 文件验证 + 交付产物 + 持久化）
+      const postResult = await this.postProcessSubTaskCompletion(taskTree, subTask);
 
-        // 根据评估结果决定后续操作
-        switch (review.decision) {
-          case "continue":
-            console.log(`[Orchestrator] ✅ 质量评估通过`);
-            break;
-
-          case "adjust":
-            console.log(`[Orchestrator] ⚠️ 质量需要调整`);
-            if (review.modifications && review.modifications.length > 0) {
-              await this.adjustTaskTree(taskTree, review.modifications, false);
-            }
-            break;
-
-          case "restart":
-            console.log(`[Orchestrator] 🔄 质量不满意，需要重新执行`);
-            // 标记任务为 pending，等待重新执行
-            await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
-            subTask.retryCount++;
-            throw new Error(`质量评估不通过，需要重新执行：${review.findings.join("; ")}`);
-
-          case "overthrow":
-            console.log(`[Orchestrator] ❌ 质量严重不满意，需要推翻`);
-            throw new Error(`质量评估严重不通过：${review.findings.join("; ")}`);
-        }
+      // 将 postProcess 的决策转换为 executeSubTask 的 throw 行为（保持向后兼容）
+      if (postResult.needsRequeue) {
+        throw new Error(`质量评估不通过，需要重新执行：${postResult.findings.join("; ")}`);
       }
-
-      // 🆕 验证文件产出（针对写作任务）
-      if (subTask.metadata?.requiresFileOutput) {
-        const hasFileOutput = await this.verifyFileOutput(taskTree, subTask);
-        
-        if (!hasFileOutput) {
-          throw new Error(
-            `任务完成但未产生文件输出。请使用 write 工具创建文件。\n` +
-            `任务要求：${subTask.prompt}\n` +
-            `当前输出：${subTask.output?.substring(0, 200)}...`
-          );
-        }
-        
-        // 🆕 发送子任务的文件到聊天频道
-        await this.sendSubTaskFiles(taskTree, subTask);
-      }
-
-      // 🆕 如果是根任务（汇总任务），生成最终交付产物
-      if (subTask.metadata?.isRootTask && subTask.metadata?.isSummaryTask) {
-        const deliverablePath = await this.generateFinalDeliverable(taskTree, subTask);
-        console.log(`[Orchestrator] ✅ 根任务汇总完成，最终产物：${deliverablePath}`);
-        
-        // 🆕 如果是写作任务，合并并发送完整文件
-        if (subTask.metadata?.requiresFileOutput && this.fileManager) {
-          try {
-            const mergedFilePath = await this.fileManager.mergeTaskOutputs(taskTree);
-            await this.sendFileToChannel(mergedFilePath, `完整输出：${taskTree.rootTask}`);
-            console.log(`[Orchestrator] ✅ 已发送完整文件到聊天频道`);
-          } catch (err) {
-            console.warn(`[Orchestrator] ⚠️ 合并或发送完整文件失败`, err);
-          }
-        }
-        
-        // 🆕 更新任务树状态为 completed
-        taskTree.status = "completed";
-        await this.taskTreeManager.save(taskTree);
-      }
-
-      // 🆕 如果是汇总任务（waitForChildren=true），生成最终交付产物
-      if (subTask.waitForChildren && subTask.children && subTask.children.length > 0) {
-        const deliverablePath = await this.generateFinalDeliverable(taskTree, subTask);
-        console.log(`[Orchestrator] ✅ 汇总任务完成，最终产物：${deliverablePath}`);
-        
-        // 🆕 如果是写作任务，合并并发送完整文件
-        if (subTask.metadata?.requiresFileOutput && this.fileManager) {
-          try {
-            const mergedFilePath = await this.fileManager.mergeTaskOutputs(taskTree);
-            await this.sendFileToChannel(mergedFilePath, `完整输出：${subTask.summary}`);
-            console.log(`[Orchestrator] ✅ 已发送完整文件到聊天频道`);
-          } catch (err) {
-            console.warn(`[Orchestrator] ⚠️ 合并或发送完整文件失败`, err);
-          }
-        }
-      }
-
-      // 🆕 保存任务输出到文件系统
-      if (this.fileManager) {
-        // 保存任务输出
-        const outputPath = await this.fileManager.saveTaskOutput(
-          subTask.id,
-          output,
-          "txt"
-        );
-
-        // 保存任务元数据
-        await this.fileManager.saveTaskMetadata(subTask);
-
-        // 记录时间线事件
-        await this.fileManager.recordTimelineEvent(
-          "task_completed",
-          subTask.id,
-          `任务完成：${subTask.summary}`
-        );
-
-        // 记录执行日志
-        await this.fileManager.logExecution(
-          `Task ${subTask.id} completed: ${subTask.summary}`
-        );
-
-        console.log(`[Orchestrator] 💾 Task output saved to: ${outputPath}`);
+      if (postResult.markedFailed) {
+        throw new Error(`质量评估严重不通过：${postResult.findings.join("; ")}`);
       }
 
       console.log(`[Orchestrator] ✅ Sub task completed: ${subTask.id}`);
@@ -394,6 +583,60 @@ export class Orchestrator {
     return interruptedTasks;
   }
 
+  // ========================================
+  // 🆕 任务意图分类与旧任务归档
+  // ========================================
+
+  /**
+   * 分类用户消息意图：新任务 / 续接旧任务 / 调整旧任务
+   * 
+   * 在 agent-runner 中 LLM 被调用之前执行，用于决定是否归档旧任务树。
+   * 流程：规则预分类（免 LLM）→ LLM 分类（必要时）→ 降级 new_task（失败时）
+   * 
+   * @param userMessage 用户新消息
+   * @param sessionId 当前 session ID
+   * @returns 意图分类结果，如果无旧任务树则返回 null
+   */
+  async classifyUserIntent(
+    userMessage: string,
+    sessionId: string,
+  ): Promise<TaskIntentResult | null> {
+    const taskTree = await this.taskTreeManager.load(sessionId);
+    if (!taskTree) {
+      return null; // 无旧任务树，无需分类
+    }
+
+    return await classifyTaskIntent(userMessage, taskTree, this.systemLLMCaller);
+  }
+
+  /**
+   * 归档旧任务树（标记为 completed/abandoned）
+   * 
+   * 当意图分类为 new_task 时调用，确保旧任务树不会污染新任务。
+   * 
+   * @param sessionId session ID
+   * @param reason 归档原因
+   */
+  async archiveTaskTree(sessionId: string, reason: string): Promise<void> {
+    const taskTree = await this.taskTreeManager.load(sessionId);
+    if (!taskTree) return;
+
+    // 将所有未终结的子任务标记为 completed（abandoned）
+    for (const subTask of taskTree.subTasks) {
+      if (subTask.status === "pending" || subTask.status === "active" || subTask.status === "interrupted") {
+        subTask.status = "completed";
+        subTask.output = `[自动归档] ${reason}`;
+        subTask.completedAt = Date.now();
+      }
+    }
+
+    // 标记任务树为 completed
+    taskTree.status = "completed";
+
+    await this.taskTreeManager.save(taskTree);
+    console.log(`[Orchestrator] 📦 旧任务树已归档：${sessionId}（原因：${reason}）`);
+  }
+
   /**
    * 加载任务树
    */
@@ -406,6 +649,49 @@ export class Orchestrator {
    */
   async saveTaskTree(taskTree: TaskTree): Promise<void> {
     await this.taskTreeManager.save(taskTree);
+  }
+
+  /**
+   * P2: 判断子任务是否应该自动递归分解
+   * 
+   * 轻量级前置检查，避免不必要的 LLM 调用。
+   * 条件全部满足时返回 true：
+   * - 未被分解过
+   * - 深度未超过限制
+   * - Prompt 长度超过阈值（复杂度启发式）
+   * 
+   * @param taskTree 任务树
+   * @param subTask 待检查的子任务
+   * @returns 是否应该自动分解
+   */
+  shouldAutoDecompose(taskTree: TaskTree, subTask: SubTask): boolean {
+    if (subTask.decomposed) return false;
+    const maxDepth = taskTree.maxDepth ?? 3;
+    if ((subTask.depth ?? 0) >= maxDepth) return false;
+    // 复杂度启发式：prompt 超过 500 字符 → 认为值得分解
+    const COMPLEXITY_THRESHOLD = 500;
+    const shouldDecompose = subTask.prompt.length > COMPLEXITY_THRESHOLD;
+    if (shouldDecompose) {
+      console.log(
+        `[Orchestrator] 📊 P2: 子任务 ${subTask.id} prompt=${subTask.prompt.length} 字符, depth=${subTask.depth ?? 0}/${maxDepth} → 推荐自动分解`,
+      );
+    }
+    return shouldDecompose;
+  }
+
+  /**
+   * 合并轮次的所有子任务输出（P4: 统一合并逻辑）
+   * 
+   * 使用 FileManager.mergeTaskOutputs() 的多策略合并
+   * （producedFilePaths → artifacts → output.txt），
+   * 替代 followup-runner 中的简单文本拼接。
+   * 
+   * @param taskTree 任务树
+   * @returns 合并后的文件路径
+   */
+  async mergeRoundOutputs(taskTree: TaskTree): Promise<string> {
+    const fm = await this.ensureFileManager(taskTree.id);
+    return await fm.mergeTaskOutputs(taskTree);
   }
 
   // ========================================
@@ -596,17 +882,6 @@ export class Orchestrator {
   // ========================================
   // 🆕 批量执行相关方法
   // ========================================
-
-  /**
-   * 设置 LLM 调用器（用于批量执行）
-   * 
-   * @param llmCaller LLM 调用器
-   * @param options 批量执行选项
-   */
-  setLLMCaller(llmCaller: LLMCaller, options?: BatchExecutionOptions): void {
-    this.batchExecutor = new BatchExecutor(llmCaller, options);
-    console.log("[Orchestrator] ✅ LLM 调用器已设置，批量执行功能已启用");
-  }
 
   /**
    * 批量执行多个批次

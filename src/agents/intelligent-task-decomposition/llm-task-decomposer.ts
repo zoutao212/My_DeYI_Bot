@@ -37,11 +37,18 @@ interface LLMConfig {
  */
 export class LLMTaskDecomposer {
   private llmConfig: LLMConfig;
-  private llmCaller: LLMCaller | null;
+  private externalLLMCaller: LLMCaller | null;
 
   constructor(llmConfig: LLMConfig, llmCaller?: LLMCaller) {
     this.llmConfig = llmConfig;
-    this.llmCaller = llmCaller ?? null;
+    this.externalLLMCaller = llmCaller ?? null;
+  }
+
+  /**
+   * 设置外部 LLM 调用器（支持延迟注入）
+   */
+  setLLMCaller(caller: LLMCaller): void {
+    this.externalLLMCaller = caller;
   }
 
   /**
@@ -432,24 +439,18 @@ ${prompts.jsonOnlyReminder}`;
    * 调用 LLM
    */
   private async callLLM(prompt: string): Promise<string> {
-    console.log(`[LLMTaskDecomposer] 调用 LLM，提示词长度: ${prompt.length}`);
-    
-    // 🔧 使用真实 LLMCaller（如果已注入）
-    if (this.llmCaller) {
+    // 优先使用注入的系统 LLM 调用器（走 auth profiles + completeSimple）
+    if (this.externalLLMCaller) {
+      console.log(`[LLMTaskDecomposer] 使用系统 LLM 管线分解，提示词长度: ${prompt.length}`);
       try {
-        const response = await this.llmCaller.call(prompt);
-        console.log(`[LLMTaskDecomposer] ✅ LLM 响应长度: ${response.length}`);
-        return response;
+        return await this.externalLLMCaller.call(prompt);
       } catch (err) {
-        console.error(`[LLMTaskDecomposer] ❌ LLM 调用失败:`, err);
-        // 降级到默认响应
-        console.warn(`[LLMTaskDecomposer] ⚠️ 降级到默认分解方案`);
+        console.warn(`[LLMTaskDecomposer] ⚠️ 系统 LLM 调用失败，降级到规则驱动:`, err);
       }
-    } else {
-      console.warn(`[LLMTaskDecomposer] ⚠️ 未配置 LLMCaller，使用默认分解方案`);
     }
-    
-    // 兜底：返回默认分解方案
+
+    // 降级：规则驱动默认分解方案
+    console.log(`[LLMTaskDecomposer] 使用规则驱动分解（降级），提示词长度: ${prompt.length}`);
     return `{
   "subTasks": [
     {

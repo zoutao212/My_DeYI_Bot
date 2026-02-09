@@ -47,20 +47,45 @@ export function scheduleFollowupDrain(
               if (sessionId) {
                 const taskTree = await orchestrator.loadTaskTree(sessionId);
                 if (taskTree) {
-                  // 守卫 A：任务树全局 status 已终结（兜底，兼容旧数据）
-                  // 🔧 二次校验：如果 tree 中仍有 pending 子任务，说明 status 尚未同步（addSubTask 应已修复），
-                  //    此时不应丢弃队列，而是跳过守卫让任务正常执行。
+                  // 守卫 A：任务树全局 status 已终结
                   if (taskTree.status === "completed" || taskTree.status === "failed") {
                     const hasPending = taskTree.subTasks.some((t) => t.status === "pending" || t.status === "active");
-                    if (hasPending) {
-                      console.log(`[drain] ⚠️ Tree status=${taskTree.status} but ${taskTree.subTasks.filter((t) => t.status === "pending" || t.status === "active").length} pending/active sub-tasks exist, skipping guard A`);
-                    } else {
+                    if (!hasPending) {
+                      // 无 pending 子任务 → 全部丢弃
                       const isStale = (item: FollowupRun) => Boolean(item.subTaskId || item.isQueueTask);
                       const staleCount = queue.items.filter(isStale).length;
                       queue.items = queue.items.filter((item) => !isStale(item));
                       console.log(`[drain] 🧹 Task tree already ${taskTree.status}, discarded ${staleCount} stale sub-tasks`);
                       continue;
                     }
+
+                    // 🔧 overthrow 级联守卫：tree 已 failed 且有 pending 子任务时，
+                    //    检查当前队列项的 rootTaskId 是否属于已失败轮次。
+                    //    同轮次内有任务被 overthrow → 级联丢弃该轮次所有剩余队列项。
+                    if (taskTree.status === "failed" && nextPeek.rootTaskId) {
+                      const failedRoundIds = new Set(
+                        taskTree.subTasks
+                          .filter((t) => t.status === "failed")
+                          .map((t) => t.rootTaskId)
+                          .filter((id): id is string => Boolean(id)),
+                      );
+                      if (failedRoundIds.has(nextPeek.rootTaskId)) {
+                        const roundId = nextPeek.rootTaskId;
+                        const before = queue.items.length;
+                        queue.items = queue.items.filter((item) => item.rootTaskId !== roundId);
+                        // 级联标记同轮次 pending 子任务为 failed
+                        for (const t of taskTree.subTasks) {
+                          if (t.rootTaskId === roundId && (t.status === "pending" || t.status === "active")) {
+                            t.status = "failed";
+                            t.error = "级联失败：同轮次兄弟任务被 overthrow";
+                          }
+                        }
+                        await orchestrator.saveTaskTree(taskTree);
+                        console.log(`[drain] 🧹 Round ${roundId} has overthrown tasks, cascade-discarded ${before - queue.items.length} remaining items`);
+                        continue;
+                      }
+                    }
+                    console.log(`[drain] ⚠️ Tree status=${taskTree.status} but ${taskTree.subTasks.filter((t) => t.status === "pending" || t.status === "active").length} pending/active sub-tasks from other rounds exist, skipping guard A`);
                   }
 
                   // 守卫 B：rootTaskId 轮次完成检查（核心守卫）
