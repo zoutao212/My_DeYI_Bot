@@ -456,6 +456,7 @@ export interface ErrorLog {
 export type QualityStatus = 
   | "pending"           // 待评估
   | "passed"            // 通过
+  | "partial"           // 部分完成（已有输出可保留，但需要续写补足）
   | "needs_adjustment"  // 需要调整
   | "needs_restart"     // 需要重启
   | "needs_overthrow";  // 需要推翻

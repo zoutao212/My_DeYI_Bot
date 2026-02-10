@@ -71,25 +71,38 @@ function validateSubTaskOutput(
   }
 
   // 规则 2：上下文溢出信号 — 输出极短且无文件工具调用
-  // 🔧 问题5修复：上下文溢出是结构性问题（prompt 太长），重试不会改善。
-  // 同时检测 "Request aborted" 等 abort 信号，这类错误也不应重试。
+  // 🔧 P0-C 修复：区分"明确上下文溢出"和"泛化 abort 信号"
+  // 根因：原逻辑把所有 abort 信号（包括 API 限流、网络超时、临时性中断）
+  // 都标记为 skip（不可重试），导致可恢复的临时失败直接放弃。
+  // 修复：明确的上下文溢出（context length/overflow 关键词）→ skip
+  //       泛化的 abort（"Request aborted"、"aborted"）→ retry（给一次重试机会）
   const FILE_TOOLS = new Set(["write", "send_file", "read", "exec"]);
   const usedAnyTool = toolMetas.some((m) => FILE_TOOLS.has(m.toolName));
-  const abortPatterns = [
-    /request\s*aborted/i,
-    /aborted/i,
+  const contextOverflowPatterns = [
     /context.*(?:length|limit|overflow|exceeded)/i,
     /maximum.*(?:context|token)/i,
+    /prompt.*too.*long/i,
+    /request.*too.*large/i,
   ];
-  const isAbortSignal = abortPatterns.some((p) => p.test(outputText));
+  const genericAbortPatterns = [
+    /request\s*aborted/i,
+    /aborted/i,
+  ];
+  const isContextOverflow = contextOverflowPatterns.some((p) => p.test(outputText));
+  const isGenericAbort = !isContextOverflow && genericAbortPatterns.some((p) => p.test(outputText));
+  const isAbortSignal = isContextOverflow || isGenericAbort;
   if (!usedAnyTool && (outputText.length < 200 && outputText.length > 0 || isAbortSignal)) {
+    // 明确上下文溢出 → skip；泛化 abort → retry（临时性问题可恢复）
+    const action = isContextOverflow ? "skip" : "retry";
     return {
       valid: false,
       failureCode: "context_overflow_signal",
-      failureReason: isAbortSignal
-        ? `检测到 abort/溢出信号: "${outputText.substring(0, 80)}"，上下文溢出不可重试`
-        : `输出仅 ${outputText.length} 字符且无工具调用，疑似上下文溢出`,
-      suggestedAction: "skip",  // 🔧 上下文溢出是结构性问题，skip 而非 retry
+      failureReason: isContextOverflow
+        ? `检测到上下文溢出: "${outputText.substring(0, 80)}"，结构性问题不可重试`
+        : isGenericAbort
+          ? `检测到 abort 信号: "${outputText.substring(0, 80)}"，可能是临时性问题`
+          : `输出仅 ${outputText.length} 字符且无工具调用，疑似上下文溢出`,
+      suggestedAction: action,
     };
   }
 

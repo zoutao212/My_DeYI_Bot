@@ -1429,6 +1429,27 @@ export class Orchestrator {
       (t) => t.rootTaskId === rootTaskId && !t.metadata?.isSummaryTask,
     );
     if (roundTasks.length === 0) return false;
+
+    // 🔧 P1 修复：检测僵尸 active 任务（active 超过 5 分钟无进展）
+    // 根因：如果 retry 执行被中断（进程退出、API 异常），任务停在 active 状态，
+    // isRoundCompleted 永远返回 false，导致轮次无法终结、drain 无法清理。
+    // 修复：将超时的 active 任务自动标记为 failed，附带诊断信息。
+    const ZOMBIE_THRESHOLD_MS = 5 * 60 * 1000; // 5 分钟
+    const now = Date.now();
+    for (const t of roundTasks) {
+      if (t.status === "active") {
+        // active 任务的"开始时间"：用 updatedAt 或 createdAt 估算
+        const activeStart = taskTree.updatedAt ?? t.createdAt ?? 0;
+        if (now - activeStart > ZOMBIE_THRESHOLD_MS) {
+          console.warn(
+            `[Orchestrator] 🧟 检测到僵尸 active 任务: ${t.id} (active 超过 ${Math.round((now - activeStart) / 60000)} 分钟)`,
+          );
+          t.status = "failed";
+          t.error = `僵尸任务：active 状态超过 ${Math.round((now - activeStart) / 60000)} 分钟无响应，自动标记失败`;
+        }
+      }
+    }
+
     const allDone = roundTasks.every(
       (t) => t.status === "completed" || t.status === "failed" || t.status === "skipped",
     );
@@ -1641,6 +1662,32 @@ export class Orchestrator {
     taskTree: TaskTree,
     subTask: SubTask,
   ): Promise<SubTask[]> {
+    // 🔧 P0-A 修复：续写深度上限，防止 cont-2 → cont-2-cont-2 无限递归
+    // 根因：续写子任务字数不达标时会再次触发 decomposeFailedTask，创建更深层的续写，
+    // 导致产出文件碎片化（如 第03章_完结篇.txt、第03章_终章续写.txt、第03章_终篇补完...）
+    const MAX_CONTINUATION_DEPTH = 2; // 最多 2 层续写（原始 → cont-2 → 到此为止）
+    if (subTask.metadata?.isContinuation) {
+      // 计算当前续写链深度：沿 continuationOf 链回溯
+      let depth = 1;
+      let curId = subTask.metadata.continuationOf as string | undefined;
+      while (curId && depth < MAX_CONTINUATION_DEPTH + 1) {
+        const ancestor = taskTree.subTasks.find(t => t.id === curId);
+        if (ancestor?.metadata?.isContinuation) {
+          depth++;
+          curId = ancestor.metadata.continuationOf as string | undefined;
+        } else {
+          break;
+        }
+      }
+      if (depth >= MAX_CONTINUATION_DEPTH) {
+        console.warn(
+          `[Orchestrator] ⚠️ decomposeFailedTask: 续写深度已达上限 (${depth}/${MAX_CONTINUATION_DEPTH})，` +
+          `不再分解 ${subTask.id}，以当前内容直接通过`,
+        );
+        return []; // 返回空数组 → 调用方回退到 restart 或直接通过
+      }
+    }
+
     const existingOutput = subTask.output ?? "";
     let existingLength = existingOutput.length;
     const wordCountReq = this.qualityReviewer.extractWordCountRequirement(subTask.prompt);
@@ -1698,7 +1745,7 @@ export class Orchestrator {
     subTask.output = existingOutput;
     if (!subTask.metadata) subTask.metadata = {};
     subTask.metadata.qualityReview = {
-      status: "passed",
+      status: "partial",
       decision: "decompose",
       findings: [`字数不达标触发增量分解：已有 ${existingLength} 字，需续写 ${remainingChars} 字`],
       suggestions: [],
@@ -3165,7 +3212,12 @@ ${childOutputs.join("\n\n---\n\n")}
     beginTracking(subTask.id);
 
     // 4. 更新子任务状态为 active
+    // 🔧 P0-B 修复：重试开始时清除旧 error 字段
+    // 根因：首次执行失败后 error 被设置，retry 时 onTaskStarting 只改 status 不清 error，
+    // 如果 retry 执行中途被 abort（如进程退出），任务停在 active + 旧 error，
+    // 导致 isRoundCompleted 永远返回 false（有 active 任务），轮次无法终结。
     subTask.status = "active";
+    subTask.error = undefined;
 
     // 5. 记录执行角色到子任务元数据
     subTask.executionRole = execCtx.role;
