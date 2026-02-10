@@ -133,25 +133,39 @@ export function trackFileWrite(
  */
 export function collectTrackedFiles(taskId: string): TrackedFile[] {
   const files = FILE_REGISTRY.get(taskId) || [];
-  
-  // 也收集"未关联"的文件（在追踪开始前就写入的）
-  const unassociated = FILE_REGISTRY.get("__unassociated__") || [];
-  const allFiles = [...files, ...unassociated];
-  
-  // 清理
+
+  // 🔧 修复：不再无条件合并 __unassociated__ 文件
+  // 原因：并行执行时，第一个完成的任务会把所有 __unassociated__ 文件都吞掉，
+  // 导致文件归属错乱（如第一章的 producedFilePaths 包含了 1-4 章的文件）。
+  // 只有当该任务自身没有追踪到文件时，才尝试从 __unassociated__ 中匹配。
+  let allFiles = [...files];
+
+  if (allFiles.length === 0) {
+    // 该任务没有追踪到任何文件，尝试从 __unassociated__ 中获取
+    // 但只在没有其他活跃追踪任务时才这样做（避免抢占）
+    const unassociated = FILE_REGISTRY.get("__unassociated__") || [];
+    if (unassociated.length > 0 && activeTrackingStack.length <= 1) {
+      allFiles = [...unassociated];
+      FILE_REGISTRY.delete("__unassociated__");
+      console.log(
+        `[FileTracker] 📦 任务 ${taskId} 无直接追踪文件，从 __unassociated__ 获取 ${allFiles.length} 个`
+      );
+    }
+  }
+
+  // 清理该任务的追踪记录
   FILE_REGISTRY.delete(taskId);
-  FILE_REGISTRY.delete("__unassociated__");
-  
+
   // 从栈中移除（并行安全：只移除匹配的第一个）
   const stackIdx = activeTrackingStack.indexOf(taskId);
   if (stackIdx >= 0) {
     activeTrackingStack.splice(stackIdx, 1);
   }
-  
+
   console.log(
-    `[FileTracker] 📦 收集任务 ${taskId} 的文件产出: ${allFiles.length} 个文件`
+    `[FileTracker] 📦 收集任务 ${taskId} 的文件产出: ${allFiles.length} 个文件 (remaining active: ${activeTrackingStack.length})`
   );
-  
+
   return allFiles;
 }
 

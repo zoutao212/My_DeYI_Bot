@@ -44,6 +44,16 @@ const EnqueueTaskSchema = Type.Object({
 **重要**：如果设置为 true，parentId 必须为空`,
     }),
   ),
+  llmBudget: Type.Optional(
+    Type.Number({
+      description: `LLM 请求预算上限（可选），默认 200。控制本轮任务最多消耗多少次 LLM 调用。
+用户可以在消息中指定，如"给你 200 个请求资源"。
+每个子任务执行消耗约 2 次（执行 1 次 + 质检 1 次），分解和调整也各消耗 1 次。
+达到上限后系统会停止执行剩余任务，已完成的部分会正常合并输出。
+注意：预算应该足够覆盖所有子任务。建议值 = 子任务数量 × 4（含重试余量）。
+⚠️ 不要为合并/发送类子任务设置很小的预算，因为预算是 Round 级别的，会影响所有子任务。`,
+    }),
+  ),
 });
 
 type EnqueueTaskOptions = {
@@ -197,6 +207,9 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
       const parentId = readStringParam(params, "parentId");
       const waitForChildren = params.waitForChildren === true;
       const isNewRootTask = params.isNewRootTask === true;
+      const llmBudget = typeof params.llmBudget === "number" && params.llmBudget > 0
+        ? params.llmBudget
+        : undefined;
 
       if (!agentSessionKey) {
         return jsonResult({
@@ -219,6 +232,10 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
       // 当 provider 或 model 变化时重新初始化，确保始终匹配当前会话
       const runProvider = currentFollowupRun.run.provider;
       const runModel = currentFollowupRun.run.model;
+      // 🆕 A2: 确保 config 始终同步到 orchestrator（即使 provider/model 没变）
+      if (config) {
+        globalOrchestrator.updateConfig(config);
+      }
       if (config && (llmCallerProvider !== runProvider || llmCallerModel !== runModel)) {
         console.log(`[enqueue_task] 🔄 初始化系统 LLM 调用器: provider=${runProvider}, model=${runModel}`);
         globalOrchestrator.initializeLLMCaller(config, runProvider, runModel);
@@ -341,7 +358,7 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
         const roundGoal = isNewRootTask
           ? (userOriginalPrompt || summary || prompt.substring(0, 200))   // 新根任务：优先用用户原始消息
           : (currentFollowupRun.summaryLine || currentFollowupRun.prompt?.substring(0, 200) || prompt.substring(0, 200));  // 子任务：用原始用户消息
-        globalOrchestrator.getOrCreateRound(taskTree, rootTaskId, roundGoal);
+        globalOrchestrator.getOrCreateRound(taskTree, rootTaskId, roundGoal, llmBudget);
 
         // 添加子任务到任务树（携带 rootTaskId 实现轮次隔离）
         const subTask = await globalOrchestrator.addSubTask(

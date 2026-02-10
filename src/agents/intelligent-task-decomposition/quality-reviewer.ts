@@ -149,8 +149,41 @@ export class QualityReviewer {
         throw new Error(`${prompts.qualityReviewer.errors.subTaskNotFound} ${subTaskId}`);
       }
 
+      // 🔧 关键修复：读取实际文件内容用于质检
+      // subTask.output 可能只是 LLM 的确认消息（如"已创作完成"），不是文件内容。
+      // 质检 LLM 必须看到真实产出才能做出有意义的评估。
+      let fileContent: string | undefined;
+      const producedPaths = subTask.metadata?.producedFilePaths;
+      if (producedPaths && producedPaths.length > 0) {
+        try {
+          const fs = await import("node:fs/promises");
+          const contents: string[] = [];
+          for (const filePath of producedPaths) {
+            try {
+              const content = await fs.readFile(filePath, "utf-8");
+              contents.push(content);
+            } catch {
+              // 文件不存在或无法读取，跳过
+            }
+          }
+          if (contents.length > 0) {
+            fileContent = contents.join("\n\n---\n\n");
+            // 截断到 6000 字符，避免质检 prompt 过长导致上下文溢出
+            if (fileContent.length > 6000) {
+              fileContent = fileContent.substring(0, 3000) + "\n\n...[中间内容省略]...\n\n" + fileContent.substring(fileContent.length - 2500);
+            }
+            console.log(
+              `[QualityReviewer] 📏 读取 ${contents.length} 个文件用于质检，共 ${contents.reduce((a, c) => a + c.length, 0)} 字符` +
+              (fileContent.length < contents.reduce((a, c) => a + c.length, 0) ? `（截断到 ${fileContent.length} 字符）` : ""),
+            );
+          }
+        } catch {
+          // import 失败，回退到 output
+        }
+      }
+
       // 2. 构建评估提示词（使用轮次根任务描述替代可能过期的 taskTree.rootTask）
-      const prompt = this.buildCompletionReviewPrompt(taskTree, subTask, rootTaskOverride);
+      const prompt = this.buildCompletionReviewPrompt(taskTree, subTask, rootTaskOverride, fileContent);
       
       // 3. 调用 LLM 进行评估
       const llmResponse = await this.callLLM(prompt);
@@ -479,6 +512,7 @@ ${prompts.jsonOnlyReminder}`;
     taskTree: TaskTree,
     subTask: SubTask,
     rootTaskOverride?: string,
+    fileContent?: string,
   ): string {
     const prompts = getPrompts();
     const aspects = prompts.completionReview.aspects;
@@ -493,6 +527,23 @@ ${prompts.jsonOnlyReminder}`;
       ? `\n\n⚠️ 字数硬性校验规则：\n该子任务要求产出约 ${wordCountHint} 字。请估算实际输出的字数（中文按字符计数）。\n- 实际字数 >= 要求的 70%（即 >= ${Math.floor(wordCountHint * 0.7)} 字）→ 可以 continue\n- 实际字数 < 要求的 70%（即 < ${Math.floor(wordCountHint * 0.7)} 字）→ 必须 restart，并在 findings 中注明"字数不达标：预期 ${wordCountHint} 字，实际约 X 字"\n`
       : "";
 
+    // 🆕 B1: 注入上次质检失败原因（如果有），帮助质检 LLM 判断是否已改进
+    const previousFindings = subTask.metadata?.lastFailureFindings;
+    const retryContext = previousFindings && previousFindings.length > 0
+      ? `\n\n📋 历史信息：这是第 ${subTask.retryCount ?? 0} 次重试。上次被打回的原因：\n${previousFindings.map((f, i) => `${i + 1}. ${f}`).join("\n")}\n请重点检查这些问题是否已改进。如果已改进，即使其他方面略有不足也可以 continue。\n`
+      : "";
+
+    // 🔧 关键修复：优先使用文件内容作为质检对象
+    // subTask.output 可能只是 LLM 的确认消息（如"已创作完成"），不是实际产出。
+    // 当有文件内容时，用文件内容替代 output，让质检 LLM 看到真实产出。
+    let outputSection: string;
+    if (fileContent) {
+      const fileCharCount = fileContent.length;
+      outputSection = `- ${prompts.labels.output}（来自文件产出，共 ${fileCharCount} 字符）:\n${fileContent}`;
+    } else {
+      outputSection = `- ${prompts.labels.output}: ${subTask.output || prompts.labels.noOutput}`;
+    }
+
     return `${prompts.completionReview.expertRole} ${prompts.completionReview.instruction}
 
 ${prompts.labels.rootTask}：${effectiveRootTask}
@@ -501,12 +552,12 @@ ${prompts.labels.subTaskInfo}：
 - ID: ${subTask.id}
 - ${prompts.labels.description}: ${subTask.prompt}
 - ${prompts.labels.status}: ${subTask.status}
-- ${prompts.labels.output}: ${subTask.output || prompts.labels.noOutput}
+${outputSection}
 
 ${prompts.completionReview.aspectsTitle}
 
 ${aspectsStr}
-${wordCountRule}
+${wordCountRule}${retryContext}
 ⚠️ 决策指引（overthrow vs restart）：
 - "overthrow"（推翻）仅用于任务本身不可能完成的结构性错误（如需求矛盾、技术上不可行）。
 - 如果输出存在风格偏差（如出现不合时代/世界观的元素、语气不当、角色人格泄露导致的不当内容），应使用 "restart"（重新执行），因为这类问题在重试时通常可以修正。

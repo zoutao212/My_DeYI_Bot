@@ -204,6 +204,15 @@ export type AgentDefaultsConfig = {
   };
   /** Max concurrent agent runs across all conversations. Default: 1 (sequential). */
   maxConcurrent?: number;
+  /** 🆕 任务分解系统配置 */
+  taskDecomposition?: {
+    /** LLM 调用预算上限（默认 100）。每个子任务执行约消耗 2 次（执行+质检）。 */
+    llmCallBudget?: number;
+    /** 单任务最大重试次数（默认 3） */
+    maxRetries?: number;
+    /** 是否启用质量评估（默认 true） */
+    qualityReviewEnabled?: boolean;
+  };
   /** Sub-agent defaults (spawned via sessions_spawn). */
   subagents?: {
     /** Max concurrent sub-agent runs (global lane: "subagent"). Default: 1. */

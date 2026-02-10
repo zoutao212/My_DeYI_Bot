@@ -138,6 +138,10 @@ export interface Round {
     totalFailures: number;
     /** 累计 token 消耗 */
     totalTokensUsed: number;
+    /** 🆕 累计 LLM 调用次数（每次子任务执行 +1，质检 +1） */
+    llmCallCount: number;
+    /** 🆕 LLM 调用预算上限（默认 100，用户可指定） */
+    llmCallBudget: number;
     /** 是否已熔断 */
     tripped: boolean;
     /** 熔断原因 */
@@ -593,6 +597,14 @@ export interface SubTaskMetadata {
     findings: string[];
     suggestions: string[];
   };
+
+  // 🆕 迭代优化相关字段
+
+  /** 上一次执行的输出（restart 时保存，用于下次重试时注入 prompt 做迭代优化） */
+  previousOutput?: string;
+
+  /** 上一次质检失败的原因（restart 时保存，用于下次重试时告知 LLM 避免重复犯错） */
+  lastFailureFindings?: string[];
 }
 
 /**

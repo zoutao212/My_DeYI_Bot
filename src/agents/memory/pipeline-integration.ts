@@ -75,18 +75,51 @@ export async function retrieveMemoryContext(
  * @returns 格式化的上下文文本；无内容则返回空字符串
  */
 export function buildSiblingContext(
-  completedSiblings: Array<{ summary?: string; output?: string; status: string }>,
+  completedSiblings: Array<{ summary?: string; output?: string; status: string; metadata?: { producedFilePaths?: string[] } }>,
   maxSnippetLen = 200,
 ): string {
   const completed = completedSiblings.filter(
-    (t) => t.status === "completed" && t.output,
+    (t) => t.status === "completed" && (t.output || (t.metadata?.producedFilePaths && t.metadata.producedFilePaths.length > 0)),
   );
   if (completed.length === 0) return "";
 
   const lines = completed.map((t) => {
-    const snippet = t.output!.length > maxSnippetLen
-      ? `${t.output!.substring(0, maxSnippetLen)}...`
-      : t.output!;
+    // 🆕 A3: 续写子任务需要更多上下文（检测"续写"关键词）
+    const isContinuation = t.summary?.includes("续写") ?? false;
+    // 🔧 修复：续写场景大幅增加上下文到 2000 字符
+    const effectiveMaxLen = isContinuation ? 2000 : maxSnippetLen;
+
+    // 🔧 关键修复：优先使用文件内容而非 subTask.output
+    // subTask.output 通常只是 LLM 的确认消息（如"已创作完成"），不是实际产出。
+    // 对于续写场景，必须看到前一个任务的实际文件内容才能保持连贯。
+    let effectiveOutput = t.output ?? "";
+    const producedPaths = t.metadata?.producedFilePaths;
+    if (producedPaths && producedPaths.length > 0) {
+      try {
+        // 同步读取文件内容（buildSiblingContext 是同步函数，使用 readFileSync）
+        const fs = require("node:fs");
+        const fileContents: string[] = [];
+        for (const filePath of producedPaths) {
+          try {
+            const content = fs.readFileSync(filePath, "utf-8");
+            if (content.length > 0) {
+              fileContents.push(content);
+            }
+          } catch {
+            // 文件不存在或无法读取，跳过
+          }
+        }
+        if (fileContents.length > 0) {
+          effectiveOutput = fileContents.join("\n\n");
+        }
+      } catch {
+        // require 失败，回退到 output
+      }
+    }
+
+    const snippet = effectiveOutput.length > effectiveMaxLen
+      ? `${effectiveOutput.substring(effectiveOutput.length - effectiveMaxLen)}` // 续写场景取结尾而非开头
+      : effectiveOutput;
     return `- [${t.summary ?? "子任务"}]: ${snippet}`;
   });
 

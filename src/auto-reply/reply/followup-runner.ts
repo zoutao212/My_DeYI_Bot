@@ -511,7 +511,27 @@ export function createFollowupRunner(params: {
                   const taskOutputDir = queued.rootTaskId
                     ? `workspace/${queued.rootTaskId}`
                     : "workspace";
-                  return `[⚠️ 强制规则] 你必须使用 write 工具将生成内容写入 .txt 文件，保存到 ${taskOutputDir}/ 目录下（文件名含任务摘要）。然后在聊天中仅回复简短确认。禁止将完整内容直接输出到聊天。\n\n${queued.prompt}`;
+                  
+                  // 🆕 A1: 迭代优化 — 如果有上次输出和失败原因，注入到 prompt
+                  let iterationHint = "";
+                  if (subTask?.metadata?.previousOutput || subTask?.metadata?.lastFailureFindings) {
+                    const parts: string[] = ["\n\n[⚠️ 迭代优化指令] 这是重试执行。请基于上次的结果进行改进，不要从零开始。"];
+                    if (subTask.metadata.lastFailureFindings && subTask.metadata.lastFailureFindings.length > 0) {
+                      parts.push(`上次被打回的原因：${subTask.metadata.lastFailureFindings.join("；")}`);
+                      parts.push("请针对以上问题重点改进。");
+                    }
+                    if (subTask.metadata.previousOutput) {
+                      const prevSnippet = subTask.metadata.previousOutput.length > 1500
+                        ? subTask.metadata.previousOutput.substring(0, 1500) + "...[截断]"
+                        : subTask.metadata.previousOutput;
+                      parts.push(`上次的输出（供参考和改进）：\n---\n${prevSnippet}\n---`);
+                      parts.push("请在上次输出的基础上改进，保留好的部分，修正问题部分。");
+                    }
+                    iterationHint = parts.join("\n");
+                    console.log(`[followup-runner] 🔄 注入迭代优化指令 (previousOutput=${subTask.metadata.previousOutput?.length ?? 0} chars, findings=${subTask.metadata.lastFailureFindings?.length ?? 0})`);
+                  }
+                  
+                  return `[⚠️ 强制规则] 你必须使用 write 工具将生成内容写入 .txt 文件，保存到 ${taskOutputDir}/ 目录下（文件名含任务摘要）。然后在聊天中仅回复简短确认。禁止将完整内容直接输出到聊天。${iterationHint}\n\n${queued.prompt}`;
                 }
                 return queued.prompt;
               })(),
