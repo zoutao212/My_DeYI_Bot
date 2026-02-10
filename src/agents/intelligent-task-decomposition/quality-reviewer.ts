@@ -524,7 +524,7 @@ ${prompts.jsonOnlyReminder}`;
     // 🔧 P0 修复：提取子任务 prompt 中的字数要求，注入硬性校验规则
     const wordCountHint = this.extractWordCountRequirement(subTask.prompt);
     const wordCountRule = wordCountHint
-      ? `\n\n⚠️ 字数硬性校验规则：\n该子任务要求产出约 ${wordCountHint} 字。请估算实际输出的字数（中文按字符计数）。\n- 实际字数 >= 要求的 70%（即 >= ${Math.floor(wordCountHint * 0.7)} 字）→ 可以 continue\n- 实际字数 < 要求的 70%（即 < ${Math.floor(wordCountHint * 0.7)} 字）→ 必须 restart，并在 findings 中注明"字数不达标：预期 ${wordCountHint} 字，实际约 X 字"\n`
+      ? `\n\n⚠️ 字数硬性校验规则：\n该子任务要求产出约 ${wordCountHint} 字。请估算实际输出的字数（中文按字符计数）。\n- 实际字数 >= 要求的 80%（即 >= ${Math.floor(wordCountHint * 0.8)} 字）→ 可以 continue\n- 实际字数 < 要求的 80%（即 < ${Math.floor(wordCountHint * 0.8)} 字）→ 必须 restart，并在 findings 中注明"字数不达标：预期 ${wordCountHint} 字，实际约 X 字"\n- 注意：系统已在前置检查中拦截了 < 60% 的极端情况，你只需关注 60%-80% 区间的判断\n`
       : "";
 
     // 🆕 B1: 注入上次质检失败原因（如果有），帮助质检 LLM 判断是否已改进

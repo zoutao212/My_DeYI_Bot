@@ -263,7 +263,11 @@ export class Orchestrator {
               // import 失败，回退到 output 长度
             }
           }
-          const threshold = Math.floor(wordCountReq * 0.3); // 30% 硬性底线
+          const threshold = Math.floor(wordCountReq * 0.6); // 60% 硬性底线（零 LLM 成本拦截）
+          // 🔧 问题 G 修复：从 30% 提高到 60%
+          // 原因：30% 太低，大量不达标的输出（如 32%）会通过前置检查，
+          // 然后交给 LLM 质检（消耗 1 次 LLM 调用）才被 restart。
+          // 60% 门槛可以在零成本下拦截大部分不达标输出，节省 LLM 预算。
           if (actualLength < threshold) {
             const currentRetry = subTask.retryCount ?? 0;
 
@@ -293,9 +297,10 @@ export class Orchestrator {
 
             // 首次不达标或 decompose 失败 → 正常 restart
             console.warn(
-              `[Orchestrator] ⚠️ P5 精确字数前置检查：要求 ${wordCountReq} 字，实际 ${actualLength} 字（< 30% 底线 ${threshold}），restart`,
+              `[Orchestrator] ⚠️ P5 精确字数前置检查：要求 ${wordCountReq} 字，实际 ${actualLength} 字（< 60% 底线 ${threshold}），restart`,
             );
-            if (currentRetry < 3) {
+            const maxRetries = this.getDefaultMaxRetries();
+            if (currentRetry < maxRetries) {
               // 🆕 A1: 迭代优化 — 保存上次输出和失败原因
               if (!subTask.metadata) subTask.metadata = {};
               if (subTask.output && subTask.output.length > 0) {
@@ -1305,8 +1310,18 @@ export class Orchestrator {
       maxDepth
     );
 
+    // 🔧 问题 J 修复：分解 LLM 调用计入预算（decomposeRecursively 消耗 1 次 LLM）
+    const roundId = subTask.rootTaskId;
+    if (roundId) {
+      this.incrementLLMCallCount(taskTree, roundId, 1);
+    }
+
     // 4. 如果启用质量评估，评估分解质量
     if (enableQualityReview && taskTree.qualityReviewEnabled !== false) {
+      // 🔧 问题 J 修复：质检 LLM 调用计入预算
+      if (roundId) {
+        this.incrementLLMCallCount(taskTree, roundId, 1);
+      }
       const review = await this.qualityReviewer.reviewDecomposition(
         taskTree,
         subTaskId,
@@ -1356,6 +1371,13 @@ export class Orchestrator {
     // 5. 将分解后的子任务添加到任务树
     for (const decomposedTask of decomposedTasks) {
       await this.taskTreeManager.addSubTask(taskTree, subTaskId, decomposedTask);
+      // 🔧 问题 L 修复：将分解子任务加入 Round.subTaskIds
+      if (decomposedTask.rootTaskId) {
+        const round = this.findRound(taskTree, decomposedTask.rootTaskId);
+        if (round && !round.subTaskIds.includes(decomposedTask.id)) {
+          round.subTaskIds.push(decomposedTask.id);
+        }
+      }
     }
 
     // 6. 标记子任务为已分解
@@ -1526,6 +1548,17 @@ export class Orchestrator {
       };
 
       await this.taskTreeManager.addSubTask(taskTree, newSubTask.parentId || null, newSubTask);
+      
+      // 🔧 问题 L 修复：将续写子任务加入 Round.subTaskIds
+      // decomposeFailedTask 直接调用 taskTreeManager.addSubTask（不经过 Orchestrator.addSubTask），
+      // 所以 Round.subTaskIds 不会被自动更新。手动补充。
+      if (newSubTask.rootTaskId) {
+        const round = this.findRound(taskTree, newSubTask.rootTaskId);
+        if (round && !round.subTaskIds.includes(newSubTask.id)) {
+          round.subTaskIds.push(newSubTask.id);
+        }
+      }
+      
       newSubTasks.push(newSubTask);
     }
 
@@ -2502,6 +2535,11 @@ ${childOutputs.join("\n\n---\n\n")}
 
     // 4. 使用失败经验重新分解
     const maxDepth = taskTree.maxDepth ?? 3;
+    // 🔧 问题 J 修复：重新分解消耗 1 次 LLM 调用，计入预算
+    const roundId = subTask.rootTaskId;
+    if (roundId) {
+      this.incrementLLMCallCount(taskTree, roundId, 1);
+    }
     const newTasks = await this.llmDecomposer.decomposeWithLessons(
       taskTree,
       subTask,
@@ -2917,8 +2955,9 @@ ${childOutputs.join("\n\n---\n\n")}
     // 1. 委托现有的后处理逻辑（质量评估 + 决策 + 文件验证 + 持久化）
     const result = await this.postProcessSubTaskCompletion(taskTree, subTask);
 
-    // 2. 如果后处理决定 restart 或 overthrow，直接返回（不做轮次检查）
-    if (result.needsRequeue || result.markedFailed) {
+    // 2. 如果后处理决定 restart、overthrow 或 decompose，直接返回（不做轮次检查）
+    // decompose 时续写子任务刚创建为 pending，轮次不可能完成，跳过检查节省开销
+    if (result.needsRequeue || result.markedFailed || result.decision === "decompose") {
       return result;
     }
 

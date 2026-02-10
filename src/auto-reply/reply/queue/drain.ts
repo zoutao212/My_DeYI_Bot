@@ -107,12 +107,34 @@ export function scheduleFollowupDrain(
                             `[drain] ⚠️ Wait safety valve triggered: ${waitCount} iterations (${waitCount * 2}s), ` +
                             `falling back to FIFO for remaining ${queue.items.length} items`,
                           );
-                          // 强制 FIFO 执行队列头部任务，打破死锁
-                          const stuckItem = queue.items.shift();
-                          if (stuckItem) {
-                            waitCount = 0;
-                            console.log(`[drain] ▶️ Safety FIFO: ${stuckItem.summaryLine || 'none'} (${stuckItem.subTaskId || 'no-id'})`);
-                            await runFollowup(stuckItem);
+                          // 🔧 问题 K 修复：安全阀触发时，先重新加载任务树检查是否有可执行任务
+                          // 原因：任务树可能已被其他并行执行的 runner 更新（如前序任务完成），
+                          // 但 drain 的 wait 循环没有重新检查。强制 FIFO 可能执行依赖未满足的任务。
+                          let safetyHandled = false;
+                          try {
+                            const freshTree = await orchestrator.loadTaskTree(sessionId);
+                            if (freshTree) {
+                              const freshSchedule = orchestrator.getNextExecutableTasksForDrain(freshTree, nextPeek.rootTaskId);
+                              if (freshSchedule.action === "execute" && freshSchedule.tasks.length > 0) {
+                                // 任务树已更新，有可执行任务了，重置计数器继续正常调度
+                                console.log(`[drain] ✅ Safety valve: fresh tree check found executable tasks, resuming normal scheduling`);
+                                waitCount = 0;
+                                safetyHandled = true;
+                                // continue 会回到 while 循环顶部，重新走正常调度路径
+                              }
+                            }
+                          } catch {
+                            // 重新加载失败，回退到强制 FIFO
+                          }
+                          
+                          if (!safetyHandled) {
+                            // 真正的死锁：强制 FIFO 执行队列头部任务
+                            const stuckItem = queue.items.shift();
+                            if (stuckItem) {
+                              waitCount = 0;
+                              console.log(`[drain] ▶️ Safety FIFO: ${stuckItem.summaryLine || 'none'} (${stuckItem.subTaskId || 'no-id'})`);
+                              await runFollowup(stuckItem);
+                            }
                           }
                           continue;
                         }

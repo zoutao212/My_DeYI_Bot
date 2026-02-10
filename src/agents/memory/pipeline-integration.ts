@@ -75,15 +75,52 @@ export async function retrieveMemoryContext(
  * @returns 格式化的上下文文本；无内容则返回空字符串
  */
 export function buildSiblingContext(
-  completedSiblings: Array<{ summary?: string; output?: string; status: string; metadata?: { producedFilePaths?: string[] } }>,
+  completedSiblings: Array<{
+    id?: string;
+    summary?: string;
+    output?: string;
+    status: string;
+    dependencies?: string[];
+    metadata?: { producedFilePaths?: string[] };
+  }>,
   maxSnippetLen = 200,
+  /** 当前正在执行的子任务 ID（用于智能过滤：只注入直接相关的兄弟上下文） */
+  currentTaskId?: string,
 ): string {
   const completed = completedSiblings.filter(
     (t) => t.status === "completed" && (t.output || (t.metadata?.producedFilePaths && t.metadata.producedFilePaths.length > 0)),
   );
   if (completed.length === 0) return "";
 
-  const lines = completed.map((t) => {
+  // 🔧 问题 A 修复：智能过滤 — 续写子任务只注入直接依赖的前序任务，避免 prompt 膨胀
+  // 非续写场景保持原有行为（注入所有已完成兄弟的摘要）
+  let relevantSiblings = completed;
+  const currentTask = currentTaskId
+    ? completedSiblings.find(t => t.id === currentTaskId)
+    : undefined;
+  const isContinuationTask = currentTask?.summary?.includes("续写") ?? false;
+
+  if (isContinuationTask && currentTask?.dependencies && currentTask.dependencies.length > 0) {
+    // 续写子任务：只注入直接依赖的任务（前一个续写子任务或原始子任务）
+    const depIds = new Set(currentTask.dependencies);
+    relevantSiblings = completed.filter(t => t.id && depIds.has(t.id));
+    // 如果依赖的任务没有完成（不在 completed 中），回退到最后一个已完成的续写兄弟
+    if (relevantSiblings.length === 0) {
+      const continuationSiblings = completed.filter(t => t.summary?.includes("续写"));
+      if (continuationSiblings.length > 0) {
+        relevantSiblings = [continuationSiblings[continuationSiblings.length - 1]];
+      }
+    }
+  }
+
+  // 🔧 限制总注入量：最多注入 5 个兄弟任务的上下文，避免 prompt 过长
+  const MAX_SIBLINGS = isContinuationTask ? 2 : 5;
+  if (relevantSiblings.length > MAX_SIBLINGS) {
+    // 保留最后 N 个（最近完成的最相关）
+    relevantSiblings = relevantSiblings.slice(-MAX_SIBLINGS);
+  }
+
+  const lines = relevantSiblings.map((t) => {
     // 🆕 A3: 续写子任务需要更多上下文（检测"续写"关键词）
     const isContinuation = t.summary?.includes("续写") ?? false;
     // 🔧 修复：续写场景大幅增加上下文到 2000 字符

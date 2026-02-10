@@ -519,6 +519,32 @@ export class FileManager {
       throw new Error("没有找到任何子任务的文件产出（已尝试：文件追踪 → artifacts → output.txt）");
     }
     
+    // 🔧 问题 F 修复：按任务创建顺序排序，确保续写子任务紧跟在原始子任务后面
+    // 原因：续写子任务被 addSubTask 追加到数组末尾，合并后的内容顺序可能是：
+    // 第一章 → 第二章 → ... → 续写第一章第2部分 → 续写第一章第3部分
+    // 正确顺序应该是：第一章 → 续写第一章第2部分 → 续写第一章第3部分 → 第二章 → ...
+    // 排序策略：按 taskId 排序（续写子任务 ID 格式为 "{原始ID}-cont-{N}"，自然排序会紧跟原始任务）
+    allFiles.sort((a, b) => {
+      // 提取基础 ID（去掉 -cont-N 后缀）和续写序号
+      const parseId = (id: string) => {
+        const contMatch = id.match(/^(.+)-cont-(\d+)$/);
+        if (contMatch) {
+          return { baseId: contMatch[1], contNum: parseInt(contMatch[2], 10) };
+        }
+        return { baseId: id, contNum: 0 }; // 原始任务序号为 0
+      };
+      const aInfo = parseId(a.taskId);
+      const bInfo = parseId(b.taskId);
+      // 同一个基础任务的文件按续写序号排序
+      if (aInfo.baseId === bInfo.baseId) {
+        return aInfo.contNum - bInfo.contNum;
+      }
+      // 不同基础任务按原始数组顺序（通过在 taskTree.subTasks 中的位置）
+      const aIdx = taskTree.subTasks.findIndex(t => t.id === a.taskId || t.id === aInfo.baseId);
+      const bIdx = taskTree.subTasks.findIndex(t => t.id === b.taskId || t.id === bInfo.baseId);
+      return aIdx - bIdx;
+    });
+    
     // 内容验证：过滤掉"摘要式"内容（疑似操作型任务的兜底输出）
     const beforeFilter = allFiles.length;
     const filteredFiles = allFiles.filter(f => {
@@ -539,14 +565,29 @@ export class FileManager {
     const mergeFiles = filteredFiles.length > 0 ? filteredFiles : allFiles; // 如果全被过滤了，回退到原始列表
     
     // 合并内容（纯文本，不加 Markdown 标记，适合直接阅读）
+    // 🔧 续写子任务的内容应该无缝衔接，不加分隔线
     let mergedContent = "";
     
     for (let i = 0; i < mergeFiles.length; i++) {
       const file = mergeFiles[i];
+      const isContinuation = file.taskId.includes("-cont-");
+      const prevFile = i > 0 ? mergeFiles[i - 1] : null;
+      const isPrevSameBase = prevFile && (() => {
+        const baseA = file.taskId.replace(/-cont-\d+$/, "");
+        const baseB = prevFile.taskId.replace(/-cont-\d+$/, "");
+        return baseA === baseB;
+      })();
+      
       if (mergeFiles.length > 1) {
-        mergedContent += `\n\n${"=".repeat(60)}\n`;
-        mergedContent += `${file.taskSummary}\n`;
-        mergedContent += `${"=".repeat(60)}\n\n`;
+        if (isContinuation && isPrevSameBase) {
+          // 续写子任务紧跟原始任务或前一个续写子任务，无缝衔接
+          mergedContent += "\n\n";
+        } else {
+          // 不同任务之间用分隔线
+          mergedContent += `\n\n${"=".repeat(60)}\n`;
+          mergedContent += `${file.taskSummary}\n`;
+          mergedContent += `${"=".repeat(60)}\n\n`;
+        }
       }
       mergedContent += file.content;
     }

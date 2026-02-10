@@ -537,8 +537,10 @@ export function createFollowupRunner(params: {
               })(),
               extraSystemPrompt: (() => {
                 // 🆕 子任务间上下文共享：注入已完成兄弟任务的输出摘要
+                // 🔧 传入 currentTaskId，让 buildSiblingContext 智能过滤：
+                // 续写子任务只注入直接依赖的前序任务，避免 prompt 膨胀导致上下文溢出
                 const siblingCtx = taskTree?.subTasks
-                  ? buildSiblingContext(taskTree.subTasks)
+                  ? buildSiblingContext(taskTree.subTasks, 200, subTask?.id)
                   : "";
                 if (siblingCtx) {
                   console.log(`[followup-runner] 📋 Injecting sibling context (${siblingCtx.length} chars)`);
