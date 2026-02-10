@@ -534,7 +534,7 @@ ${prompts.jsonOnlyReminder}`;
    * 
    * @returns 提取到的字数数值，未找到返回 undefined
    */
-  private extractWordCountRequirement(prompt: string): number | undefined {
+  extractWordCountRequirement(prompt: string): number | undefined {
     // 匹配 "N字"、"N 字"、"N个字"、"N words"、"N characters" 等
     const patterns = [
       /(\d{3,})\s*[字个](?:左右|以上|以内)?/,

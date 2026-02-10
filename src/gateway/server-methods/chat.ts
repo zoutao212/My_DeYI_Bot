@@ -4,8 +4,9 @@ import path from "node:path";
 import os from "node:os";
 
 import { CURRENT_SESSION_VERSION } from "@mariozechner/pi-coding-agent";
-import { resolveSessionAgentId } from "../../agents/agent-scope.js";
+import { resolveSessionAgentId, resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import { resolveAgentWorkspaceDir } from "../../agents/agent-scope.js";
+import { loadConfig } from "../../config/config.js";
 import { resolveBootstrapContextForRun } from "../../agents/bootstrap-files.js";
 import { buildSystemPromptParams } from "../../agents/system-prompt-params.js";
 import { buildAgentSystemPrompt } from "../../agents/system-prompt.js";
@@ -1964,13 +1965,21 @@ export const chatHandlers: GatewayRequestHandlers = {
       // 模式 1：绝对路径（来自 send_file 工具）
       resolvedFilePath = path.resolve(rawFilePath);
 
-      // 安全检查：只允许工作目录和 .clawdbot/tasks 下的文件
+      // 安全检查：只允许 agent 工作目录和 .clawdbot/tasks 下的文件
       const allowedPrefixes = [
         path.join(os.homedir(), ".clawdbot", "tasks"),
       ];
-      // 动态获取工作目录（如果可用）
-      const cwd = process.cwd();
-      if (cwd) allowedPrefixes.push(cwd);
+      // 从配置获取 agent 工作目录（与 send_file 工具的 allowedDirs 对齐）
+      try {
+        const cfg = loadConfig();
+        const defaultAgentId = resolveDefaultAgentId(cfg);
+        const workspaceDir = resolveAgentWorkspaceDir(cfg, defaultAgentId);
+        if (workspaceDir) allowedPrefixes.push(path.resolve(workspaceDir));
+      } catch {
+        // 配置加载失败时降级到 process.cwd()
+        const cwd = process.cwd();
+        if (cwd) allowedPrefixes.push(cwd);
+      }
 
       const isAllowed = allowedPrefixes.some((prefix) =>
         resolvedFilePath.startsWith(prefix),

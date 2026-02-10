@@ -22,6 +22,7 @@ import type {
 } from "./types.js";
 import { TaskTreeManager } from "./task-tree-manager.js";
 import { getPrompts } from "./prompts-loader.js";
+import crypto from "node:crypto";
 
 /**
  * 执行结果接口
@@ -340,7 +341,36 @@ export class TaskAdjuster {
    * 应用添加任务变更
    */
   private async applyAddTask(taskTree: TaskTree, change: TaskTreeChange): Promise<void> {
-    const newTask = change.after as SubTask;
+    // 🔧 BUG 修复：change.after 可能是字符串描述（LLM 质检返回），而非 SubTask 对象
+    // 如果是字符串，需要解析为 SubTask 结构；如果是对象，直接使用
+    let newTask: SubTask;
+    if (typeof change.after === "string") {
+      // LLM 返回的是描述文本，构造一个最小 SubTask
+      newTask = {
+        id: crypto.randomUUID(),
+        prompt: change.after,
+        summary: change.after.substring(0, 100),
+        status: "pending",
+        retryCount: 0,
+        createdAt: Date.now(),
+        parentId: null,
+        children: [],
+        waitForChildren: false,
+        depth: 0,
+      } as SubTask;
+      console.log(`[TaskAdjuster] ⚠️ applyAddTask: change.after was string, constructed SubTask from description`);
+    } else if (change.after && typeof change.after === "object" && change.after.prompt) {
+      newTask = change.after as SubTask;
+      // 确保必要字段存在
+      if (!newTask.id) newTask.id = crypto.randomUUID();
+      if (!newTask.status) newTask.status = "pending";
+      if (newTask.retryCount === undefined) newTask.retryCount = 0;
+      if (!newTask.createdAt) newTask.createdAt = Date.now();
+      if (!newTask.children) newTask.children = [];
+    } else {
+      console.warn(`[TaskAdjuster] ⚠️ applyAddTask: invalid change.after type (${typeof change.after}), skipping`);
+      return;
+    }
     await this.taskTreeManager.addSubTask(taskTree, newTask.parentId || null, newTask);
   }
 
@@ -355,7 +385,34 @@ export class TaskAdjuster {
    * 应用修改任务变更
    */
   private async applyModifyTask(taskTree: TaskTree, change: TaskTreeChange): Promise<void> {
-    const updates = change.after as Partial<SubTask>;
+    // 🔧 BUG 修复：change.after 可能是字符串描述（LLM 质检返回），而非 Partial<SubTask>
+    // 如果是字符串，将其作为 prompt 和 summary 的更新
+    let updates: Partial<SubTask>;
+    if (typeof change.after === "string") {
+      updates = {
+        prompt: change.after,
+        summary: change.after.substring(0, 100),
+      };
+      console.log(`[TaskAdjuster] ⚠️ applyModifyTask: change.after was string, treating as prompt/summary update`);
+    } else if (change.after && typeof change.after === "object") {
+      // 🔧 问题4修复：过滤掉 LLM 可能返回的危险字段，防止覆盖 id/status/retryCount 等关键状态
+      const raw = change.after as Record<string, unknown>;
+      const PROTECTED_FIELDS = new Set(["id", "status", "retryCount", "createdAt", "completedAt", "children", "rootTaskId", "roundId"]);
+      const safeUpdates: Partial<SubTask> = {};
+      for (const [key, value] of Object.entries(raw)) {
+        if (!PROTECTED_FIELDS.has(key) && value !== undefined) {
+          (safeUpdates as Record<string, unknown>)[key] = value;
+        }
+      }
+      if (Object.keys(safeUpdates).length === 0) {
+        console.warn(`[TaskAdjuster] ⚠️ applyModifyTask: all fields in change.after are protected, skipping`);
+        return;
+      }
+      updates = safeUpdates;
+    } else {
+      console.warn(`[TaskAdjuster] ⚠️ applyModifyTask: invalid change.after type (${typeof change.after}), skipping`);
+      return;
+    }
     await this.taskTreeManager.modifySubTask(taskTree, change.targetId, updates);
   }
 

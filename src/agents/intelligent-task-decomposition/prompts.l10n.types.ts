@@ -263,6 +263,7 @@ export interface TaskDecompositionPromptsL10n {
       adjust: string;
       restart: string;
       overthrow: string;
+      decompose: string;
     };
     changeTypeLabels: {
       add_task: string;

@@ -18,6 +18,8 @@ import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import type { FollowupRun } from "./queue.js";
 import { finalizeWithFollowup } from "./agent-runner-helpers.js";
+import { enqueueFollowupRun } from "./queue/enqueue.js";
+import { resolveQueueSettings } from "./queue/settings.js";
 import {
   applyReplyThreading,
   filterMessagingToolDuplicates,
@@ -69,14 +71,25 @@ function validateSubTaskOutput(
   }
 
   // 规则 2：上下文溢出信号 — 输出极短且无文件工具调用
+  // 🔧 问题5修复：上下文溢出是结构性问题（prompt 太长），重试不会改善。
+  // 同时检测 "Request aborted" 等 abort 信号，这类错误也不应重试。
   const FILE_TOOLS = new Set(["write", "send_file", "read", "exec"]);
   const usedAnyTool = toolMetas.some((m) => FILE_TOOLS.has(m.toolName));
-  if (!usedAnyTool && outputText.length < 200 && outputText.length > 0) {
+  const abortPatterns = [
+    /request\s*aborted/i,
+    /aborted/i,
+    /context.*(?:length|limit|overflow|exceeded)/i,
+    /maximum.*(?:context|token)/i,
+  ];
+  const isAbortSignal = abortPatterns.some((p) => p.test(outputText));
+  if (!usedAnyTool && (outputText.length < 200 && outputText.length > 0 || isAbortSignal)) {
     return {
       valid: false,
       failureCode: "context_overflow_signal",
-      failureReason: `输出仅 ${outputText.length} 字符且无工具调用，疑似上下文溢出`,
-      suggestedAction: "retry",
+      failureReason: isAbortSignal
+        ? `检测到 abort/溢出信号: "${outputText.substring(0, 80)}"，上下文溢出不可重试`
+        : `输出仅 ${outputText.length} 字符且无工具调用，疑似上下文溢出`,
+      suggestedAction: "skip",  // 🔧 上下文溢出是结构性问题，skip 而非 retry
     };
   }
 
@@ -116,54 +129,37 @@ function validateSubTaskOutput(
   return { valid: true };
 }
 
+// isRetryableError 已移至 Orchestrator.isRetryableError()（统一错误分类入口）
+
 /**
- * 判断错误是否可重试
+ * 🔧 P12: FollowupRun 工厂函数
+ * 
+ * 从 queued（当前执行的 FollowupRun）和 subTask 构造新的 FollowupRun。
+ * 替代 followup-runner 和 drain.ts 中 7 处重复的手动构造代码。
  */
-function isRetryableError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-  
-  // 不可重试的错误类型
-  const nonRetryablePatterns = [
-    "prohibited_content",      // 内容违规
-    "safety",                  // 安全策略
-    "recitation",              // 版权内容
-    "blocked",                 // 被阻止
-    "content_filter",          // 内容过滤
-    "policy_violation",        // 政策违规
-    "invalid_request_error",   // 无效请求
-    "authentication_error",    // 认证错误
-    "invalid_argument",        // 无效参数
-    "permission_denied",       // 权限拒绝
-  ];
-  
-  // 检查是否是不可重试的错误
-  for (const pattern of nonRetryablePatterns) {
-    if (message.includes(pattern)) {
-      return false;
-    }
-  }
-  
-  // 可重试的错误类型
-  const retryablePatterns = [
-    "timeout",                 // 超时
-    "network",                 // 网络错误
-    "rate_limit",              // 速率限制
-    "overloaded",              // 服务器过载
-    "internal_error",          // 内部错误
-    "503",                     // 服务不可用
-    "502",                     // 网关错误
-    "504",                     // 网关超时
-  ];
-  
-  // 检查是否是可重试的错误
-  for (const pattern of retryablePatterns) {
-    if (message.includes(pattern)) {
-      return true;
-    }
-  }
-  
-  // 默认不重试
-  return false;
+function buildFollowupRun(
+  queued: FollowupRun,
+  subTask: SubTask,
+  overrides?: Partial<FollowupRun>,
+): FollowupRun {
+  return {
+    prompt: subTask.prompt,
+    summaryLine: subTask.summary,
+    enqueuedAt: Date.now(),
+    run: queued.run,
+    isQueueTask: true,
+    isRootTask: false,
+    isNewRootTask: false,
+    taskDepth: subTask.depth ?? queued.taskDepth ?? 0,
+    subTaskId: subTask.id,
+    rootTaskId: subTask.rootTaskId ?? queued.rootTaskId,
+    originatingChannel: queued.originatingChannel,
+    originatingTo: queued.originatingTo,
+    originatingAccountId: queued.originatingAccountId,
+    originatingThreadId: queued.originatingThreadId,
+    originatingChatType: queued.originatingChatType,
+    ...overrides,
+  };
 }
 
 /**
@@ -427,7 +423,21 @@ export function createFollowupRunner(params: {
               console.log(
                 `[followup-runner] ✅ P2: 子任务 ${subTask.id} 已自动分解为 ${decomposed.length} 个子任务，跳过直接执行`,
               );
+              // 🔧 BUG 修复：分解产生的子任务必须创建 FollowupRun 入队
+              // 修复前：只调用 finalizeWithFollowup 触发 drain，但队列中没有对应的 FollowupRun
+              // 导致分解后的子任务永远不会被执行
               if (queued.run.sessionKey) {
+                for (const newSubTask of decomposed) {
+                  if (newSubTask.status === "pending") {
+                    const decompFollowupRun = buildFollowupRun(queued, newSubTask);
+                    const resolvedQueue = resolveQueueSettings({
+                      cfg: queued.run.config ?? ({} as any),
+                      inlineMode: "followup",
+                    });
+                    enqueueFollowupRun(queued.run.sessionKey, decompFollowupRun, resolvedQueue, "none");
+                    console.log(`[followup-runner] 🆕 分解子任务已入队: ${newSubTask.id} (${newSubTask.summary})`);
+                  }
+                }
                 finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
               }
               return;
@@ -497,7 +507,11 @@ export function createFollowupRunner(params: {
                 // 🔧 子任务强制落盘：在 prompt 本体注入指令（用户消息级，LLM 遵从度最高）
                 const isSubTask = Boolean(queued.subTaskId);
                 if (isSubTask) {
-                  return `[⚠️ 强制规则] 你必须使用 write 工具将生成内容写入 .txt 文件（文件名含任务摘要），然后在聊天中仅回复简短确认。禁止将完整内容直接输出到聊天。\n\n${queued.prompt}`;
+                  // 🔧 写入目录：workspace/{rootTaskId}/，避免污染工作目录根
+                  const taskOutputDir = queued.rootTaskId
+                    ? `workspace/${queued.rootTaskId}`
+                    : "workspace";
+                  return `[⚠️ 强制规则] 你必须使用 write 工具将生成内容写入 .txt 文件，保存到 ${taskOutputDir}/ 目录下（文件名含任务摘要）。然后在聊天中仅回复简短确认。禁止将完整内容直接输出到聊天。\n\n${queued.prompt}`;
                 }
                 return queued.prompt;
               })(),
@@ -577,6 +591,15 @@ export function createFollowupRunner(params: {
                 `[followup-runner] 🔄 OutputValidator 建议重试 (${subTask.retryCount}/3)`,
               );
               if (queued.run.sessionKey) {
+                // 🔧 P1 修复：OutputValidator retry 时必须创建新的 FollowupRun 入队
+                // 修复前：只调用 finalizeWithFollowup 触发 drain，但队列中没有对应的 FollowupRun
+                const retryFollowupRun = buildFollowupRun(queued, subTask);
+                const resolvedQueue = resolveQueueSettings({
+                  cfg: queued.run.config ?? ({} as any),
+                  inlineMode: "followup",
+                });
+                enqueueFollowupRun(queued.run.sessionKey, retryFollowupRun, resolvedQueue, "none");
+                console.log(`[followup-runner] 🔄 OutputValidator 重试已入队: ${subTask.id} (retryCount=${subTask.retryCount})`);
                 finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
               }
               return;
@@ -590,7 +613,9 @@ export function createFollowupRunner(params: {
 
           subTask.output = outputText;
           subTask.completedAt = Date.now();
-          subTask.status = "completed";
+          // 🔧 P7 修复：通过 taskTreeManager 统一管理状态转换，而非直接赋值
+          // 这样 taskTreeManager 内部的状态转换验证和副作用（如自动设置 completedAt）都能生效
+          await orchestrator.updateSubTaskStatus(taskTree, subTask.id, "completed");
           
           // 🔧 收集文件追踪结果（与 orchestrator.executeSubTask 对齐）
           const trackedFiles = collectTrackedFiles(subTask.id);
@@ -623,10 +648,46 @@ export function createFollowupRunner(params: {
                 `[followup-runner] 🔄 子任务 ${subTask.id} 质量不达标，重新入队 (restart): ` +
                 `${JSON.stringify(postResult.findings)}`,
               );
+              // 🔧 BUG 修复：restart 时必须创建新的 FollowupRun 入队
+              // 修复前：只调用 finalizeWithFollowup 触发 drain，但队列中没有对应的 FollowupRun
+              // 导致 drain 的 getNextExecutableTasksForDrain 返回 execute，但找不到匹配项，任务永远不会被重新执行
               if (queued.run.sessionKey) {
+                const restartFollowupRun = buildFollowupRun(queued, subTask);
+                const resolvedQueue = resolveQueueSettings({
+                  cfg: queued.run.config ?? ({} as any),
+                  inlineMode: "followup",
+                });
+                enqueueFollowupRun(queued.run.sessionKey, restartFollowupRun, resolvedQueue, "none");
+                console.log(`[followup-runner] 🔄 restart 子任务已重新入队: ${subTask.id} (retryCount=${subTask.retryCount})`);
                 finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
               }
               return;
+            }
+
+            // 🆕 decompose 决策：增量分解产生的新子任务需要入队
+            if (postResult.decision === "decompose" && postResult.decomposedTaskIds && postResult.decomposedTaskIds.length > 0 && taskTree) {
+              console.log(
+                `[followup-runner] 🔧 子任务 ${subTask.id} 转为增量分解，` +
+                `${postResult.decomposedTaskIds.length} 个续写子任务需要入队`,
+              );
+              for (const newId of postResult.decomposedTaskIds) {
+                const newSubTask = taskTree.subTasks.find(t => t.id === newId);
+                if (newSubTask && newSubTask.status === "pending") {
+                  const newFollowupRun = buildFollowupRun(queued, newSubTask);
+                  if (queued.run.sessionKey) {
+                    const resolvedQueue = resolveQueueSettings({
+                      cfg: queued.run.config ?? ({} as any),
+                      inlineMode: "followup",
+                    });
+                    enqueueFollowupRun(queued.run.sessionKey, newFollowupRun, resolvedQueue, "none");
+                    console.log(`[followup-runner] 🆕 decompose 续写子任务已入队: ${newId} (${newSubTask.summary})`);
+                  }
+                }
+              }
+              if (queued.run.sessionKey) {
+                finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
+              }
+              // 不 return — 继续处理后续逻辑（轮次检查等）
             }
 
             if (postResult.markedFailed) {
@@ -644,6 +705,24 @@ export function createFollowupRunner(params: {
 
             console.log(`[followup-runner] ✅ Sub task completed: ${subTask.id}`);
 
+            // 🆕 BUG3 修复：质检 adjust 新增的子任务需要入队到 drain 队列
+            if (postResult.newTaskIds && postResult.newTaskIds.length > 0 && taskTree) {
+              for (const newId of postResult.newTaskIds) {
+                const newSubTask = taskTree.subTasks.find(t => t.id === newId);
+                if (newSubTask && newSubTask.status === "pending") {
+                  const newFollowupRun = buildFollowupRun(queued, newSubTask);
+                  if (queued.run.sessionKey) {
+                    const resolvedQueue = resolveQueueSettings({
+                      cfg: queued.run.config ?? ({} as any),
+                      inlineMode: "followup",
+                    });
+                    enqueueFollowupRun(queued.run.sessionKey, newFollowupRun, resolvedQueue, "none");
+                    console.log(`[followup-runner] 🆕 adjust 新增子任务已入队: ${newId} (${newSubTask.summary})`);
+                  }
+                }
+              }
+            }
+
             // 轮次完成后续处理（由 onTaskCompleted 内部判定并设置标志）
             if (postResult.roundCompleted && postResult.completedRoundId) {
               console.log(`[followup-runner] 🏁 Round completed: ${postResult.completedRoundId} (tree: ${taskTree.id})`);
@@ -654,17 +733,19 @@ export function createFollowupRunner(params: {
 
               // 发送合并文件 + 复制到用户工作目录
               if (roundResult.mergedFilePath) {
-                // 🆕 P8 临时措施：将系统合并文件复制到用户工作目录
+                // 🔧 将系统合并文件复制到用户工作目录 workspace/{rootTaskId}/
                 let userCopyPath: string | undefined;
                 try {
                   const wsDir = queued.run.workspaceDir;
                   if (wsDir) {
-                    const outputDir = path.join(wsDir, "output");
-                    await fs.mkdir(outputDir, { recursive: true });
+                    const taskOutputDir = queued.rootTaskId
+                      ? path.join(wsDir, "workspace", queued.rootTaskId)
+                      : path.join(wsDir, "workspace");
+                    await fs.mkdir(taskOutputDir, { recursive: true });
                     // 从任务树目标生成语义化文件名
                     const rootGoal = taskTree.rootTask?.substring(0, 30)?.replace(/[\\/:*?"<>|\n\r]/g, "_") ?? "output";
                     const copyName = `${rootGoal}_完整版.txt`;
-                    userCopyPath = path.join(outputDir, copyName);
+                    userCopyPath = path.join(taskOutputDir, copyName);
                     await fs.copyFile(roundResult.mergedFilePath, userCopyPath);
                     console.log(`[followup-runner] 📄 合并文件已复制到用户工作目录: ${userCopyPath}`);
                   }
@@ -711,6 +792,16 @@ export function createFollowupRunner(params: {
           if (failDecision.needsRequeue) {
             console.warn(`[followup-runner] ⚠️ ${failDecision.reason}`);
             if (queued.run.sessionKey) {
+              // 🔧 P0 修复：needsRequeue 时必须创建新的 FollowupRun 入队
+              // 修复前：只调用 finalizeWithFollowup 触发 drain，但队列中没有对应的 FollowupRun
+              // 导致 drain 找不到匹配项，重试永远不会执行
+              const retryFollowupRun = buildFollowupRun(queued, subTask);
+              const resolvedQueue = resolveQueueSettings({
+                cfg: queued.run.config ?? ({} as any),
+                inlineMode: "followup",
+              });
+              enqueueFollowupRun(queued.run.sessionKey, retryFollowupRun, resolvedQueue, "none");
+              console.log(`[followup-runner] 🔄 onTaskFailed 重试已入队: ${subTask.id} (retryCount=${subTask.retryCount})`);
               finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
             }
           } else {

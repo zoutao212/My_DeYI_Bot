@@ -418,7 +418,7 @@ export class FileManager {
    * @param taskTree 任务树
    * @returns 合并后的文件路径
    */
-  async mergeTaskOutputs(taskTree: TaskTree): Promise<string> {
+  async mergeTaskOutputs(taskTree: TaskTree, roundId?: string): Promise<string> {
     // 🔧 多策略合并：producedFilePaths → artifacts → output.txt
     const allFiles: Array<{ 
       taskId: string; 
@@ -430,6 +430,9 @@ export class FileManager {
     
     for (const subTask of taskTree.subTasks) {
       if (subTask.status !== "completed") continue;
+
+      // 🔧 P13 修复：按 roundId 过滤，只合并指定轮次的子任务
+      if (roundId && subTask.rootTaskId !== roundId) continue;
       
       // 🔧 P1 修复：跳过操作型/汇总型任务（它们不产生实际内容）
       if (subTask.waitForChildren || subTask.metadata?.isSummaryTask || subTask.metadata?.isRootTask) {

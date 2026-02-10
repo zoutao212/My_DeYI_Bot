@@ -5,7 +5,7 @@
  */
 
 import crypto from "node:crypto";
-import type { TaskTree, SubTask, TaskTreeChange, QualityReviewResult, TaskBatch, BatchExecutionResult, BatchExecutionOptions, PostProcessResult, Round, RoundStatus, ExecutionContext, CreateDecision, StartDecision, FailureDecision, RoundCompletedResult } from "./types.js";
+import type { TaskTree, SubTask, TaskTreeChange, QualityReviewResult, TaskBatch, BatchExecutionResult, BatchExecutionOptions, PostProcessResult, Round, RoundStatus, ExecutionContext, CreateDecision, StartDecision, FailureDecision, RoundCompletedResult, DrainScheduleResult } from "./types.js";
 import { TaskTreeManager } from "./task-tree-manager.js";
 import { RetryManager } from "./retry-manager.js";
 import { ErrorHandler } from "./error-handler.js";
@@ -20,6 +20,7 @@ import { BatchExecutor, type LLMCaller } from "./batch-executor.js";
 import { DeliveryReporter, type DeliveryReport } from "./delivery-reporter.js";
 import { ComplexityScorer } from "./complexity-scorer.js";
 import { beginTracking, collectTrackedFiles, clearTracking } from "./file-tracker.js";
+import { findParallelGroups } from "./dependency-analyzer.js";
 import { createSystemLLMCaller, type SystemLLMCallerConfig } from "./system-llm-caller.js";
 import { classifyTaskIntent, type TaskIntentResult } from "./task-intent-classifier.js";
 import { deriveExecutionRole, createExecutionContext } from "./execution-context.js";
@@ -222,6 +223,67 @@ export class Orchestrator {
     if (taskTree.qualityReviewEnabled !== false) {
       try {
         console.log(`[Orchestrator] 🔍 开始质量评估：${subTask.id}`);
+
+        // 🔧 P5 修复：精确字数前置检查（零 LLM 调用，减轻质检负担）
+        // 从 prompt 中提取字数要求，与实际输出字数精确比较
+        // 🆕 结构性失败分治策略：重试过一次仍不达标 → decompose（而非继续 restart）
+        const wordCountReq = this.qualityReviewer.extractWordCountRequirement(subTask.prompt);
+        if (wordCountReq && subTask.output) {
+          const actualLength = subTask.output.length;
+          const threshold = Math.floor(wordCountReq * 0.3); // 30% 硬性底线
+          if (actualLength < threshold) {
+            const currentRetry = subTask.retryCount ?? 0;
+
+            // 🆕 分治策略：已重试过至少 1 次且仍不达标 → 结构性失败，转 decompose
+            // 保留已有输出作为第一部分，创建续写子任务逐步积累
+            if (currentRetry >= 1) {
+              console.log(
+                `[Orchestrator] 🔧 字数前置检查：已重试 ${currentRetry} 次仍不达标（${actualLength}/${wordCountReq}），` +
+                `转为 decompose 增量分解策略`,
+              );
+              try {
+                const newSubTasks = await this.decomposeFailedTask(taskTree, subTask);
+                if (newSubTasks.length > 0) {
+                  result.decision = "decompose";
+                  result.decomposedTaskIds = newSubTasks.map(t => t.id);
+                  result.findings = [
+                    `字数结构性不达标（${actualLength}/${wordCountReq}，${Math.round(actualLength / wordCountReq * 100)}%），` +
+                    `已重试 ${currentRetry} 次无改善，转为增量分解：保留已有 ${actualLength} 字 + 创建 ${newSubTasks.length} 个续写子任务`,
+                  ];
+                  await this.taskTreeManager.save(taskTree);
+                  return result;
+                }
+              } catch (decompErr) {
+                console.warn(`[Orchestrator] ⚠️ decomposeFailedTask 失败，回退到 restart: ${decompErr}`);
+              }
+            }
+
+            // 首次不达标或 decompose 失败 → 正常 restart
+            console.warn(
+              `[Orchestrator] ⚠️ P5 精确字数前置检查：要求 ${wordCountReq} 字，实际 ${actualLength} 字（< 30% 底线 ${threshold}），restart`,
+            );
+            if (currentRetry < 3) {
+              await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
+              subTask.retryCount = currentRetry + 1;
+              result.decision = "restart";
+              result.needsRequeue = true;
+              result.findings = [`精确字数前置检查不达标：要求 ${wordCountReq} 字，实际 ${actualLength} 字（${Math.round(actualLength / wordCountReq * 100)}%）`];
+              await this.taskTreeManager.save(taskTree);
+              return result;
+            }
+            // 重试耗尽且 decompose 也失败了，降级为 overthrow
+            await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
+            subTask.error = `字数前置检查重试耗尽：要求 ${wordCountReq} 字，实际 ${actualLength} 字`;
+            result.decision = "overthrow";
+            result.markedFailed = true;
+            await this.taskTreeManager.save(taskTree);
+            return result;
+          }
+          console.log(
+            `[Orchestrator] ✅ P5 精确字数前置检查通过：要求 ${wordCountReq} 字，实际 ${actualLength} 字（${Math.round(actualLength / wordCountReq * 100)}%）`,
+          );
+        }
+
         // 🔧 BUG5 修复：使用子任务所属轮次的实际根任务描述，而非可能过期的 taskTree.rootTask
         const roundRootDesc = subTask.rootTaskId
           ? this.getRoundRootDescription(taskTree, subTask.rootTaskId)
@@ -254,7 +316,17 @@ export class Orchestrator {
           case "adjust":
             console.log(`[Orchestrator] ⚠️ 质量需要调整`);
             if (review.modifications && review.modifications.length > 0) {
+              // 记录调整前的子任务 ID 集合
+              const beforeIds = new Set(taskTree.subTasks.map(t => t.id));
               await this.adjustTaskTree(taskTree, review.modifications, false);
+              // 检测新增的子任务（adjust 中 add_task 创建的）
+              const newIds = taskTree.subTasks
+                .filter(t => !beforeIds.has(t.id) && t.status === "pending")
+                .map(t => t.id);
+              if (newIds.length > 0) {
+                result.newTaskIds = newIds;
+                console.log(`[Orchestrator] 🆕 adjust 新增了 ${newIds.length} 个子任务: ${newIds.join(", ")}`);
+              }
             }
             break;
 
@@ -262,7 +334,35 @@ export class Orchestrator {
             const maxQualityRestarts = 3;
             const currentRetry = subTask.retryCount ?? 0;
             if (currentRetry >= maxQualityRestarts) {
-              // 🔧 P9 熔断：超过最大重试次数，降级为 overthrow 防止无限循环
+              // 🆕 分治策略：重试超限时，先尝试 decompose（增量分解）
+              // 只有 decompose 也失败时才降级为 overthrow
+              const wordCountReq = this.qualityReviewer.extractWordCountRequirement(subTask.prompt);
+              if (wordCountReq && subTask.output && subTask.output.length > 0) {
+                console.log(
+                  `[Orchestrator] 🔧 restart 超限 (${currentRetry}/${maxQualityRestarts})，` +
+                  `尝试 decompose 增量分解（已有 ${subTask.output.length} 字）`,
+                );
+                try {
+                  // 先恢复为 completed 状态（decomposeFailedTask 需要）
+                  subTask.status = "completed";
+                  const newSubTasks = await this.decomposeFailedTask(taskTree, subTask);
+                  if (newSubTasks.length > 0) {
+                    result.decision = "decompose";
+                    result.decomposedTaskIds = newSubTasks.map(t => t.id);
+                    result.findings = [
+                      `质量重试超限 (${currentRetry}/${maxQualityRestarts})，转为增量分解：` +
+                      `保留已有 ${subTask.output.length} 字 + 创建 ${newSubTasks.length} 个续写子任务。` +
+                      `原因：${review.findings.join("; ")}`,
+                    ];
+                    await this.taskTreeManager.save(taskTree);
+                    break;
+                  }
+                } catch (decompErr) {
+                  console.warn(`[Orchestrator] ⚠️ decompose 失败，降级为 overthrow: ${decompErr}`);
+                }
+              }
+
+              // decompose 失败或无已有输出 → 降级为 overthrow
               console.warn(
                 `[Orchestrator] ⚠️ 子任务 ${subTask.id} 已重试 ${currentRetry} 次（上限 ${maxQualityRestarts}），` +
                 `降级为 overthrow 防止无限循环`,
@@ -725,6 +825,20 @@ export class Orchestrator {
   }
 
   /**
+   * 🔧 P7: 更新子任务状态（公共代理方法）
+   * 
+   * 统一状态转换入口，确保 taskTreeManager 内部的验证和副作用生效。
+   * followup-runner 应通过此方法而非直接赋值 subTask.status。
+   */
+  async updateSubTaskStatus(
+    taskTree: TaskTree,
+    subTaskId: string,
+    status: SubTask["status"],
+  ): Promise<void> {
+    await this.taskTreeManager.updateSubTaskStatus(taskTree, subTaskId, status);
+  }
+
+  /**
    * P2: 判断子任务是否应该自动递归分解
    * 
    * 轻量级前置检查，避免不必要的 LLM 调用。
@@ -784,11 +898,12 @@ export class Orchestrator {
    * 替代 followup-runner 中的简单文本拼接。
    * 
    * @param taskTree 任务树
+   * @param roundId 轮次 ID（可选，指定时只合并该轮次的子任务）
    * @returns 合并后的文件路径
    */
-  async mergeRoundOutputs(taskTree: TaskTree): Promise<string> {
+  async mergeRoundOutputs(taskTree: TaskTree, roundId?: string): Promise<string> {
     const fm = await this.ensureFileManager(taskTree.id);
-    return await fm.mergeTaskOutputs(taskTree);
+    return await fm.mergeTaskOutputs(taskTree, roundId);
   }
 
   // ========================================
@@ -1068,6 +1183,19 @@ export class Orchestrator {
       }
     }
 
+    // 🔧 P3 修复：确保分解产生的子任务继承父任务的 rootTaskId
+    // 修复前：LLM 返回的子任务没有 rootTaskId，task-tree-manager.addSubTask 也不自动继承
+    // 导致 getNextExecutableTasksForDrain 的 roundFilter 过滤掉这些任务
+    const parentRootTaskId = subTask.rootTaskId;
+    if (parentRootTaskId) {
+      for (const dt of decomposedTasks) {
+        if (!dt.rootTaskId) {
+          dt.rootTaskId = parentRootTaskId;
+          dt.roundId = parentRootTaskId;
+        }
+      }
+    }
+
     // 5. 将分解后的子任务添加到任务树
     for (const decomposedTask of decomposedTasks) {
       await this.taskTreeManager.addSubTask(taskTree, subTaskId, decomposedTask);
@@ -1076,8 +1204,147 @@ export class Orchestrator {
     // 6. 标记子任务为已分解
     await this.markAsDecomposed(taskTree, subTaskId);
 
+    // 🔧 P2+P8 修复：分解后将父任务标记为 completed（而非 pending）
+    // 原 P2 修复将状态改为 pending+waitForChildren，但这会阻塞 isRoundCompleted()
+    // 且如果父任务最终被执行会重复工作。正确做法：decomposed 父任务直接标记完成。
+    if (subTask.status === "active" || subTask.status === "pending") {
+      subTask.status = "completed";
+      subTask.completedAt = Date.now();
+      subTask.output = `[已分解为 ${decomposedTasks.length} 个子任务]`;
+    }
+
+    // 🔧 P6 防御：分解后立即创建检查点，防止后续并发写入覆盖分解结果
+    await this.taskTreeManager.createCheckpoint(taskTree);
+    await this.taskTreeManager.save(taskTree);
+
+    // P6 验证：确认分解的子任务确实在任务树中
+    const verifyCount = decomposedTasks.filter(dt =>
+      taskTree.subTasks.some(t => t.id === dt.id),
+    ).length;
+    if (verifyCount !== decomposedTasks.length) {
+      console.error(
+        `[Orchestrator] ❌ P6: 分解验证失败！预期 ${decomposedTasks.length} 个子任务在树中，实际 ${verifyCount} 个`,
+      );
+    }
+
     console.log(`[Orchestrator] ✅ 子任务 ${subTaskId} 分解完成，生成 ${decomposedTasks.length} 个子任务`);
     return decomposedTasks;
+  }
+
+  /**
+   * 🆕 基于已有输出的增量分解（decompose-on-failure 策略）
+   * 
+   * 当子任务重试后仍不达标（结构性失败，如字数不足）时，
+   * 保留已有输出作为第一部分，创建续写子任务逐步积累完成目标。
+   * 
+   * 复用现有的 decomposeRecursively + taskTreeManager.addSubTask 能力。
+   */
+  async decomposeFailedTask(
+    taskTree: TaskTree,
+    subTask: SubTask,
+  ): Promise<SubTask[]> {
+    const existingOutput = subTask.output ?? "";
+    const existingLength = existingOutput.length;
+    const wordCountReq = this.qualityReviewer.extractWordCountRequirement(subTask.prompt);
+
+    // 计算还需要多少字
+    const remainingChars = wordCountReq ? Math.max(0, wordCountReq - existingLength) : 0;
+
+    // 单次 LLM 输出能力上限（保守估计）
+    const maxOutputPerTask = 2000;
+
+    // 计算需要多少个续写子任务
+    const continuationCount = remainingChars > 0
+      ? Math.max(1, Math.ceil(remainingChars / maxOutputPerTask))
+      : 2; // 没有明确字数要求时默认拆 2 个
+
+    console.log(
+      `[Orchestrator] 🔧 decomposeFailedTask: ${subTask.id}, ` +
+      `已有 ${existingLength} 字, 要求 ${wordCountReq ?? "未知"} 字, ` +
+      `剩余 ${remainingChars} 字, 计划创建 ${continuationCount} 个续写子任务`,
+    );
+
+    // 1. 将已有输出标记为"第一部分"，当前子任务标记为 completed
+    subTask.status = "completed";
+    subTask.completedAt = Date.now();
+    subTask.output = existingOutput;
+    if (!subTask.metadata) subTask.metadata = {};
+    subTask.metadata.qualityReview = {
+      status: "passed",
+      decision: "decompose",
+      findings: [`字数不达标触发增量分解：已有 ${existingLength} 字，需续写 ${remainingChars} 字`],
+      suggestions: [],
+    };
+
+    // 2. 提取已有输出的结尾作为续写上下文（最后 800 字符）
+    const contextTail = existingLength > 800
+      ? existingOutput.slice(-800)
+      : existingOutput;
+
+    // 3. 创建续写子任务
+    const newSubTasks: SubTask[] = [];
+    const charsPerTask = remainingChars > 0
+      ? Math.ceil(remainingChars / continuationCount)
+      : maxOutputPerTask;
+
+    for (let i = 0; i < continuationCount; i++) {
+      const partNumber = i + 2; // 第一部分是已有输出
+      const isLast = i === continuationCount - 1;
+
+      // 构建续写 prompt：注入前文结尾 + 字数要求 + 连贯性指令
+      const continuationPrompt = [
+        `【续写任务 — 第 ${partNumber} 部分（共 ${continuationCount + 1} 部分）】`,
+        ``,
+        `原始任务：${subTask.summary}`,
+        ``,
+        `前文结尾（请从这里自然续写，保持风格和情节连贯）：`,
+        `---`,
+        i === 0 ? contextTail : `[将由前一个续写子任务的输出提供上下文]`,
+        `---`,
+        ``,
+        `本部分要求：约 ${charsPerTask} 字。`,
+        isLast ? `这是最后一部分，请写出完整的结尾。` : `请在适当的段落处结束，为下一部分留出衔接点。`,
+        ``,
+        `⚠️ 重要：`,
+        `- 必须使用 write 工具将内容写入文件`,
+        `- 保持与前文一致的风格、语气、人称`,
+        `- 不要重复前文已有的内容`,
+      ].join("\n");
+
+      const newSubTask: SubTask = {
+        id: `${subTask.id}-cont-${partNumber}`,
+        prompt: continuationPrompt,
+        summary: `${subTask.summary}（续写第 ${partNumber} 部分）`,
+        status: "pending",
+        retryCount: 0,
+        createdAt: Date.now(),
+        parentId: subTask.parentId,
+        depth: subTask.depth ?? 0,
+        children: [],
+        dependencies: i === 0 ? [] : [`${subTask.id}-cont-${partNumber - 1}`],
+        canDecompose: false, // 续写子任务不再分解
+        decomposed: false,
+        rootTaskId: subTask.rootTaskId,
+        roundId: subTask.roundId,
+        metadata: {
+          complexity: "medium" as const,
+          priority: "medium" as const,
+        },
+      };
+
+      await this.taskTreeManager.addSubTask(taskTree, newSubTask.parentId || null, newSubTask);
+      newSubTasks.push(newSubTask);
+    }
+
+    // 4. 保存任务树
+    await this.taskTreeManager.save(taskTree);
+
+    console.log(
+      `[Orchestrator] ✅ decomposeFailedTask: ${subTask.id} 增量分解完成，` +
+      `保留已有输出 (${existingLength} 字) + 创建 ${newSubTasks.length} 个续写子任务`,
+    );
+
+    return newSubTasks;
   }
 
   /**
@@ -1421,6 +1688,144 @@ ${childOutputs.join("\n\n---\n\n")}
     }
 
     return executableTasks;
+  }
+
+  // ========================================
+  // 🆕 方案 A：任务树驱动的 drain 调度
+  // ========================================
+
+  /**
+   * 为 drain 提供下一批可执行任务（任务树驱动，单一真相源）
+   * 
+   * 替代 drain 中的 FIFO shift + 4 层守卫（A/B/C/D）。
+   * drain 只需调用此方法，根据返回值决定执行/等待/结束。
+   * 
+   * 内部逻辑（按优先级）：
+   * 1. 任务树已终结（completed/failed 且无 pending）→ discard_all
+   * 2. 指定轮次已完成 → round_done
+   * 3. 单个子任务已 completed/failed → 从结果中排除
+   * 4. waitForChildren 任务的兄弟未全部完成 → 从结果中排除
+   * 5. 依赖未满足 → 从结果中排除
+   * 6. 剩余 pending 任务按并行组分批返回
+   * 
+   * @param taskTree 任务树
+   * @param roundId 当前轮次 ID（可选，用于轮次隔离）
+   * @returns DrainScheduleResult
+   */
+  getNextExecutableTasksForDrain(
+    taskTree: TaskTree,
+    roundId?: string,
+  ): DrainScheduleResult {
+    // 1. 任务树全局终结检查
+    if (taskTree.status === "completed" || taskTree.status === "failed") {
+      const hasPending = taskTree.subTasks.some(
+        (t) => t.status === "pending" || t.status === "active",
+      );
+      if (!hasPending) {
+        return { action: "discard_all", reason: `任务树已 ${taskTree.status}，无 pending 任务` };
+      }
+
+      // 任务树 failed 但有 pending（可能是其他轮次的任务）
+      // 检查当前轮次是否被 overthrow
+      if (taskTree.status === "failed" && roundId) {
+        const failedInRound = taskTree.subTasks.some(
+          (t) => t.rootTaskId === roundId && t.status === "failed",
+        );
+        if (failedInRound) {
+          // 级联标记同轮次 pending 任务为 failed
+          for (const t of taskTree.subTasks) {
+            if (t.rootTaskId === roundId && (t.status === "pending" || t.status === "active")) {
+              t.status = "failed";
+              t.error = "级联失败：同轮次兄弟任务被 overthrow";
+            }
+          }
+          return {
+            action: "discard_round",
+            reason: `轮次 ${roundId} 有 overthrown 任务，级联丢弃`,
+            roundId,
+            treeModified: true,
+          };
+        }
+      }
+    }
+
+    // 2. 轮次完成检查
+    if (roundId && this.isRoundCompleted(taskTree, roundId)) {
+      return { action: "round_done", reason: `轮次 ${roundId} 已完成`, roundId };
+    }
+
+    // 3. 收集当前轮次的 pending 任务，应用语义过滤
+    const roundFilter = roundId
+      ? (t: SubTask) => t.rootTaskId === roundId
+      : () => true;
+
+    const pendingTasks = taskTree.subTasks.filter(
+      (t) => t.status === "pending" && roundFilter(t),
+    );
+
+    if (pendingTasks.length === 0) {
+      // 没有 pending 任务但轮次未标记完成 — 可能所有任务都在 active 状态
+      const activeTasks = taskTree.subTasks.filter(
+        (t) => t.status === "active" && roundFilter(t),
+      );
+      if (activeTasks.length > 0) {
+        return { action: "wait", reason: `${activeTasks.length} 个任务正在执行中` };
+      }
+      return { action: "round_done", reason: "无 pending 或 active 任务", roundId };
+    }
+
+    // 4. 过滤：root/summary 任务跳过 LLM 执行
+    // 5. 过滤：依赖未满足的任务
+    // 6. 过滤：waitForChildren 且兄弟未全部完成的任务
+    const executable: SubTask[] = [];
+
+    for (const task of pendingTasks) {
+      // 跳过 root summary 任务（由系统合并路径处理）
+      if (task.metadata?.isRootTask && task.metadata?.isSummaryTask) {
+        continue;
+      }
+
+      // 依赖检查
+      if (task.dependencies && task.dependencies.length > 0) {
+        const allDepsDone = task.dependencies.every((depId) => {
+          const dep = taskTree.subTasks.find((t) => t.id === depId);
+          return dep && (dep.status === "completed" || dep.status === "failed" || dep.status === "skipped");
+        });
+        if (!allDepsDone) continue;
+      }
+
+      // waitForChildren 检查：所有非 waitForChildren 的兄弟任务必须完成
+      if (task.waitForChildren) {
+        const siblings = taskTree.subTasks.filter(
+          (t) => t.rootTaskId === task.rootTaskId
+            && t.id !== task.id
+            && !t.waitForChildren
+            && !t.metadata?.isRootTask
+            && !t.metadata?.isSummaryTask,
+        );
+        const allSiblingsDone = siblings.every(
+          (t) => t.status === "completed" || t.status === "failed" || t.status === "skipped",
+        );
+        if (!allSiblingsDone) continue;
+      }
+
+      executable.push(task);
+    }
+
+    if (executable.length === 0) {
+      // 有 pending 任务但都被过滤了（等待依赖或兄弟完成）
+      return { action: "wait", reason: `${pendingTasks.length} 个 pending 任务均在等待依赖/兄弟完成` };
+    }
+
+    // 7. 并行组检测
+    const groups = findParallelGroups(executable);
+    const firstGroup = groups[0] ?? [];
+
+    return {
+      action: "execute",
+      tasks: firstGroup,
+      remainingPending: pendingTasks.length - firstGroup.length,
+    };
   }
 
   /**
@@ -2377,7 +2782,19 @@ ${childOutputs.join("\n\n---\n\n")}
     }
 
     // 4. 更新任务树全局状态
-    taskTree.status = "failed";
+    // 🔧 P9 修复：不要无条件设 failed，检查是否还有可执行的任务
+    // 修复前：无条件 taskTree.status = "failed"，导致 getNextExecutableTasksForDrain
+    // 的 discard_round 把无辜的兄弟任务也杀了
+    const hasRemainingWork = taskTree.subTasks.some(
+      (t) => t.status === "pending" || t.status === "active",
+    );
+    if (!hasRemainingWork) {
+      taskTree.status = "failed";
+    } else {
+      console.log(
+        `[Orchestrator] ℹ️ onTaskFailed: 仍有 ${taskTree.subTasks.filter(t => t.status === "pending" || t.status === "active").length} 个任务可执行，不标记 tree 为 failed`,
+      );
+    }
     await this.taskTreeManager.save(taskTree);
 
     console.log(`[Orchestrator] ❌ onTaskFailed: ${subTask.id} - ${message}`);
@@ -2418,7 +2835,7 @@ ${childOutputs.join("\n\n---\n\n")}
     );
     if (completedTasks.length > 0) {
       try {
-        const mergedFile = await this.mergeRoundOutputs(taskTree);
+        const mergedFile = await this.mergeRoundOutputs(taskTree, rootTaskId);
         result.mergedFilePath = mergedFile;
         console.log(
           `[Orchestrator] 📝 onRoundCompleted: 合并 ${completedTasks.length} 个子任务输出 → ${mergedFile}`,

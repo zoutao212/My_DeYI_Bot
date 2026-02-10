@@ -17,6 +17,8 @@ export class TaskTreeManager {
   private _lastWriteTime = new Map<string, number>();
   /** 🔧 防抖：待执行的延迟写入 timer */
   private _pendingSave = new Map<string, ReturnType<typeof setTimeout>>();
+  /** 🔧 P10 修复：写锁（Promise 链串行化，防止并发写入导致数据丢失） */
+  private _writeLock = new Map<string, Promise<void>>();
 
   /**
    * 获取任务树目录路径
@@ -126,32 +128,43 @@ export class TaskTreeManager {
     // 更新时间戳
     taskTree.updatedAt = Date.now();
 
-    // 🔧 防抖：如果距离上次实际写入 < 500ms，延迟执行
-    const now = Date.now();
-    const DEBOUNCE_MS = 500;
-    const lastWrite = this._lastWriteTime.get(taskTree.id) ?? 0;
-    
-    if (now - lastWrite < DEBOUNCE_MS) {
-      // 设置延迟写入（如果已有 pending 的延迟写入，取消旧的）
-      if (this._pendingSave.has(taskTree.id)) {
-        clearTimeout(this._pendingSave.get(taskTree.id)!);
-      }
+    // 🔧 P10 修复：写锁串行化，防止并发 save 导致 read-modify-write 竞态
+    // 每个 sessionId 维护一个 Promise 链，后续 save 等待前一个完成
+    const lockKey = taskTree.id;
+    const prevLock = this._writeLock.get(lockKey) ?? Promise.resolve();
+    const currentLock = prevLock.then(async () => {
+      // 🔧 防抖：如果距离上次实际写入 < 500ms，延迟执行
+      const now = Date.now();
+      const DEBOUNCE_MS = 500;
+      const lastWrite = this._lastWriteTime.get(taskTree.id) ?? 0;
       
-      return new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(async () => {
-          this._pendingSave.delete(taskTree.id);
-          try {
-            await this._doSave(taskTree, taskTreePath, backupPath, markdownPath, tmpPath);
-            resolve();
-          } catch (err) {
-            reject(err);
-          }
-        }, DEBOUNCE_MS);
-        this._pendingSave.set(taskTree.id, timer);
-      });
-    }
+      if (now - lastWrite < DEBOUNCE_MS) {
+        // 设置延迟写入（如果已有 pending 的延迟写入，取消旧的）
+        if (this._pendingSave.has(taskTree.id)) {
+          clearTimeout(this._pendingSave.get(taskTree.id)!);
+        }
+        
+        return new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(async () => {
+            this._pendingSave.delete(taskTree.id);
+            try {
+              await this._doSave(taskTree, taskTreePath, backupPath, markdownPath, tmpPath);
+              resolve();
+            } catch (err) {
+              reject(err);
+            }
+          }, DEBOUNCE_MS);
+          this._pendingSave.set(taskTree.id, timer);
+        });
+      }
 
-    await this._doSave(taskTree, taskTreePath, backupPath, markdownPath, tmpPath);
+      await this._doSave(taskTree, taskTreePath, backupPath, markdownPath, tmpPath);
+    }).catch((err) => {
+      console.error(`[TaskTreeManager] ❌ Save failed (lock chain): ${err}`);
+      throw err;
+    });
+    this._writeLock.set(lockKey, currentLock.catch(() => {})); // 链不断裂
+    return currentLock;
   }
 
   /** 实际执行磁盘写入 */

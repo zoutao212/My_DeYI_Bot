@@ -33,6 +33,7 @@ export const TASK_DECOMPOSITION_PROMPTS_EN: TaskDecompositionPromptsL10n = {
     "If the original task has word count/length/quantity requirements, each subtask prompt must explicitly allocate specific quantitative targets (e.g., this chapter requires 3000+ words)",
     "Each subtask prompt should be detailed enough, including: goal, specific requirements, quantitative metrics, output format",
     "For writing tasks: each subtask prompt must include explicit word count requirements, and the sum of all subtask word counts should be >= total requirement",
+    "⚠️ Capability constraint: Each subtask's expected output should not exceed 2000 characters (Chinese) or 1500 words (English). If a section needs more content, split it into multiple subtasks linked by dependencies for coherence",
   ],
   
   jsonFormatInstruction: "Please return the decomposition result in the following JSON format:",
@@ -239,6 +240,7 @@ export const TASK_DECOMPOSITION_PROMPTS_EN: TaskDecompositionPromptsL10n = {
       adjust: "Adjust Task Tree",
       restart: "Restart Task",
       overthrow: "Overthrow Task",
+      decompose: "Incremental Decompose",
     },
     changeTypeLabels: {
       add_task: "Add Task",

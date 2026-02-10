@@ -28,6 +28,8 @@ export function scheduleFollowupDrain(
     try {
       let forceIndividualCollect = false;
       let drainIteration = 0;
+      let waitCount = 0; // 🔧 P4 修复：wait 分支安全阀计数器
+      const MAX_WAIT_ITERATIONS = 30; // 最多等待 30 次 × 2 秒 = 60 秒
       while (queue.items.length > 0 || queue.droppedCount > 0) {
         drainIteration++;
         console.log(`[drain] 🔄 Iteration ${drainIteration}: items=${queue.items.length}, droppedCount=${queue.droppedCount}, mode=${queue.mode}`);
@@ -37,9 +39,8 @@ export function scheduleFollowupDrain(
         // collect mode 会把所有 items 合并成一个 prompt，破坏子任务的独立执行语义
         const hasQueueTasks = queue.items.some((item) => item.isQueueTask || item.subTaskId);
         if (hasQueueTasks) {
-          // 🆕 轮次完成守卫（替代旧的 3 层 ad-hoc 检查）
-          // 核心逻辑：用 rootTaskId 隔离轮次，只要当前轮次所有子任务都已 completed/failed，
-          // 就清理队列中同一轮次的所有残留子任务。
+          // 🆕 方案 A：任务树驱动调度（替代旧的守卫 A/B/C/D + FIFO shift）
+          // 核心原则：任务树是唯一真相源，drain 只负责匹配 FollowupRun 并执行
           const nextPeek = queue.items[0];
           if (nextPeek && (nextPeek.subTaskId || nextPeek.isQueueTask)) {
             try {
@@ -48,148 +49,180 @@ export function scheduleFollowupDrain(
               if (sessionId) {
                 const taskTree = await orchestrator.loadTaskTree(sessionId);
                 if (taskTree) {
-                  // 守卫 A：任务树全局 status 已终结
-                  if (taskTree.status === "completed" || taskTree.status === "failed") {
-                    const hasPending = taskTree.subTasks.some((t) => t.status === "pending" || t.status === "active");
-                    if (!hasPending) {
-                      // 无 pending 子任务 → 全部丢弃
+                  const schedule = orchestrator.getNextExecutableTasksForDrain(
+                    taskTree,
+                    nextPeek.rootTaskId,
+                  );
+
+                  switch (schedule.action) {
+                    case "discard_all": {
+                      // 任务树已终结，丢弃所有队列任务
                       const isStale = (item: FollowupRun) => Boolean(item.subTaskId || item.isQueueTask);
                       const staleCount = queue.items.filter(isStale).length;
                       queue.items = queue.items.filter((item) => !isStale(item));
-                      console.log(`[drain] 🧹 Task tree already ${taskTree.status}, discarded ${staleCount} stale sub-tasks`);
+                      console.log(`[drain] 🧹 ${schedule.reason}, discarded ${staleCount} stale items`);
                       continue;
                     }
 
-                    // 🔧 overthrow 级联守卫：tree 已 failed 且有 pending 子任务时，
-                    //    检查当前队列项的 rootTaskId 是否属于已失败轮次。
-                    //    同轮次内有任务被 overthrow → 级联丢弃该轮次所有剩余队列项。
-                    if (taskTree.status === "failed" && nextPeek.rootTaskId) {
-                      const failedRoundIds = new Set(
-                        taskTree.subTasks
-                          .filter((t) => t.status === "failed")
-                          .map((t) => t.rootTaskId)
-                          .filter((id): id is string => Boolean(id)),
-                      );
-                      if (failedRoundIds.has(nextPeek.rootTaskId)) {
-                        const roundId = nextPeek.rootTaskId;
+                    case "discard_round": {
+                      // 轮次被 overthrow，级联丢弃
+                      const roundId = schedule.roundId;
+                      const before = queue.items.length;
+                      queue.items = queue.items.filter((item) => item.rootTaskId !== roundId);
+                      if (schedule.treeModified) {
+                        await orchestrator.saveTaskTree(taskTree);
+                      }
+                      console.log(`[drain] 🧹 ${schedule.reason}, discarded ${before - queue.items.length} items`);
+                      continue;
+                    }
+
+                    case "round_done": {
+                      // 轮次已完成，清理该轮次的残留队列项
+                      const roundId = schedule.roundId;
+                      if (roundId) {
                         const before = queue.items.length;
                         queue.items = queue.items.filter((item) => item.rootTaskId !== roundId);
-                        // 级联标记同轮次 pending 子任务为 failed
-                        for (const t of taskTree.subTasks) {
-                          if (t.rootTaskId === roundId && (t.status === "pending" || t.status === "active")) {
-                            t.status = "failed";
-                            t.error = "级联失败：同轮次兄弟任务被 overthrow";
-                          }
+                        const discarded = before - queue.items.length;
+                        if (discarded > 0) {
+                          await orchestrator.markRoundCompleted(taskTree, roundId);
+                          console.log(`[drain] 🧹 ${schedule.reason}, discarded ${discarded} stale items`);
                         }
-                        await orchestrator.saveTaskTree(taskTree);
-                        console.log(`[drain] 🧹 Round ${roundId} has overthrown tasks, cascade-discarded ${before - queue.items.length} remaining items`);
-                        continue;
                       }
-                    }
-                    console.log(`[drain] ⚠️ Tree status=${taskTree.status} but ${taskTree.subTasks.filter((t) => t.status === "pending" || t.status === "active").length} pending/active sub-tasks from other rounds exist, skipping guard A`);
-                  }
-
-                  // 守卫 B：rootTaskId 轮次完成检查（核心守卫）
-                  // 🔧 改进：不再批量丢弃整个 round 的队列项，
-                  //    而是逐项检查 tree 中对应子任务的实际状态，只丢弃真正完成的。
-                  //    防止新 round 子任务因继承旧 rootTaskId 而被误杀。
-                  if (nextPeek.rootTaskId) {
-                    if (orchestrator.isRoundCompleted(taskTree, nextPeek.rootTaskId)) {
-                      const roundId = nextPeek.rootTaskId;
-                      const before = queue.items.length;
-                      // 只丢弃 tree 中对应子任务已 completed/failed 的队列项
-                      queue.items = queue.items.filter((item) => {
-                        if (item.rootTaskId !== roundId) return true; // 不同 round，保留
-                        if (!item.subTaskId) return false; // 无 subTaskId 且属于已完成 round，丢弃
-                        const treeTask = taskTree.subTasks.find((t) => t.id === item.subTaskId);
-                        if (!treeTask) return false; // tree 中不存在，丢弃
-                        // tree 中仍 pending/active，保留（可能是新一轮的子任务）
-                        return treeTask.status === "pending" || treeTask.status === "active";
-                      });
-                      const discarded = before - queue.items.length;
-                      if (discarded > 0) {
-                        console.log(`[drain] 🧹 Round ${roundId} completed, discarded ${discarded} stale sub-tasks (kept ${queue.items.length} items)`);
-                        // 同步标记任务树状态
-                        await orchestrator.markRoundCompleted(taskTree, roundId);
-                      }
-                      if (discarded > 0 || queue.items[0]?.rootTaskId === roundId) continue;
-                    }
-                  }
-
-                  // 守卫 C：单个子任务已 completed/failed，跳过（防重复执行）
-                  if (nextPeek.subTaskId) {
-                    const subTaskInTree = taskTree.subTasks.find((t) => t.id === nextPeek.subTaskId);
-                    if (subTaskInTree && (subTaskInTree.status === "completed" || subTaskInTree.status === "failed")) {
-                      queue.items.shift();
-                      console.log(`[drain] 🧹 Sub-task ${nextPeek.subTaskId} already ${subTaskInTree.status}, skipping`);
                       continue;
                     }
-                  }
-                }
-              }
-            } catch {
-              // 检查失败不阻塞执行，回退到正常流程
-            }
-          }
 
-          const next = queue.items.shift();
-          if (!next) { console.log(`[drain] ⚠️ queue task shift() returned undefined, breaking`); break; }
+                    case "wait": {
+                      // 有 pending 任务但都在等待依赖/兄弟，暂不执行
+                      // 从队列头部取出一个非任务队列项执行（如果有的话）
+                      const nonTaskIdx = queue.items.findIndex((item) => !item.subTaskId && !item.isQueueTask);
+                      if (nonTaskIdx >= 0) {
+                        const nonTask = queue.items.splice(nonTaskIdx, 1)[0];
+                        waitCount = 0; // 执行了非任务项，重置计数器
+                        await runFollowup(nonTask);
+                      } else {
+                        // 🔧 P4 修复：安全阀 — 防止无限等待
+                        waitCount++;
+                        if (waitCount >= MAX_WAIT_ITERATIONS) {
+                          console.warn(
+                            `[drain] ⚠️ Wait safety valve triggered: ${waitCount} iterations (${waitCount * 2}s), ` +
+                            `falling back to FIFO for remaining ${queue.items.length} items`,
+                          );
+                          // 强制 FIFO 执行队列头部任务，打破死锁
+                          const stuckItem = queue.items.shift();
+                          if (stuckItem) {
+                            waitCount = 0;
+                            console.log(`[drain] ▶️ Safety FIFO: ${stuckItem.summaryLine || 'none'} (${stuckItem.subTaskId || 'no-id'})`);
+                            await runFollowup(stuckItem);
+                          }
+                          continue;
+                        }
+                        // 全是任务队列项且都在等待 — 短暂等待后重试
+                        // 避免 busy-wait：等待 2 秒让正在执行的任务有机会完成
+                        console.log(`[drain] ⏳ ${schedule.reason}, waiting 2s (${waitCount}/${MAX_WAIT_ITERATIONS})`);
+                        await new Promise((resolve) => setTimeout(resolve, 2000));
+                      }
+                      continue;
+                    }
 
-          // 🔧 P2 修复：在串行执行前检测并行机会
-          // 将 next 放回队列头部，尝试并行执行
-          if (queue.items.length > 0 && queue.items.every((item) => item.isQueueTask || item.subTaskId)) {
-            queue.items.unshift(next); // 放回
-            try {
-              const orchestrator = getGlobalOrchestrator();
-              const sessionId = next.run?.sessionId;
-              const taskTree = sessionId ? await orchestrator.loadTaskTree(sessionId) : null;
+                    case "execute": {
+                      // 有可执行任务，从队列中匹配对应的 FollowupRun
+                      const tasksToRun = schedule.tasks;
 
-              if (taskTree && taskTree.subTasks.length > 0) {
-                const pendingTasks = taskTree.subTasks.filter(
-                  (t) => t.status === "pending" && t.rootTaskId === next.rootTaskId,
-                );
-                const groups = findParallelGroups(pendingTasks);
+                      if (tasksToRun.length > 1) {
+                        // 并行执行
+                        const parallelItems: FollowupRun[] = [];
+                        for (const task of tasksToRun) {
+                          const idx = queue.items.findIndex((item) => {
+                            if (item.subTaskId && task.id) return item.subTaskId === task.id;
+                            return item.prompt === task.prompt;
+                          });
+                          if (idx >= 0) {
+                            parallelItems.push(queue.items.splice(idx, 1)[0]);
+                          }
+                        }
+                        if (parallelItems.length > 1) {
+                          console.log(`[drain] 🚀 Tree-driven parallel: ${parallelItems.length} tasks`);
+                          await Promise.allSettled(parallelItems.map((item) =>
+                            runWithTracking(item.subTaskId ?? "unknown", () => runFollowup(item)),
+                          ));
+                          continue;
+                        }
+                        // 只匹配到 1 个或 0 个，放回队列回退到串行
+                        queue.items.unshift(...parallelItems);
+                      }
 
-                if (groups.length > 0 && groups[0].length > 1) {
-                  const parallelGroup = groups[0];
-                  const parallelItems: FollowupRun[] = [];
+                      // 串行执行：匹配第一个可执行任务
+                      const targetTask = tasksToRun[0];
+                      if (targetTask) {
+                        const idx = queue.items.findIndex((item) => {
+                          if (item.subTaskId && targetTask.id) return item.subTaskId === targetTask.id;
+                          return item.prompt === targetTask.prompt;
+                        });
+                        if (idx >= 0) {
+                          const matched = queue.items.splice(idx, 1)[0];
+                          console.log(`[drain] ▶️ Tree-driven: ${matched.summaryLine || 'none'} (${matched.subTaskId || 'no-id'})`);
+                          await runFollowup(matched);
+                          console.log(`[drain] ✅ Done: ${matched.summaryLine || 'none'}, remaining=${queue.items.length}`);
+                          continue;
+                        }
+                      }
 
-                  for (const pgTask of parallelGroup) {
-                    const idx = queue.items.findIndex((item) => {
-                      if (item.subTaskId && pgTask.id) return item.subTaskId === pgTask.id;
-                      return item.prompt === pgTask.prompt;
-                    });
-                    if (idx >= 0) {
-                      parallelItems.push(queue.items.splice(idx, 1)[0]);
+                      // 任务树说有可执行任务但队列中找不到对应的 FollowupRun
+                      // 这说明任务树和队列不同步（restart/adjust 新增了任务但未入队）
+                      // 🔧 防御性兜底：从任务树构造 FollowupRun 并直接执行
+                      if (targetTask && nextPeek) {
+                        console.warn(`[drain] ⚠️ Tree says execute ${targetTask.id} but no matching FollowupRun, auto-constructing from tree`);
+                        const syntheticRun: FollowupRun = {
+                          prompt: targetTask.prompt,
+                          summaryLine: targetTask.summary,
+                          enqueuedAt: Date.now(),
+                          run: nextPeek.run,
+                          isQueueTask: true,
+                          isRootTask: false,
+                          isNewRootTask: false,
+                          taskDepth: targetTask.depth ?? 0,
+                          subTaskId: targetTask.id,
+                          rootTaskId: targetTask.rootTaskId ?? nextPeek.rootTaskId,
+                          originatingChannel: nextPeek.originatingChannel,
+                          originatingTo: nextPeek.originatingTo,
+                          originatingAccountId: nextPeek.originatingAccountId,
+                          originatingThreadId: nextPeek.originatingThreadId,
+                          originatingChatType: nextPeek.originatingChatType,
+                        };
+                        await runFollowup(syntheticRun);
+                        console.log(`[drain] ✅ Synthetic run done: ${targetTask.summary}, remaining=${queue.items.length}`);
+                        continue;
+                      }
+                      console.warn(`[drain] ⚠️ Tree says execute but no target task, falling back to FIFO`);
+                      break; // 跳出 switch，走下面的 FIFO 兜底
                     }
                   }
 
-                  if (parallelItems.length > 1) {
-                    console.log(`[drain] 🚀 Parallel execution: ${parallelItems.length} queue tasks`);
-                    await Promise.allSettled(parallelItems.map((item) =>
-                      runWithTracking(item.subTaskId ?? "unknown", () => runFollowup(item)),
-                    ));
+                  // 如果 switch 正常 continue 了，不会到这里
+                  // 只有 execute 分支的 break（找不到匹配）会到这里
+                  if (schedule.action === "execute") {
+                    // FIFO 兜底：直接取队列头部执行
+                    const fallback = queue.items.shift();
+                    if (!fallback) { console.log(`[drain] ⚠️ FIFO fallback: queue empty`); break; }
+                    console.log(`[drain] ▶️ FIFO fallback: ${fallback.summaryLine || 'none'}`);
+                    await runFollowup(fallback);
+                    console.log(`[drain] ✅ FIFO fallback done, remaining=${queue.items.length}`);
                     continue;
-                  } else {
-                    // 放回队列头部，回退到串行
-                    queue.items.unshift(...parallelItems);
                   }
                 }
               }
-            } catch {
-              // 并行分析失败，回退到串行
+            } catch (err) {
+              // 任务树查询失败，回退到 FIFO 执行（不阻塞）
+              console.warn(`[drain] ⚠️ Tree-driven scheduling failed, falling back to FIFO:`, err);
             }
-            // 从队列头部重新取出（可能是原来的 next，也可能被并行消费了）
-            const serialNext = queue.items.shift();
-            if (!serialNext) { console.log(`[drain] ⚠️ queue task shift() returned undefined after parallel check, breaking`); break; }
-            console.log(`[drain] ▶️ Running queue task individually: summary=${serialNext.summaryLine || 'none'}, isQueueTask=${serialNext.isQueueTask}, isRootTask=${serialNext.isRootTask}, depth=${serialNext.taskDepth}`);
-            await runFollowup(serialNext);
-            console.log(`[drain] ✅ Queue task finished: summary=${serialNext.summaryLine || 'none'}, remaining=${queue.items.length}`);
-          } else {
-            console.log(`[drain] ▶️ Running queue task individually: summary=${next.summaryLine || 'none'}, isQueueTask=${next.isQueueTask}, isRootTask=${next.isRootTask}, depth=${next.taskDepth}`);
-            await runFollowup(next);
-            console.log(`[drain] ✅ Queue task finished: summary=${next.summaryLine || 'none'}, remaining=${queue.items.length}`);
           }
+
+          // FIFO 兜底（任务树查询失败或无 sessionId 时）
+          const next = queue.items.shift();
+          if (!next) { console.log(`[drain] ⚠️ queue task shift() returned undefined, breaking`); break; }
+          console.log(`[drain] ▶️ FIFO: ${next.summaryLine || 'none'}, isQueueTask=${next.isQueueTask}, depth=${next.taskDepth}`);
+          await runFollowup(next);
+          console.log(`[drain] ✅ FIFO done: ${next.summaryLine || 'none'}, remaining=${queue.items.length}`);
           continue;
         }
 
@@ -285,7 +318,11 @@ export function scheduleFollowupDrain(
             const taskTree = sessionId ? await orchestrator.loadTaskTree(sessionId) : null;
 
             if (taskTree && taskTree.subTasks.length > 0) {
-              const pendingTasks = taskTree.subTasks.filter((t) => t.status === "pending");
+              const pendingTasks = taskTree.subTasks.filter(
+                (t) => t.status === "pending"
+                  && !t.waitForChildren  // 排除 waitForChildren 任务
+                  && !t.metadata?.isRootTask && !t.metadata?.isSummaryTask,
+              );
               const groups = findParallelGroups(pendingTasks);
 
               // 如果第一个并行组有 > 1 个任务，尝试并发执行

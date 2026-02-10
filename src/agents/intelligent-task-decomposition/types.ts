@@ -615,7 +615,8 @@ export type ReviewDecision =
   | "continue"      // 继续执行（质量通过）
   | "adjust"        // 调整任务树（需要小幅改进）
   | "restart"       // 重启任务（保留经验，重新分解）
-  | "overthrow";    // 推翻任务（完全重新开始）
+  | "overthrow"     // 推翻任务（完全重新开始）
+  | "decompose";    // 🆕 分治策略：将失败的子任务拆分为更小的子任务（结构性失败时使用）
 
 /**
  * 质量评估记录
@@ -874,6 +875,10 @@ export interface PostProcessResult {
   roundCompleted?: boolean;
   /** 🆕 V2 Phase 4: 完成的轮次 ID（roundCompleted=true 时必填） */
   completedRoundId?: string;
+  /** 🆕 adjust 决策新增的子任务 ID 列表（需要 followup-runner 入队） */
+  newTaskIds?: string[];
+  /** 🆕 decompose 决策：分解产生的新子任务 ID 列表（需要 followup-runner 入队） */
+  decomposedTaskIds?: string[];
 }
 
 // ========================================
@@ -944,6 +949,27 @@ export interface RoundCompletedResult {
   /** Round 最终状态 */
   roundStatus: RoundStatus;
 }
+
+// ========================================
+// 🆕 方案 A：任务树驱动的 drain 调度结果
+// ========================================
+
+/**
+ * drain 调度决策 — getNextExecutableTasksForDrain() 的返回值
+ *
+ * drain 根据 action 字段决定行为：
+ * - execute: 执行 tasks 中的任务（可并行）
+ * - wait: 有 pending 任务但都在等待依赖/兄弟，暂不执行
+ * - round_done: 当前轮次已完成，清理队列中该轮次的残留
+ * - discard_all: 任务树已终结，丢弃所有队列任务
+ * - discard_round: 当前轮次被 overthrow，级联丢弃
+ */
+export type DrainScheduleResult =
+  | { action: "execute"; tasks: SubTask[]; remainingPending: number }
+  | { action: "wait"; reason: string }
+  | { action: "round_done"; reason: string; roundId?: string }
+  | { action: "discard_all"; reason: string }
+  | { action: "discard_round"; reason: string; roundId: string; treeModified?: boolean };
 
 // ========================================
 // 🆕 交付报告相关类型

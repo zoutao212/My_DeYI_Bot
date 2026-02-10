@@ -33,6 +33,7 @@ export const TASK_DECOMPOSITION_PROMPTS_ZH: TaskDecompositionPromptsL10n = {
     "如果原始任务有字数/篇幅/数量等量化要求，必须在每个子任务的 prompt 中明确分配具体的量化指标（如：本章要求 3000 字以上）",
     "每个子任务的 prompt 应该足够详细，包含：目标、具体要求、量化指标、输出格式等",
     "写作类任务：每个子任务的 prompt 中必须包含明确的字数要求，且所有子任务的字数之和应 >= 总要求",
+    "⚠️ 能力约束：单个子任务的预期输出不应超过 2000 字（中文字符）。如果某个部分需要更多内容，必须拆分为多个子任务，通过依赖关系串联保证连贯性",
   ],
   
   jsonFormatInstruction: "请按照以下 JSON 格式返回分解结果：",
@@ -239,6 +240,7 @@ export const TASK_DECOMPOSITION_PROMPTS_ZH: TaskDecompositionPromptsL10n = {
       adjust: "调整任务树",
       restart: "重启任务",
       overthrow: "推翻任务",
+      decompose: "增量分解",
     },
     changeTypeLabels: {
       add_task: "添加任务",
