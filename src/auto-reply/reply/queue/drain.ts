@@ -92,6 +92,10 @@ export function scheduleFollowupDrain(
                     }
 
                     case "wait": {
+                      // 🔧 问题 II 修复：如果调度过程中有续写子任务被级联 skip，保存任务树
+                      if (schedule.treeModified) {
+                        await orchestrator.saveTaskTree(taskTree);
+                      }
                       // 有 pending 任务但都在等待依赖/兄弟，暂不执行
                       // 从队列头部取出一个非任务队列项执行（如果有的话）
                       const nonTaskIdx = queue.items.findIndex((item) => !item.subTaskId && !item.isQueueTask);
@@ -133,7 +137,12 @@ export function scheduleFollowupDrain(
                             if (stuckItem) {
                               waitCount = 0;
                               console.log(`[drain] ▶️ Safety FIFO: ${stuckItem.summaryLine || 'none'} (${stuckItem.subTaskId || 'no-id'})`);
-                              await runFollowup(stuckItem);
+                              // 🔧 问题 V 修复：safety FIFO 也用 runWithTracking 包裹
+                              if (stuckItem.subTaskId) {
+                                await runWithTracking(stuckItem.subTaskId, () => runFollowup(stuckItem));
+                              } else {
+                                await runFollowup(stuckItem);
+                              }
                             }
                           }
                           continue;
@@ -147,6 +156,10 @@ export function scheduleFollowupDrain(
                     }
 
                     case "execute": {
+                      // 🔧 问题 II 修复：如果调度过程中有续写子任务被级联 skip，保存任务树
+                      if (schedule.treeModified) {
+                        await orchestrator.saveTaskTree(taskTree);
+                      }
                       // 有可执行任务，从队列中匹配对应的 FollowupRun
                       const tasksToRun = schedule.tasks;
 
@@ -183,7 +196,13 @@ export function scheduleFollowupDrain(
                         if (idx >= 0) {
                           const matched = queue.items.splice(idx, 1)[0];
                           console.log(`[drain] ▶️ Tree-driven: ${matched.summaryLine || 'none'} (${matched.subTaskId || 'no-id'})`);
-                          await runFollowup(matched);
+                          // 🔧 问题 V 修复：串行执行也用 runWithTracking 包裹
+                          // 原因：串行执行时没有 ALS 上下文，trackFileWrite 回退到栈顶 taskId，
+                          // 如果 beginTracking 在 onTaskStarting 中被调用（推入栈），
+                          // 但 LLM 执行期间另一个异步操作也写了文件，会被归到栈顶的任务。
+                          // 用 runWithTracking 确保每个任务在自己的 ALS 上下文中运行。
+                          const trackingId = matched.subTaskId ?? "unknown";
+                          await runWithTracking(trackingId, () => runFollowup(matched));
                           console.log(`[drain] ✅ Done: ${matched.summaryLine || 'none'}, remaining=${queue.items.length}`);
                           continue;
                         }
@@ -211,7 +230,8 @@ export function scheduleFollowupDrain(
                           originatingThreadId: nextPeek.originatingThreadId,
                           originatingChatType: nextPeek.originatingChatType,
                         };
-                        await runFollowup(syntheticRun);
+                        // 🔧 问题 V 修复：synthetic run 也用 runWithTracking 包裹
+                        await runWithTracking(targetTask.id, () => runFollowup(syntheticRun));
                         console.log(`[drain] ✅ Synthetic run done: ${targetTask.summary}, remaining=${queue.items.length}`);
                         continue;
                       }
@@ -227,7 +247,12 @@ export function scheduleFollowupDrain(
                     const fallback = queue.items.shift();
                     if (!fallback) { console.log(`[drain] ⚠️ FIFO fallback: queue empty`); break; }
                     console.log(`[drain] ▶️ FIFO fallback: ${fallback.summaryLine || 'none'}`);
-                    await runFollowup(fallback);
+                    // 🔧 问题 V 修复：FIFO fallback 也用 runWithTracking 包裹
+                    if (fallback.subTaskId) {
+                      await runWithTracking(fallback.subTaskId, () => runFollowup(fallback));
+                    } else {
+                      await runFollowup(fallback);
+                    }
                     console.log(`[drain] ✅ FIFO fallback done, remaining=${queue.items.length}`);
                     continue;
                   }
@@ -243,7 +268,12 @@ export function scheduleFollowupDrain(
           const next = queue.items.shift();
           if (!next) { console.log(`[drain] ⚠️ queue task shift() returned undefined, breaking`); break; }
           console.log(`[drain] ▶️ FIFO: ${next.summaryLine || 'none'}, isQueueTask=${next.isQueueTask}, depth=${next.taskDepth}`);
-          await runFollowup(next);
+          // 🔧 问题 V 修复：FIFO 路径也用 runWithTracking 包裹
+          if (next.subTaskId) {
+            await runWithTracking(next.subTaskId, () => runFollowup(next));
+          } else {
+            await runFollowup(next);
+          }
           console.log(`[drain] ✅ FIFO done: ${next.summaryLine || 'none'}, remaining=${queue.items.length}`);
           continue;
         }
@@ -400,7 +430,12 @@ export function scheduleFollowupDrain(
         const next = queue.items.shift();
         if (!next) { console.log(`[drain] ⚠️ queue.items.shift() returned undefined, breaking`); break; }
         console.log(`[drain] ▶️ Running task: summary=${next.summaryLine || 'none'}, isQueueTask=${next.isQueueTask}, isRootTask=${next.isRootTask}, depth=${next.taskDepth}`);
-        await runFollowup(next);
+        // 🔧 问题 V 修复：通用路径也用 runWithTracking 包裹
+        if (next.subTaskId) {
+          await runWithTracking(next.subTaskId, () => runFollowup(next));
+        } else {
+          await runFollowup(next);
+        }
         console.log(`[drain] ✅ Task finished: summary=${next.summaryLine || 'none'}, remaining=${queue.items.length}`);
       }
       console.log(`[drain] 🏁 While loop exited: items=${queue.items.length}, droppedCount=${queue.droppedCount}`);

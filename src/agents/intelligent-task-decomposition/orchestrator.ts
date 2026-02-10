@@ -5,6 +5,8 @@
  */
 
 import crypto from "node:crypto";
+import os from "node:os";
+import path from "node:path";
 import type { TaskTree, SubTask, TaskTreeChange, QualityReviewResult, TaskBatch, BatchExecutionResult, BatchExecutionOptions, PostProcessResult, Round, RoundStatus, ExecutionContext, CreateDecision, StartDecision, FailureDecision, RoundCompletedResult, DrainScheduleResult } from "./types.js";
 import { TaskTreeManager } from "./task-tree-manager.js";
 import { RetryManager } from "./retry-manager.js";
@@ -184,6 +186,16 @@ export class Orchestrator {
    * FileManager 可能为 null。此方法按需创建并初始化。
    */
   private async ensureFileManager(sessionId: string): Promise<FileManager> {
+    // 🔧 问题 KK 修复：如果 sessionId 变了，重新初始化 FileManager
+    // 原因：全局 Orchestrator 单例可能处理多个 session，
+    // 如果复用旧的 FileManager，文件会被保存到错误的目录。
+    if (this.fileManager) {
+      const expectedPath = path.join(os.homedir(), ".clawdbot", "tasks", sessionId);
+      if (this.fileManager.getTaskTreePath() !== expectedPath) {
+        console.log(`[Orchestrator] 📁 FileManager sessionId 变更，重新初始化: ${sessionId}`);
+        this.fileManager = null as any;
+      }
+    }
     if (!this.fileManager) {
       this.fileManager = new FileManager(sessionId);
       await this.fileManager.initialize();
@@ -237,8 +249,9 @@ export class Orchestrator {
         // 🔧 修复：即使 subTask.output 为空，只要有文件产出也应该检查字数
         // 原因：LLM 可能写了文件但 output 只是空字符串或确认消息
         const hasFileOutput = subTask.metadata?.producedFilePaths && subTask.metadata.producedFilePaths.length > 0;
-        if (wordCountReq && (subTask.output || hasFileOutput)) {
-          // 优先用文件内容计算字数，回退到 output 长度
+        const hasFallbackFile = subTask.metadata?.fallbackFilePath;
+        if (wordCountReq && (subTask.output || hasFileOutput || hasFallbackFile)) {
+          // 优先用文件内容计算字数，回退到 fallback 文件，最后回退到 output 长度
           let actualLength = (subTask.output ?? "").length;
           const producedPaths = subTask.metadata?.producedFilePaths;
           if (producedPaths && producedPaths.length > 0) {
@@ -263,11 +276,105 @@ export class Orchestrator {
               // import 失败，回退到 output 长度
             }
           }
+          // 🔧 问题 MM 修复：如果 producedFilePaths 为空但有 fallbackFilePath，读取兜底文件
+          // 原因：LLM 没有调用 write 工具时，handleFallbackPersistence 把长文本保存到了 fallbackFilePath，
+          // 但字数前置检查只看 producedFilePaths，会回退到 subTask.output（确认消息），误判为字数不达标。
+          if (actualLength < 500 && subTask.metadata?.fallbackFilePath) {
+            try {
+              const fs = await import("node:fs/promises");
+              const fallbackContent = await fs.readFile(subTask.metadata.fallbackFilePath, "utf-8");
+              if (fallbackContent.length > actualLength) {
+                actualLength = fallbackContent.length;
+                console.log(
+                  `[Orchestrator] 📏 字数检查使用兜底文件: ${subTask.metadata.fallbackFilePath}, ${fallbackContent.length} 字符`,
+                );
+              }
+            } catch {
+              // 兜底文件读取失败，保持原值
+            }
+          }
+          // 🔧 第四层回退：扫描任务目录下的文件
+          // 场景：FileTracker 追踪断裂（0 个文件）+ output 太短（< 500）导致兜底落盘未触发
+          // 此时 producedFilePaths 为空、fallbackFilePath 为空，三层回退全部失败。
+          // 最后手段：扫描 tasks/{subTaskId}/ 和 fallback-outputs/ 目录，找到实际文件。
+          if (actualLength < 500 && taskTree.id) {
+            try {
+              const fs = await import("node:fs/promises");
+              const nodePath = await import("node:path");
+              const os = await import("node:os");
+              const taskBaseDir = nodePath.default.join(
+                os.default.homedir(), ".clawdbot", "tasks", taskTree.id,
+              );
+              // 扫描 tasks/{subTaskId}/ 目录
+              const subTaskDir = nodePath.default.join(taskBaseDir, "tasks", subTask.id);
+              let scannedChars = 0;
+              try {
+                const entries = await fs.readdir(subTaskDir, { withFileTypes: true });
+                for (const entry of entries) {
+                  if (entry.isFile() && /\.(txt|md)$/i.test(entry.name)) {
+                    try {
+                      const content = await fs.readFile(
+                        nodePath.default.join(subTaskDir, entry.name), "utf-8",
+                      );
+                      scannedChars += content.length;
+                    } catch { /* skip */ }
+                  }
+                  // 扫描 artifacts 子目录
+                  if (entry.isDirectory() && entry.name === "artifacts") {
+                    try {
+                      const artEntries = await fs.readdir(
+                        nodePath.default.join(subTaskDir, "artifacts"), { withFileTypes: true },
+                      );
+                      for (const artEntry of artEntries) {
+                        if (artEntry.isFile()) {
+                          try {
+                            const content = await fs.readFile(
+                              nodePath.default.join(subTaskDir, "artifacts", artEntry.name), "utf-8",
+                            );
+                            scannedChars += content.length;
+                          } catch { /* skip */ }
+                        }
+                      }
+                    } catch { /* skip */ }
+                  }
+                }
+              } catch { /* 目录不存在，跳过 */ }
+              // 扫描 fallback-outputs/{subTaskId}.txt
+              if (scannedChars === 0) {
+                const safeId = subTask.id.replace(/[^a-zA-Z0-9_-]/g, "_");
+                const fallbackPath = nodePath.default.join(taskBaseDir, "fallback-outputs", `${safeId}.txt`);
+                try {
+                  const content = await fs.readFile(fallbackPath, "utf-8");
+                  scannedChars = content.length;
+                } catch { /* skip */ }
+              }
+              if (scannedChars > actualLength) {
+                console.log(
+                  `[Orchestrator] 📏 字数检查第四层回退（目录扫描）: 发现 ${scannedChars} 字符（原 ${actualLength}）`,
+                );
+                actualLength = scannedChars;
+              }
+            } catch {
+              // 扫描失败，保持原值
+            }
+          }
           const threshold = Math.floor(wordCountReq * 0.6); // 60% 硬性底线（零 LLM 成本拦截）
           // 🔧 问题 G 修复：从 30% 提高到 60%
           // 原因：30% 太低，大量不达标的输出（如 32%）会通过前置检查，
           // 然后交给 LLM 质检（消耗 1 次 LLM 调用）才被 restart。
           // 60% 门槛可以在零成本下拦截大部分不达标输出，节省 LLM 预算。
+          // 🔧 诊断日志：当 actualLength 很小时，输出回退链状态帮助排查
+          if (actualLength < threshold) {
+            const diagSources: string[] = [];
+            if (producedPaths && producedPaths.length > 0) diagSources.push(`producedFiles=${producedPaths.length}`);
+            else diagSources.push("producedFiles=0");
+            if (subTask.metadata?.fallbackFilePath) diagSources.push(`fallback=有`);
+            else diagSources.push("fallback=无");
+            diagSources.push(`output=${(subTask.output ?? "").length}字符`);
+            console.log(
+              `[Orchestrator] 📊 字数回退链诊断: actualLength=${actualLength}, 来源=[${diagSources.join(", ")}]`,
+            );
+          }
           if (actualLength < threshold) {
             const currentRetry = subTask.retryCount ?? 0;
 
@@ -309,6 +416,15 @@ export class Orchestrator {
                   : subTask.output;
               }
               subTask.metadata.lastFailureFindings = [`字数不达标：要求 ${wordCountReq} 字，实际 ${actualLength} 字（${Math.round(actualLength / wordCountReq * 100)}%）`];
+              // 🔧 问题 M 修复：restart 时清空旧的文件追踪数据
+              // 原因：如果不清空，下次执行后 collectTrackedFiles 可能为空（LLM 写了不同路径），
+              // 但 producedFilePaths 仍指向旧文件，导致 decomposeFailedTask 用旧文件内容计算字数。
+              // 保存旧路径到 previousProducedFilePaths 供参考，但清空 producedFilePaths/producedFiles。
+              if (subTask.metadata.producedFilePaths && subTask.metadata.producedFilePaths.length > 0) {
+                subTask.metadata.previousProducedFilePaths = [...subTask.metadata.producedFilePaths];
+              }
+              delete subTask.metadata.producedFilePaths;
+              delete subTask.metadata.producedFiles;
               await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
               subTask.retryCount = currentRetry + 1;
               result.decision = "restart";
@@ -332,6 +448,11 @@ export class Orchestrator {
 
         // 🔧 LLM 质检：使用子任务所属轮次的实际根任务描述
         // 质检 LLM 现在能看到实际文件内容（在 reviewSubTaskCompletion 中读取并注入）
+        // 🔧 问题 P 修复：质检前递增第 2 次 LLM 调用计数
+        const qualityRoundId = subTask.rootTaskId;
+        if (qualityRoundId) {
+          this.incrementLLMCallCount(taskTree, qualityRoundId, 1);
+        }
         const roundRootDesc = subTask.rootTaskId
           ? this.getRoundRootDescription(taskTree, subTask.rootTaskId)
           : undefined;
@@ -378,6 +499,66 @@ export class Orchestrator {
           case "restart": {
             const maxQualityRestarts = this.getDefaultMaxRetries();
             const currentRetry = subTask.retryCount ?? 0;
+
+            // 🔧 问题 Z 修复：根据质检 LLM 返回的 failureType 选择最优策略
+            // 替代之前不可靠的正则匹配（contentConfusionPatterns）
+            const failureType = review.failureType ?? "other";
+
+            // content_confusion：内容混乱是结构性问题（prompt 注入干扰），重试不会改善
+            if (failureType === "content_confusion" && currentRetry >= 1) {
+              console.warn(
+                `[Orchestrator] ⚠️ 问题 Z：子任务 ${subTask.id} 因"内容混乱"被 restart ${currentRetry} 次，` +
+                `这是结构性问题（prompt 注入干扰），不再重试`,
+              );
+              // 尝试 decompose（保留已有输出，创建续写子任务）
+              const wcReq = this.qualityReviewer.extractWordCountRequirement(subTask.prompt);
+              if (wcReq) {
+                try {
+                  subTask.status = "completed";
+                  const newSubTasks = await this.decomposeFailedTask(taskTree, subTask);
+                  if (newSubTasks.length > 0) {
+                    result.decision = "decompose";
+                    result.decomposedTaskIds = newSubTasks.map(t => t.id);
+                    result.findings = [
+                      `内容混乱（failureType=content_confusion），重试 ${currentRetry} 次无改善，转为增量分解。原因：${review.findings.join("; ")}`,
+                    ];
+                    await this.taskTreeManager.save(taskTree);
+                    break;
+                  }
+                } catch (decompErr) {
+                  console.warn(`[Orchestrator] ⚠️ decompose 失败: ${decompErr}`);
+                }
+              }
+              // decompose 也失败了，标记 failed 停止循环
+              await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
+              subTask.error = `内容混乱重复 ${currentRetry} 次，结构性问题无法通过重试解决：${review.findings.join("; ")}`;
+              result.decision = "overthrow";
+              result.markedFailed = true;
+              break;
+            }
+
+            // word_count：字数不达标，重试 1 次后转 decompose
+            if (failureType === "word_count" && currentRetry >= 1) {
+              console.log(
+                `[Orchestrator] 🔧 failureType=word_count，已重试 ${currentRetry} 次，转 decompose`,
+              );
+              try {
+                subTask.status = "completed";
+                const newSubTasks = await this.decomposeFailedTask(taskTree, subTask);
+                if (newSubTasks.length > 0) {
+                  result.decision = "decompose";
+                  result.decomposedTaskIds = newSubTasks.map(t => t.id);
+                  result.findings = [
+                    `字数不达标（failureType=word_count），重试 ${currentRetry} 次无改善，转为增量分解。原因：${review.findings.join("; ")}`,
+                  ];
+                  await this.taskTreeManager.save(taskTree);
+                  break;
+                }
+              } catch (decompErr) {
+                console.warn(`[Orchestrator] ⚠️ decompose 失败，回退到正常 restart: ${decompErr}`);
+              }
+            }
+
             if (currentRetry >= maxQualityRestarts) {
               // 分治策略：重试超限时，先尝试 decompose
               const wcReq = this.qualityReviewer.extractWordCountRequirement(subTask.prompt);
@@ -411,7 +592,7 @@ export class Orchestrator {
               result.decision = "overthrow";
               result.markedFailed = true;
             } else {
-              console.log(`[Orchestrator] 🔄 质量不满意，重新执行 (${currentRetry + 1}/${maxQualityRestarts})`);
+              console.log(`[Orchestrator] 🔄 质量不满意 (failureType=${failureType})，重新执行 (${currentRetry + 1}/${maxQualityRestarts})`);
               if (!subTask.metadata) subTask.metadata = {};
               if (subTask.output && subTask.output.length > 0) {
                 subTask.metadata.previousOutput = subTask.output.length > 3000
@@ -421,6 +602,12 @@ export class Orchestrator {
               if (review.findings && review.findings.length > 0) {
                 subTask.metadata.lastFailureFindings = review.findings;
               }
+              // 🔧 问题 M 修复：restart 时清空旧的文件追踪数据（与字数前置检查分支对齐）
+              if (subTask.metadata.producedFilePaths && subTask.metadata.producedFilePaths.length > 0) {
+                subTask.metadata.previousProducedFilePaths = [...subTask.metadata.producedFilePaths];
+              }
+              delete subTask.metadata.producedFilePaths;
+              delete subTask.metadata.producedFiles;
               await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
               subTask.retryCount = currentRetry + 1;
               result.needsRequeue = true;
@@ -461,6 +648,38 @@ export class Orchestrator {
       // 🔧 P3 修复：overthrow/failed 时更新 failedTasks 计数
       if (result.markedFailed && taskTree.metadata) {
         taskTree.metadata.failedTasks = taskTree.subTasks.filter(t => t.status === "failed").length;
+      }
+      // 🔧 问题 S 修复：overthrow 后级联 skip 依赖该任务的下游任务
+      // 原因：onTaskFailed 有级联逻辑，但只在执行异常时被调用，不在 overthrow 路径中。
+      // 如果不级联，依赖 failed 任务的续写子任务会永远卡在 pending，阻塞轮次完成。
+      if (result.markedFailed && subTask.rootTaskId) {
+        const failedId = subTask.id;
+        const roundId = subTask.rootTaskId;
+        let cascadedCount = 0;
+        const toCascade = new Set<string>();
+        const findDependents = (targetId: string) => {
+          for (const t of taskTree.subTasks) {
+            if (t.rootTaskId === roundId && t.status === "pending" && !toCascade.has(t.id)) {
+              if (t.dependencies?.includes(targetId)) {
+                toCascade.add(t.id);
+                findDependents(t.id);
+              }
+            }
+          }
+        };
+        findDependents(failedId);
+        for (const t of taskTree.subTasks) {
+          if (toCascade.has(t.id)) {
+            t.status = "skipped" as SubTask["status"];
+            t.error = `级联跳过：依赖的任务 ${failedId} 被 overthrow`;
+            cascadedCount++;
+          }
+        }
+        if (cascadedCount > 0) {
+          console.log(
+            `[Orchestrator] ⚡ overthrow 级联跳过 ${cascadedCount} 个依赖任务 (Round ${roundId})`,
+          );
+        }
       }
       await this.taskTreeManager.save(taskTree);
       return result;
@@ -1429,7 +1648,11 @@ export class Orchestrator {
     // 🔧 关键修复：优先用文件内容计算已有字数
     // subTask.output 可能只是 LLM 的确认消息（如"已创作完成"），不是文件内容
     let actualFileContent = "";
-    const producedPaths = subTask.metadata?.producedFilePaths;
+    // 🔧 问题 X 修复：restart 时 producedFilePaths 被清空（问题 M 修复），
+    // 所以 decompose 时需要从 previousProducedFilePaths 读取文件内容。
+    const producedPaths = subTask.metadata?.producedFilePaths
+      ?? subTask.metadata?.previousProducedFilePaths
+      ?? [];
     if (producedPaths && producedPaths.length > 0) {
       try {
         const fs = await import("node:fs/promises");
@@ -1544,6 +1767,9 @@ export class Orchestrator {
         metadata: {
           complexity: "medium" as const,
           priority: "medium" as const,
+          isContinuation: true, // 🔧 问题 Q 修复：用 metadata 标识续写子任务
+          continuationOf: subTask.id, // 原始子任务 ID
+          continuationPart: partNumber, // 续写部分编号
         },
       };
 
@@ -1767,6 +1993,7 @@ export class Orchestrator {
    * @param enableBatching 是否启用批量执行（默认 false）
    * @returns 可执行的子任务列表（按优先级排序）
    */
+  /** @deprecated 使用 getNextExecutableTasksForDrain 替代（drain.ts 已迁移） */
   getExecutableTasks(taskTree: TaskTree, enableBatching: boolean = false): SubTask[] {
     const executableTasks: SubTask[] = [];
 
@@ -1816,9 +2043,13 @@ export class Orchestrator {
       }
 
       // 🆕 3. 检查子任务是否全部完成（递归回溯的核心逻辑）
+      // 🔧 P9 修复：从 taskTree.subTasks 扁平列表查找实际状态，
+      // 避免 JSON 反序列化后 children 引用断裂导致状态过时
       if (subTask.waitForChildren && subTask.children && subTask.children.length > 0) {
-        const allChildrenCompleted = subTask.children.every(child => {
-          return child.status === "completed";
+        const childIds = subTask.children.map(c => c.id);
+        const allChildrenCompleted = childIds.every(childId => {
+          const freshChild = taskTree.subTasks.find(t => t.id === childId);
+          return freshChild && freshChild.status === "completed";
         });
 
         if (!allChildrenCompleted) {
@@ -1827,7 +2058,11 @@ export class Orchestrator {
         }
 
         // 🆕 4. 将子任务输出注入到父任务的 prompt 中（汇总任务）
-        const childOutputs = subTask.children
+        // 🔧 P9 修复：同样从扁平列表读取最新的 output
+        const freshChildren = childIds
+          .map(id => taskTree.subTasks.find(t => t.id === id))
+          .filter((c): c is SubTask => c != null);
+        const childOutputs = freshChildren
           .filter(child => child.output && child.output.length > 0)
           .map(child => {
             return `### ${child.summary}\n\n${child.output}`;
@@ -2029,6 +2264,7 @@ ${childOutputs.join("\n\n---\n\n")}
     // 5. 过滤：依赖未满足的任务
     // 6. 过滤：waitForChildren 且兄弟未全部完成的任务
     const executable: SubTask[] = [];
+    let treeModifiedBySkip = false; // 🔧 问题 II 修复：追踪是否有续写子任务被级联 skip
 
     for (const task of pendingTasks) {
       // 跳过 root summary 任务（由系统合并路径处理）
@@ -2038,11 +2274,58 @@ ${childOutputs.join("\n\n---\n\n")}
 
       // 依赖检查
       if (task.dependencies && task.dependencies.length > 0) {
+        // 🔧 P9 修复：依赖 ID 模糊匹配 + 幽灵依赖容错
+        // 防止 LLM 生成的下划线格式依赖 ID 导致永久死锁
+        const resolvedDeps: string[] = [];
+        let depsModified = false;
+        for (const depId of task.dependencies) {
+          let dep = taskTree.subTasks.find((t) => t.id === depId);
+          if (!dep) {
+            // 尝试下划线→连字符模糊匹配
+            const hyphenized = depId.replace(/_/g, "-");
+            dep = taskTree.subTasks.find((t) => t.id === hyphenized);
+            if (dep) {
+              console.warn(`[Orchestrator] 🔧 P9: 依赖 ID 模糊修复 "${depId}" → "${hyphenized}"（任务 ${task.id}）`);
+              resolvedDeps.push(hyphenized);
+              depsModified = true;
+              continue;
+            }
+            // 完全找不到：打印警告，视为已满足（防止永久死锁）
+            console.warn(`[Orchestrator] ⚠️ P9: 幽灵依赖 "${depId}" 不存在于任务树中（任务 ${task.id}），跳过该依赖`);
+            depsModified = true;
+            continue;
+          }
+          resolvedDeps.push(depId);
+        }
+        // 原地修复依赖列表
+        if (depsModified) {
+          task.dependencies = resolvedDeps;
+          treeModifiedBySkip = true;
+        }
+
         const allDepsDone = task.dependencies.every((depId) => {
           const dep = taskTree.subTasks.find((t) => t.id === depId);
           return dep && (dep.status === "completed" || dep.status === "failed" || dep.status === "skipped");
         });
         if (!allDepsDone) continue;
+
+        // 🔧 问题 O 修复：续写子任务的依赖 failed/skipped 时应该级联 skip
+        // 原因：续写子任务 2 依赖续写子任务 1。如果续写 1 failed，续写 2 没有前序内容可以续写，
+        // 强制执行会产出不连贯的内容。对于续写场景，依赖失败 = 自己也无法完成。
+        const isContinuationTask = task.id.includes("-cont-") || task.metadata?.isContinuation || task.summary?.includes("续写");
+        if (isContinuationTask) {
+          const hasFailedDep = task.dependencies.some((depId) => {
+            const dep = taskTree.subTasks.find((t) => t.id === depId);
+            return dep && (dep.status === "failed" || dep.status === "skipped");
+          });
+          if (hasFailedDep) {
+            task.status = "skipped";
+            task.error = "续写依赖的前序任务失败，级联跳过";
+            treeModifiedBySkip = true; // 🔧 问题 II 修复：标记需要保存
+            console.log(`[Orchestrator] ⏭️ 续写任务 ${task.id} 级联跳过（依赖失败）`);
+            continue;
+          }
+        }
       }
 
       // waitForChildren 检查：所有非 waitForChildren 的兄弟任务必须完成
@@ -2065,7 +2348,7 @@ ${childOutputs.join("\n\n---\n\n")}
 
     if (executable.length === 0) {
       // 有 pending 任务但都被过滤了（等待依赖或兄弟完成）
-      return { action: "wait", reason: `${pendingTasks.length} 个 pending 任务均在等待依赖/兄弟完成` };
+      return { action: "wait", reason: `${pendingTasks.length} 个 pending 任务均在等待依赖/兄弟完成`, treeModified: treeModifiedBySkip };
     }
 
     // 7. 并行组检测
@@ -2076,6 +2359,7 @@ ${childOutputs.join("\n\n---\n\n")}
       action: "execute",
       tasks: firstGroup,
       remainingPending: pendingTasks.length - firstGroup.length,
+      treeModified: treeModifiedBySkip,
     };
   }
 
@@ -2914,9 +3198,12 @@ ${childOutputs.join("\n\n---\n\n")}
     rootTaskId?: string,
   ): Promise<PostProcessResult> {
     // 🆕 A2: 递增 LLM 调用计数（子任务执行 1 次 + 质检 1 次 = 2 次）
+    // 🔧 问题 P 修复：先递增 1 次（执行），质检后再递增 1 次
+    // 原因：如果字数前置检查直接触发 decompose（跳过 LLM 质检），
+    // 只消耗了 1 次 LLM 调用，但之前的代码一次性递增 2 导致预算被高估。
     const effectiveRoundId = rootTaskId ?? subTask.rootTaskId;
     if (effectiveRoundId) {
-      const tripped = this.incrementLLMCallCount(taskTree, effectiveRoundId, 2);
+      const tripped = this.incrementLLMCallCount(taskTree, effectiveRoundId, 1); // 先计执行的 1 次
       if (tripped) {
         // 熔断已触发，跳过质检但仍然保存任务输出到文件系统
         console.warn(`[Orchestrator] 🔌 熔断器已触发，跳过质检直接完成: ${subTask.id}`);
@@ -2943,10 +3230,14 @@ ${childOutputs.join("\n\n---\n\n")}
           markedFailed: false,
         };
         // 仍然检查轮次完成
+        // 🔧 问题 EE 修复：防止并行执行时重复触发
         if (effectiveRoundId && this.isRoundCompleted(taskTree, effectiveRoundId)) {
-          await this.markRoundCompleted(taskTree, effectiveRoundId);
-          result.roundCompleted = true;
-          result.completedRoundId = effectiveRoundId;
+          const round = this.findRound(taskTree, effectiveRoundId);
+          if (!round || (round.status !== "completed" && round.status !== "failed")) {
+            await this.markRoundCompleted(taskTree, effectiveRoundId);
+            result.roundCompleted = true;
+            result.completedRoundId = effectiveRoundId;
+          }
         }
         return result;
       }
@@ -2962,11 +3253,22 @@ ${childOutputs.join("\n\n---\n\n")}
     }
 
     // 3. 轮次完成检查
+    // 🔧 问题 EE 修复：并行执行时防止 isRoundCompleted 被多次触发
+    // 原因：Promise.allSettled 并行执行多个任务时，最后两个任务几乎同时完成，
+    // 两个都可能看到 isRoundCompleted === true，导致 markRoundCompleted 和
+    // onRoundCompleted 被调用两次（合并文件生成两次、交付报告发送两次）。
+    // 修复：检查 Round 是否已被标记为 completed/failed，如果是则跳过。
     if (effectiveRoundId && this.isRoundCompleted(taskTree, effectiveRoundId)) {
-      await this.markRoundCompleted(taskTree, effectiveRoundId);
-      result.roundCompleted = true;
-      result.completedRoundId = effectiveRoundId;
-      console.log(`[Orchestrator] 🏁 onTaskCompleted → Round ${effectiveRoundId} completed`);
+      const round = this.findRound(taskTree, effectiveRoundId);
+      if (round && (round.status === "completed" || round.status === "failed")) {
+        // Round 已被另一个并行任务标记完成，跳过重复处理
+        console.log(`[Orchestrator] ℹ️ onTaskCompleted → Round ${effectiveRoundId} already marked ${round.status}, skipping duplicate`);
+      } else {
+        await this.markRoundCompleted(taskTree, effectiveRoundId);
+        result.roundCompleted = true;
+        result.completedRoundId = effectiveRoundId;
+        console.log(`[Orchestrator] 🏁 onTaskCompleted → Round ${effectiveRoundId} completed`);
+      }
     }
 
     return result;
@@ -3132,6 +3434,16 @@ ${childOutputs.join("\n\n---\n\n")}
     // 确定 Round 状态
     const round = this.findRound(taskTree, rootTaskId);
     result.roundStatus = round?.status ?? "completed";
+
+    // 🔧 问题 R 修复：如果有被熔断器跳过的任务，在交付报告中标注
+    const skippedByCircuitBreaker = taskTree.subTasks.filter(
+      (t) => t.status === "skipped" && t.rootTaskId === rootTaskId && t.error?.includes("熔断器"),
+    );
+    if (skippedByCircuitBreaker.length > 0) {
+      console.warn(
+        `[Orchestrator] ⚠️ onRoundCompleted: ${skippedByCircuitBreaker.length} 个任务因预算耗尽被跳过`,
+      );
+    }
 
     // 1. 合并子任务输出
     const completedTasks = taskTree.subTasks.filter(

@@ -439,6 +439,19 @@ export class FileManager {
         console.log(`[FileManager] ⏭️ 跳过汇总/操作型任务: ${subTask.id} (${subTask.summary})`);
         continue;
       }
+
+      // 🔧 问题 W 修复：跳过被 decompose 标记为 completed 的原始子任务
+      // 原因：decomposeFailedTask 把原始子任务标记为 completed，但其输出是不完整的。
+      // 续写子任务会包含完整的后续内容，如果同时合并原始子任务的不完整输出，
+      // 会导致最终产物中有重复或不连贯的内容。
+      // 检测方式：如果该任务有续写子任务（id 匹配 "{taskId}-cont-"），说明它被 decompose 过。
+      const hasContinuations = taskTree.subTasks.some(
+        t => t.id.startsWith(`${subTask.id}-cont-`) && t.status === "completed",
+      );
+      if (hasContinuations && subTask.metadata?.qualityReview?.decision === "decompose") {
+        console.log(`[FileManager] ⏭️ 跳过被 decompose 的原始任务（续写子任务包含完整内容）: ${subTask.id} (${subTask.summary})`);
+        continue;
+      }
       
       let found = false;
       

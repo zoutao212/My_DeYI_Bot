@@ -570,11 +570,21 @@ ${prompts.jsonFormatInstruction}
 {
   "status": "passed" | "needs_adjustment" | "needs_restart" | "needs_overthrow",
   "decision": "continue" | "adjust" | "restart" | "overthrow",
+  "failureType": "word_count" | "content_confusion" | "quality" | "style" | "repetition" | "off_topic" | "other",
   "criteria": ["${prompts.labels.evaluationCriteria}1", "${prompts.labels.evaluationCriteria}2"],
   "findings": ["${prompts.labels.findings}1", "${prompts.labels.findings}2"],
   "suggestions": ["${prompts.labels.suggestions}1", "${prompts.labels.suggestions}2"]
 }
 \`\`\`
+
+failureType 字段说明（decision 为 restart 或 overthrow 时必填，continue 时可省略）：
+- "word_count": 字数/篇幅严重不足
+- "content_confusion": 输出中混入了其他任务/章节的内容，或内容归属错乱
+- "quality": 内容质量差、逻辑不通、情节断裂
+- "style": 风格偏差、语气不当、不符合要求的写作风格
+- "repetition": 大量重复前文已有的内容
+- "off_topic": 跑题、偏离任务要求
+- "other": 其他无法归类的问题
 
 ${prompts.jsonOnlyReminder}`;
   }

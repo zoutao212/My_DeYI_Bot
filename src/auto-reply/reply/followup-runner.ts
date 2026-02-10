@@ -174,10 +174,12 @@ async function handleFallbackPersistence(opts: {
   toolMetas: Array<{ toolName: string; [k: string]: unknown }>;
   sessionId: string;
   queued: FollowupRun;
+  skipSend?: boolean; // 🔧 问题 JJ：跳过发送，仅保存文件
+  llmSessionFile?: string; // 🔧 Session 隔离：隔离的 session 文件路径
 }): Promise<void> {
   const FILE_TOOLS = new Set(["write", "send_file"]);
   const MIN_FALLBACK_CHARS = 500;
-  const { subTask, outputText, toolMetas, sessionId, queued } = opts;
+  const { subTask, outputText, toolMetas, sessionId, queued, skipSend, llmSessionFile } = opts;
 
   const usedFileTool = toolMetas.some((m) => FILE_TOOLS.has(m.toolName));
   if (usedFileTool || outputText.length < MIN_FALLBACK_CHARS) return;
@@ -197,22 +199,25 @@ async function handleFallbackPersistence(opts: {
     subTask.metadata.fallbackReason = "LLM 未调用 write 工具，系统自动兜底落盘";
 
     // 发送兜底文件到用户频道
-    const sendResult = await sendFallbackFile({
-      filePath: fallbackFile,
-      caption: subTask.summary
-        ? `📝 ${subTask.summary}（系统自动保存）`
-        : `📝 子任务输出（系统自动保存）`,
-      queued,
-    });
-    if (!sendResult.ok) {
-      console.warn(
-        `[followup-runner] ⚠️ 兜底文件发送失败 (${sendResult.method}): ${sendResult.error}`,
-      );
+    // 🔧 问题 JJ：如果 skipSend=true，跳过发送（等质检通过后再发）
+    if (!skipSend) {
+      const sendResult = await sendFallbackFile({
+        filePath: fallbackFile,
+        caption: subTask.summary
+          ? `📝 ${subTask.summary}（系统自动保存）`
+          : `📝 子任务输出（系统自动保存）`,
+        queued,
+      });
+      if (!sendResult.ok) {
+        console.warn(
+          `[followup-runner] ⚠️ 兜底文件发送失败 (${sendResult.method}): ${sendResult.error}`,
+        );
+      }
     }
 
     // Session 瘦身：截断 session 文件中的最后一条超长 assistant 消息
     try {
-      const sessionFilePath = queued.run.sessionFile;
+      const sessionFilePath = llmSessionFile ?? queued.run.sessionFile;
       if (sessionFilePath) {
         const rawSession = await fs.readFile(sessionFilePath, "utf-8");
         const lines = rawSession.split("\n");
@@ -423,6 +428,11 @@ export function createFollowupRunner(params: {
               console.log(
                 `[followup-runner] ✅ P2: 子任务 ${subTask.id} 已自动分解为 ${decomposed.length} 个子任务，跳过直接执行`,
               );
+              // 🔧 问题 BB 修复：分解后 return 前清理文件追踪
+              // onTaskStarting 中 beginTracking 已被调用，但分解后不会执行 LLM，
+              // 也不会走到 collectTrackedFiles。如果不清理，activeTrackingStack 中
+              // 会残留这个 taskId，后续任务的 trackFileWrite 可能误归到这里。
+              clearTracking(subTask.id);
               // 🔧 BUG 修复：分解产生的子任务必须创建 FollowupRun 入队
               // 修复前：只调用 finalizeWithFollowup 触发 drain，但队列中没有对应的 FollowupRun
               // 导致分解后的子任务永远不会被执行
@@ -450,6 +460,28 @@ export function createFollowupRunner(params: {
         await orchestrator.saveTaskTree(taskTree);
       }
       
+      // 🔧 Session 隔离：子任务使用独立的 session 文件，防止 LLM 上下文交叉污染
+      // 根因：所有子任务共享同一个 session 文件（JSONL 对话历史），导致：
+      // 1. 后续子任务的 LLM 上下文中包含前序子任务的完整对话
+      // 2. 重试时 LLM 看到所有章节的历史，输出混入其他子任务的内容
+      // 3. 质检正确检测到"内容归属错乱"，但根因是 session 污染
+      let llmSessionFile = queued.run.sessionFile;
+      if (queued.subTaskId && queued.isQueueTask) {
+        const isolatedSessionDir = path.join(
+          os.homedir(), ".clawdbot", "tasks", sessionId, "sessions"
+        );
+        await fs.mkdir(isolatedSessionDir, { recursive: true });
+        // 重试时使用新的 session 文件，避免锚定到上次失败的输出
+        // 迭代优化指令已通过 prompt 注入（previousOutput + lastFailureFindings），无需旧 session
+        const retryCount = subTask?.retryCount ?? 0;
+        const sessionSuffix = retryCount > 0 ? `_retry${retryCount}` : "";
+        llmSessionFile = path.join(isolatedSessionDir, `${queued.subTaskId}${sessionSuffix}.jsonl`);
+        console.log(
+          `[followup-runner] 🔒 Session 隔离: 子任务 ${queued.subTaskId} 使用独立 session` +
+          (retryCount > 0 ? ` (retry ${retryCount})` : ""),
+        );
+      }
+
       let autoCompactionCompleted = false;
       let runResult: Awaited<ReturnType<typeof runEmbeddedPiAgent>>;
       let fallbackProvider = queued.run.provider;
@@ -499,7 +531,7 @@ export function createFollowupRunner(params: {
               groupId: queued.run.groupId,
               groupChannel: queued.run.groupChannel,
               groupSpace: queued.run.groupSpace,
-              sessionFile: queued.run.sessionFile,
+              sessionFile: llmSessionFile,
               workspaceDir: queued.run.workspaceDir,
               config: queued.run.config,
               skillsSnapshot: queued.run.skillsSnapshot,
@@ -587,6 +619,18 @@ export function createFollowupRunner(params: {
         
         // 🔧 如果找到了子任务，更新状态为 "completed" 并保存输出
         if (taskTree && subTask) {
+          // 🔧 竞态保护：重新加载最新的任务树，防止并行 runner 的修改被覆盖
+          // 问题：多个 runner 并行执行时，各自持有不同时刻加载的 taskTree 快照。
+          // 后保存的 runner 会覆盖先保存的修改（如 output、producedFilePaths 丢失）。
+          const freshTree = await orchestrator.loadTaskTree(sessionId);
+          if (freshTree && queued.subTaskId) {
+            const freshSubTask = freshTree.subTasks.find(t => t.id === queued.subTaskId);
+            if (freshSubTask) {
+              taskTree = freshTree;
+              subTask = freshSubTask;
+            }
+          }
+
           const payloadArray = runResult.payloads ?? [];
           const outputText = payloadArray.map((p) => p.text).filter(Boolean).join("\n");
 
@@ -650,14 +694,48 @@ export function createFollowupRunner(params: {
               trackedFiles.map(f => f.fileName).join(", ")
             );
           }
+          // 🔧 FileTracker 断裂回退：从 toolMetas 中提取 write 工具的文件路径
+          // 场景：FileTracker 的 ALS 上下文丢失或 beginTracking 未被调用，
+          // 导致 collectTrackedFiles 返回 0，但 LLM 确实调用了 write 工具写了文件。
+          // toolMetas 的 meta 字段对于 write 工具包含文件路径（由 resolveWriteDetail 提取）。
+          // 注意：meta 经过 shortenHomeInString 处理，路径可能以 ~ 开头，需要展开。
+          if (trackedFiles.length === 0 && runResult.toolMetas) {
+            const writeMetas = runResult.toolMetas.filter(
+              (m) => m.toolName === "write" && typeof m.meta === "string" && m.meta.length > 0,
+            );
+            if (writeMetas.length > 0) {
+              if (!subTask.metadata) subTask.metadata = {};
+              const homedir = os.homedir();
+              const recoveredPaths = writeMetas.map((m) => {
+                let p = String(m.meta);
+                // shortenHomeInString 可能把 home 路径缩短为 ~
+                if (p.startsWith("~/") || p.startsWith("~\\")) {
+                  p = path.join(homedir, p.slice(2));
+                }
+                return p;
+              });
+              const recoveredNames = recoveredPaths.map((p) => path.basename(p));
+              subTask.metadata.producedFiles = recoveredNames;
+              subTask.metadata.producedFilePaths = recoveredPaths;
+              console.log(
+                `[followup-runner] 📂 FileTracker 回退：从 toolMetas 恢复 ${writeMetas.length} 个文件: ` +
+                recoveredNames.join(", "),
+              );
+            }
+          }
           
           // 🆕 V2 Phase 4: 兜底落盘（委托提取的辅助函数）
+          // 🔧 问题 JJ 修复：兜底落盘仅保存文件，不立即发送给用户
+          // 原因：如果质检后决定 restart，用户会先收到不完整的文件，然后又收到重试后的文件。
+          // 发送逻辑移到质检通过后（由 postProcessSubTaskCompletion 的 sendSubTaskFiles 处理）。
           await handleFallbackPersistence({
             subTask,
             outputText,
             toolMetas: runResult.toolMetas ?? [],
             sessionId,
             queued,
+            skipSend: true, // 🔧 问题 JJ：不立即发送，等质检通过后再发
+            llmSessionFile, // 🔧 Session 隔离：传递隔离的 session 文件路径
           });
           
           // 🆕 V2 Phase 4: 统一后处理（onTaskCompleted 钩子替代散装逻辑）
@@ -709,7 +787,10 @@ export function createFollowupRunner(params: {
               if (queued.run.sessionKey) {
                 finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
               }
-              // 不 return — 继续处理后续逻辑（轮次检查等）
+              // 🔧 问题 N 修复：decompose 后必须 return，否则会继续执行到 sendFollowupPayloads
+              // 发送 LLM 的原始不完整回复给用户，造成混乱。
+              // 轮次完成检查由 onTaskCompleted 内部处理（decompose 分支已跳过）。
+              return;
             }
 
             if (postResult.markedFailed) {
@@ -808,6 +889,15 @@ export function createFollowupRunner(params: {
         
         // 🆕 V2 Phase 4: 委托 onTaskFailed 钩子集中处理重试/级联/停止
         if (taskTree && subTask) {
+          // 🔧 竞态保护：错误路径也需要重新加载最新的任务树
+          const freshTreeOnErr = await orchestrator.loadTaskTree(sessionId);
+          if (freshTreeOnErr && queued.subTaskId) {
+            const freshSubTaskOnErr = freshTreeOnErr.subTasks.find(t => t.id === queued.subTaskId);
+            if (freshSubTaskOnErr) {
+              taskTree = freshTreeOnErr;
+              subTask = freshSubTaskOnErr;
+            }
+          }
           clearTracking(subTask.id);
           const failDecision = await orchestrator.onTaskFailed(taskTree, subTask, err);
 

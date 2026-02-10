@@ -605,6 +605,22 @@ export interface SubTaskMetadata {
 
   /** 上一次质检失败的原因（restart 时保存，用于下次重试时告知 LLM 避免重复犯错） */
   lastFailureFindings?: string[];
+
+  // 🆕 续写子任务标识字段
+
+  /** 是否是续写子任务（由 decomposeFailedTask 创建） */
+  isContinuation?: boolean;
+
+  /** 续写的原始子任务 ID */
+  continuationOf?: string;
+
+  /** 续写部分编号（第 N 部分） */
+  continuationPart?: number;
+
+  // 🆕 restart 时保存的旧文件路径
+
+  /** 上一次执行产生的文件路径（restart 时保存，供参考） */
+  previousProducedFilePaths?: string[];
 }
 
 /**
@@ -693,6 +709,20 @@ export interface QualityReviewResult {
   
   /** 建议的修改（如果决策是调整） */
   modifications?: TaskTreeChange[];
+
+  /**
+   * 🆕 问题 Z 修复：失败类型分类（decision 为 restart/overthrow 时由质检 LLM 填写）
+   * 
+   * 系统根据 failureType 选择最优重试策略：
+   * - word_count: 字数不达标 → 重试 1 次后转 decompose（拆分积累）
+   * - content_confusion: 内容混乱/混入其他章节 → 不重试，直接 decompose 或 fail
+   * - quality: 内容质量差/逻辑不通 → 正常 restart（换 prompt 措辞）
+   * - style: 风格偏差/语气不当 → restart + 注入风格约束
+   * - repetition: 重复内容 → restart + 注入"避免重复"指令
+   * - off_topic: 跑题/偏离任务要求 → restart
+   * - other: 其他/无法分类 → 正常 restart
+   */
+  failureType?: "word_count" | "content_confusion" | "quality" | "style" | "repetition" | "off_topic" | "other";
 }
 
 /**
@@ -977,8 +1007,8 @@ export interface RoundCompletedResult {
  * - discard_round: 当前轮次被 overthrow，级联丢弃
  */
 export type DrainScheduleResult =
-  | { action: "execute"; tasks: SubTask[]; remainingPending: number }
-  | { action: "wait"; reason: string }
+  | { action: "execute"; tasks: SubTask[]; remainingPending: number; treeModified?: boolean }
+  | { action: "wait"; reason: string; treeModified?: boolean }
   | { action: "round_done"; reason: string; roundId?: string }
   | { action: "discard_all"; reason: string }
   | { action: "discard_round"; reason: string; roundId: string; treeModified?: boolean };

@@ -235,7 +235,7 @@ ${prompts.jsonFormatInstruction}
     {
       "summary": "子任务简短描述",
       "prompt": "子任务详细描述",
-      "dependencies": ["依赖的任务 ID"],
+      "dependencies": ["${subTask.id}-1"],
       "canDecompose": true,
       "metadata": {
         "complexity": "low" | "medium" | "high",
@@ -246,6 +246,8 @@ ${prompts.jsonFormatInstruction}
   ]
 }
 \`\`\`
+
+⚠️ 依赖 ID 格式：子任务 ID 为 \`${subTask.id}-N\`（N 从 1 开始），dependencies 中必须使用连字符 \`-\` 而非下划线 \`_\`。例如第 2 个子任务依赖第 1 个：\`"dependencies": ["${subTask.id}-1"]\`
 
 ${prompts.jsonOnlyReminder}`;
   }
@@ -300,7 +302,7 @@ ${prompts.jsonFormatInstruction}
     {
       "summary": "子任务简短描述",
       "prompt": "子任务详细描述",
-      "dependencies": ["依赖的任务 ID"],
+      "dependencies": ["${subTask.id}-1"],
       "canDecompose": true,
       "metadata": {
         "complexity": "low" | "medium" | "high",
@@ -311,6 +313,8 @@ ${prompts.jsonFormatInstruction}
   ]
 }
 \`\`\`
+
+⚠️ 依赖 ID 格式：子任务 ID 为 \`${subTask.id}-N\`（N 从 1 开始），dependencies 中必须使用连字符 \`-\` 而非下划线 \`_\`。例如第 2 个子任务依赖第 1 个：\`"dependencies": ["${subTask.id}-1"]\`
 
 ${prompts.jsonOnlyReminder}`;
   }
@@ -525,6 +529,10 @@ ${prompts.jsonOnlyReminder}`;
         
         return subTask;
       });
+
+      // 🔧 P9 修复：规范化 LLM 返回的 dependencies，防止 ID 格式不匹配导致死锁
+      // LLM 可能返回下划线（parentId_1）、纯索引（1）等格式，但实际 ID 使用连字符（parentId-1）
+      this.normalizeDependencyIds(subTasks, parentTask);
       
       return subTasks;
     } catch (error) {
@@ -575,6 +583,67 @@ ${prompts.jsonOnlyReminder}`;
         priority: "medium",
         estimatedDuration: 300000
       };
+    }
+  }
+
+  /**
+   * 🔧 P9 修复：规范化子任务的依赖 ID
+   * 
+   * LLM 在 dependencies 中可能返回多种格式的 ID 引用：
+   * - 下划线格式：parentId_1（应为 parentId-1）
+   * - 纯索引："1"（应为 parentId-1）
+   * - 正确格式：parentId-1
+   * 
+   * 本方法将所有格式统一映射为实际生成的子任务 ID。
+   */
+  private normalizeDependencyIds(subTasks: SubTask[], parentTask: SubTask): void {
+    // 构建多格式 → 实际 ID 的映射表
+    const idMap = new Map<string, string>();
+    for (let i = 0; i < subTasks.length; i++) {
+      const actualId = subTasks[i].id; // parentId-{index+1}
+      const idx = i + 1;
+      // 下划线格式：parentId_1
+      idMap.set(`${parentTask.id}_${idx}`, actualId);
+      // 纯索引："1"
+      idMap.set(String(idx), actualId);
+      // 已正确的格式（不变）
+      idMap.set(actualId, actualId);
+    }
+
+    let fixedCount = 0;
+    let droppedCount = 0;
+    for (const task of subTasks) {
+      if (!task.dependencies || task.dependencies.length === 0) continue;
+      const normalized: string[] = [];
+      for (const depId of task.dependencies) {
+        const mapped = idMap.get(depId);
+        if (mapped) {
+          if (mapped !== depId) fixedCount++;
+          // 防止自依赖
+          if (mapped !== task.id) {
+            normalized.push(mapped);
+          }
+        } else {
+          // 未知格式：尝试将下划线替换为连字符后再匹配
+          const hyphenized = depId.replace(/_/g, "-");
+          const fallback = idMap.get(hyphenized);
+          if (fallback && fallback !== task.id) {
+            fixedCount++;
+            normalized.push(fallback);
+          } else {
+            droppedCount++;
+            console.warn(
+              `[LLMTaskDecomposer] ⚠️ P9: 无法解析依赖 ID "${depId}"（任务 ${task.id}），已丢弃`,
+            );
+          }
+        }
+      }
+      task.dependencies = normalized;
+    }
+    if (fixedCount > 0 || droppedCount > 0) {
+      console.log(
+        `[LLMTaskDecomposer] 🔧 P9: 依赖 ID 规范化完成：修正 ${fixedCount} 个，丢弃 ${droppedCount} 个`,
+      );
     }
   }
 

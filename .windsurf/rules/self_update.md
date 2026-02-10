@@ -11,6 +11,7 @@ trigger: always_on
 - `.windsurf/rules/self_update.md`
 - `.windsurf/rules/work_flow.md`
 - `.windsurf/rules/work_style.md`
+- `.windsurf/rules/lina-soul.md`
 
 因此：
 - 任何“需要让 IDE 立刻生效”的规则升级，必须写入 `.windsurf/rules/*`。

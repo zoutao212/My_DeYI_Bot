@@ -92,25 +92,40 @@ export function buildSiblingContext(
   );
   if (completed.length === 0) return "";
 
-  // 🔧 问题 A 修复：智能过滤 — 续写子任务只注入直接依赖的前序任务，避免 prompt 膨胀
-  // 非续写场景保持原有行为（注入所有已完成兄弟的摘要）
+  // 🔧 问题 U 修复：章节隔离 — 非续写的独立章节任务不注入其他章节的内容
+  // 根因：LLM 看到其他章节的摘要后，会把它们混入当前章节，导致内容混乱。
+  // 这是第一章被 restart 7 次的根本原因——每次都把第三章/第四章内容混入。
+  // 策略：
+  //   - 续写子任务：只注入直接依赖的前序任务（保持连贯性）
+  //   - 独立章节任务（无依赖）：不注入任何兄弟上下文（章节隔离）
+  //   - 有依赖的非续写任务：只注入依赖任务的摘要
   let relevantSiblings = completed;
   const currentTask = currentTaskId
     ? completedSiblings.find(t => t.id === currentTaskId)
     : undefined;
-  const isContinuationTask = currentTask?.summary?.includes("续写") ?? false;
+  const isContinuationTask = (currentTask as any)?.metadata?.isContinuation
+    ?? currentTask?.summary?.includes("续写")
+    ?? false;
 
   if (isContinuationTask && currentTask?.dependencies && currentTask.dependencies.length > 0) {
     // 续写子任务：只注入直接依赖的任务（前一个续写子任务或原始子任务）
     const depIds = new Set(currentTask.dependencies);
     relevantSiblings = completed.filter(t => t.id && depIds.has(t.id));
-    // 如果依赖的任务没有完成（不在 completed 中），回退到最后一个已完成的续写兄弟
     if (relevantSiblings.length === 0) {
       const continuationSiblings = completed.filter(t => t.summary?.includes("续写"));
       if (continuationSiblings.length > 0) {
         relevantSiblings = [continuationSiblings[continuationSiblings.length - 1]];
       }
     }
+  } else if (currentTask?.dependencies && currentTask.dependencies.length > 0) {
+    // 有依赖的非续写任务：只注入依赖任务的摘要
+    const depIds = new Set(currentTask.dependencies);
+    relevantSiblings = completed.filter(t => t.id && depIds.has(t.id));
+  } else {
+    // 🔧 问题 U 核心修复：独立章节任务（无依赖）→ 不注入任何兄弟上下文
+    // 原因：独立章节之间不需要上下文共享，注入反而会导致 LLM 混淆内容。
+    // 例如：第一章"废体觉醒"不需要看到第二章"宗门试炼"的内容。
+    relevantSiblings = [];
   }
 
   // 🔧 限制总注入量：最多注入 5 个兄弟任务的上下文，避免 prompt 过长
@@ -121,8 +136,9 @@ export function buildSiblingContext(
   }
 
   const lines = relevantSiblings.map((t) => {
-    // 🆕 A3: 续写子任务需要更多上下文（检测"续写"关键词）
-    const isContinuation = t.summary?.includes("续写") ?? false;
+    // 🆕 A3: 续写子任务需要更多上下文
+    // 🔧 问题 Q 修复：优先用 metadata.isContinuation 检测，回退到字符串匹配
+    const isContinuation = (t as any)?.metadata?.isContinuation ?? t.summary?.includes("续写") ?? false;
     // 🔧 修复：续写场景大幅增加上下文到 2000 字符
     const effectiveMaxLen = isContinuation ? 2000 : maxSnippetLen;
 
@@ -134,6 +150,7 @@ export function buildSiblingContext(
     if (producedPaths && producedPaths.length > 0) {
       try {
         // 同步读取文件内容（buildSiblingContext 是同步函数，使用 readFileSync）
+        // 🔧 问题 HH 修复：捕获单个文件的读取错误，避免一个文件失败导致整个上下文丢失
         const fs = require("node:fs");
         const fileContents: string[] = [];
         for (const filePath of producedPaths) {
@@ -143,7 +160,7 @@ export function buildSiblingContext(
               fileContents.push(content);
             }
           } catch {
-            // 文件不存在或无法读取，跳过
+            // 文件不存在、正在被写入、或无法读取，跳过
           }
         }
         if (fileContents.length > 0) {
