@@ -44,17 +44,32 @@ export async function loadChatHistory(state: ChatState) {
   }
 }
 
-export async function sendChatMessage(state: ChatState, message: string): Promise<boolean> {
+export type ChatAttachment = {
+  fileName: string;
+  mimeType: string;
+  content: string; // base64 or text
+};
+
+export async function sendChatMessage(
+  state: ChatState,
+  message: string,
+  attachments?: ChatAttachment[],
+): Promise<boolean> {
   if (!state.client || !state.connected) return false;
   const msg = message.trim();
-  if (!msg) return false;
+  if (!msg && (!attachments || attachments.length === 0)) return false;
 
   const now = Date.now();
+  const displayText =
+    attachments && attachments.length > 0
+      ? `${msg || ""}${msg ? "\n" : ""}📎 ${attachments.map((a) => a.fileName).join(", ")}`
+      : msg;
+
   state.chatMessages = [
     ...state.chatMessages,
     {
       role: "user",
-      content: [{ type: "text", text: msg }],
+      content: [{ type: "text", text: displayText }],
       timestamp: now,
     },
   ];
@@ -66,13 +81,22 @@ export async function sendChatMessage(state: ChatState, message: string): Promis
   state.chatStream = "";
   state.chatStreamStartedAt = now;
   try {
-    await state.client.request("chat.send", {
+    const payload: Record<string, unknown> = {
       sessionKey: state.sessionKey,
-      message: msg,
+      message: msg || "(see attached file)",
       deliver: false,
       idempotencyKey: runId,
       promptLanguage: state.settings.systemPromptLanguage,
-    });
+    };
+    if (attachments && attachments.length > 0) {
+      payload.attachments = attachments.map((a) => ({
+        type: "file",
+        mimeType: a.mimeType,
+        fileName: a.fileName,
+        content: a.content,
+      }));
+    }
+    await state.client.request("chat.send", payload);
     return true;
   } catch (err) {
     const error = String(err);

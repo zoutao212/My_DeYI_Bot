@@ -312,8 +312,18 @@ export class Orchestrator {
 
     // 如果决策是 restart 或 overthrow，跳过后续处理
     if (result.needsRequeue || result.markedFailed) {
+      // 🔧 P3 修复：overthrow/failed 时更新 failedTasks 计数
+      if (result.markedFailed && taskTree.metadata) {
+        taskTree.metadata.failedTasks = taskTree.subTasks.filter(t => t.status === "failed").length;
+      }
       await this.taskTreeManager.save(taskTree);
       return result;
+    }
+
+    // 🔧 P3 修复：任务完成时更新 completedTasks 计数
+    if (taskTree.metadata) {
+      taskTree.metadata.completedTasks = taskTree.subTasks.filter(t => t.status === "completed").length;
+      taskTree.metadata.failedTasks = taskTree.subTasks.filter(t => t.status === "failed").length;
     }
 
     // ── 2. 验证文件产出（针对写作任务） ──
@@ -490,6 +500,11 @@ export class Orchestrator {
     }
 
     taskTree.subTasks.push(subTask);
+
+    // 🔧 P3 修复：维护 metadata 计数器
+    if (taskTree.metadata) {
+      taskTree.metadata.totalTasks = taskTree.subTasks.length;
+    }
 
     // 🔧 不变量守卫：tree 状态与新子任务的关系
     // - completed → active：新轮次开始，正常重置
@@ -726,12 +741,36 @@ export class Orchestrator {
     if (subTask.decomposed) return false;
     const maxDepth = taskTree.maxDepth ?? 3;
     if ((subTask.depth ?? 0) >= maxDepth) return false;
-    // 复杂度启发式：prompt 超过 500 字符 → 认为值得分解
-    const COMPLEXITY_THRESHOLD = 500;
-    const shouldDecompose = subTask.prompt.length > COMPLEXITY_THRESHOLD;
+    
+    // 🔧 多维度启发式判断（替代单一的 prompt 长度阈值）
+    const prompt = subTask.prompt;
+    const promptLen = prompt.length;
+    
+    // 维度 1：prompt 长度（基础信号）
+    const isLongPrompt = promptLen > 800;
+    
+    // 维度 2：量化指标检测（字数要求 > 5000 字的任务值得分解）
+    const wordCountMatch = prompt.match(/(\d{4,})\s*[字个]/);
+    const hasLargeWordCount = wordCountMatch ? parseInt(wordCountMatch[1], 10) >= 5000 : false;
+    
+    // 维度 3：多步骤信号（包含列表、编号、"步骤"等关键词）
+    const multiStepSignals = [
+      /(?:第[一二三四五六七八九十\d]+[章节步]|step\s*\d)/i,
+      /(?:\d+[\.\)]\s*\S)/,  // 编号列表
+      /(?:首先|其次|然后|最后|接着)/,
+      /(?:分别|依次|逐一)/,
+    ];
+    const hasMultiStepSignals = multiStepSignals.filter(p => p.test(prompt)).length >= 2;
+    
+    // 综合判断：至少满足 2 个维度
+    const score = (isLongPrompt ? 1 : 0) + (hasLargeWordCount ? 1 : 0) + (hasMultiStepSignals ? 1 : 0);
+    const shouldDecompose = score >= 1 && (isLongPrompt || hasLargeWordCount);
+    
     if (shouldDecompose) {
       console.log(
-        `[Orchestrator] 📊 P2: 子任务 ${subTask.id} prompt=${subTask.prompt.length} 字符, depth=${subTask.depth ?? 0}/${maxDepth} → 推荐自动分解`,
+        `[Orchestrator] 📊 P2: 子任务 ${subTask.id} prompt=${promptLen} 字符, ` +
+        `depth=${subTask.depth ?? 0}/${maxDepth}, ` +
+        `signals=[long=${isLongPrompt}, wordCount=${hasLargeWordCount}, multiStep=${hasMultiStepSignals}] → 推荐自动分解`,
       );
     }
     return shouldDecompose;
@@ -895,13 +934,14 @@ export class Orchestrator {
     );
     if (roundTasks.length === 0) return false;
     const allDone = roundTasks.every(
-      (t) => t.status === "completed" || t.status === "failed",
+      (t) => t.status === "completed" || t.status === "failed" || t.status === "skipped",
     );
     if (allDone) {
       console.log(
         `[Orchestrator] 🏁 Round ${rootTaskId} completed: ${roundTasks.length} tasks (` +
         `${roundTasks.filter((t) => t.status === "completed").length} ok, ` +
-        `${roundTasks.filter((t) => t.status === "failed").length} failed)`,
+        `${roundTasks.filter((t) => t.status === "failed").length} failed, ` +
+        `${roundTasks.filter((t) => t.status === "skipped").length} skipped)`,
       );
     }
     return allDone;
@@ -1256,11 +1296,17 @@ export class Orchestrator {
           continue;
         }
 
-        // 所有子任务已完成，直接标记根任务为 completed（系统合并路径处理实际输出）
-        subTask.status = "completed";
+        // 所有子任务已完成，标记根任务为 skipped（系统合并路径处理实际输出）
+        subTask.status = "skipped";
         subTask.completedAt = Date.now();
         subTask.output = "[SystemMerge] 合并输出由 onRoundCompleted 系统路径处理";
-        console.log(`[Orchestrator] � P8: Root summary task ${subTask.id} 跳过 LLM，直接标记 completed（系统合并路径处理）`);
+        
+        // 🔧 P3+P4: 更新 metadata 计数器
+        if (taskTree.metadata) {
+          taskTree.metadata.completedTasks = taskTree.subTasks.filter(t => t.status === "completed").length;
+        }
+        
+        console.log(`[Orchestrator] 🔧 P8: Root summary task ${subTask.id} 跳过 LLM，标记 skipped（系统合并路径处理）`);
         continue; // 不加入 executableTasks
       }
 
@@ -2269,31 +2315,60 @@ ${childOutputs.join("\n\n---\n\n")}
     subTask.error = message;
     await this.taskTreeManager.save(taskTree);
 
-    // 3. 级联检查：同 Round 是否需要级联 skip
+    // 3. 级联检查：只跳过依赖失败任务的下游任务，无依赖的兄弟任务继续执行
     const roundId = subTask.rootTaskId;
     if (roundId) {
       const round = this.findRound(taskTree, roundId);
       if (round) {
         round.hasOverthrow = true;
-        // 级联跳过同 Round 所有 pending 子任务
+        // 🔧 优化：只级联跳过直接或间接依赖失败任务的子任务
+        const failedId = subTask.id;
         let cascadedCount = 0;
+        
+        // 收集所有需要级联跳过的任务 ID（递归查找依赖链）
+        const toCascade = new Set<string>();
+        const findDependents = (targetId: string) => {
+          for (const t of taskTree.subTasks) {
+            if (t.rootTaskId === roundId && t.status === "pending" && !toCascade.has(t.id)) {
+              if (t.dependencies?.includes(targetId) || t.parentId === targetId) {
+                toCascade.add(t.id);
+                findDependents(t.id); // 递归查找下游
+              }
+            }
+          }
+        };
+        findDependents(failedId);
+        
         for (const t of taskTree.subTasks) {
-          if (t.rootTaskId === roundId && t.status === "pending") {
+          if (toCascade.has(t.id)) {
             t.status = "skipped" as SubTask["status"];
-            t.error = `级联跳过：兄弟任务 ${subTask.id} 失败`;
+            t.error = `级联跳过：依赖的任务 ${failedId} 失败`;
             cascadedCount++;
           }
         }
-        this.updateRoundStatus(taskTree, roundId, "failed");
+        
+        // 检查是否还有可执行的任务（无依赖的兄弟任务可以继续）
+        const remainingPending = taskTree.subTasks.filter(
+          t => t.rootTaskId === roundId && t.status === "pending",
+        );
+        
+        if (remainingPending.length === 0) {
+          // 所有任务都完成/失败/跳过了，标记 Round 失败
+          this.updateRoundStatus(taskTree, roundId, "failed");
+        }
+        // 否则不标记 Round 失败，让剩余任务继续执行
+        
         await this.taskTreeManager.save(taskTree);
 
         if (cascadedCount > 0) {
           console.log(
-            `[Orchestrator] ⚡ onTaskFailed: 级联跳过 ${cascadedCount} 个 pending 子任务 (Round ${roundId})`,
+            `[Orchestrator] ⚡ onTaskFailed: 级联跳过 ${cascadedCount} 个依赖任务 (Round ${roundId})` +
+            (remainingPending.length > 0 ? `，${remainingPending.length} 个无依赖任务继续执行` : ""),
           );
           return {
             action: "cascade_fail",
-            reason: `任务 ${subTask.id} 失败，级联跳过 ${cascadedCount} 个同轮次任务`,
+            reason: `任务 ${subTask.id} 失败，级联跳过 ${cascadedCount} 个依赖任务` +
+              (remainingPending.length > 0 ? `，${remainingPending.length} 个无依赖任务继续执行` : ""),
             needsRequeue: false,
             cascadeSkip: true,
           };

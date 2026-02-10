@@ -308,3 +308,45 @@
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+
+.chat-file-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.chat-file-card__preview-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 150ms ease-out, background 150ms ease-out;
+  flex-shrink: 0;
+}
+
+.chat-file-card__preview-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.chat-file-card__preview-btn:active {
+  opacity: 0.7;
+}
+
+.chat-file-card__preview-btn svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.5px;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}

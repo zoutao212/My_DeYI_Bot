@@ -8,9 +8,9 @@ export const TASK_DECOMPOSITION_PROMPTS_EN: TaskDecompositionPromptsL10n = {
   // Task Decomposition Prompts
   // ========================================
   
-  decompositionExpertRole: "You are a task decomposition expert.",
+  decompositionExpertRole: "You are a senior task decomposition expert skilled at breaking complex tasks into well-structured, independently executable subtasks.",
   
-  decompositionInstruction: "Please decompose the following task into 2-8 executable subtasks.",
+  decompositionInstruction: "Please decompose the following task into 2-8 executable subtasks. Consider dependencies between tasks, parallel execution opportunities, and quantitative output requirements for each subtask.",
   
   rootTaskLabel: "Root Task",
   
@@ -26,10 +26,13 @@ export const TASK_DECOMPOSITION_PROMPTS_EN: TaskDecompositionPromptsL10n = {
   
   decompositionRequirements: [
     "Number of subtasks: 2-8",
-    "Each subtask should be independently executable",
-    "Subtasks should cover all requirements of the current task",
-    "Subtasks can have dependencies between them",
+    "Each subtask should be independently executable, minimize dependencies to enable parallel execution",
+    "Subtasks should cover all requirements of the current task without missing any key steps",
+    "Subtasks can have dependencies (via dependencies field), but independent tasks should be parallelizable",
     "Subtask granularity should be moderate (not too fine-grained or too coarse)",
+    "If the original task has word count/length/quantity requirements, each subtask prompt must explicitly allocate specific quantitative targets (e.g., this chapter requires 3000+ words)",
+    "Each subtask prompt should be detailed enough, including: goal, specific requirements, quantitative metrics, output format",
+    "For writing tasks: each subtask prompt must include explicit word count requirements, and the sum of all subtask word counts should be >= total requirement",
   ],
   
   jsonFormatInstruction: "Please return the decomposition result in the following JSON format:",
@@ -140,42 +143,46 @@ export const TASK_DECOMPOSITION_PROMPTS_EN: TaskDecompositionPromptsL10n = {
   
   // Decomposition Review
   decompositionReview: {
-    expertRole: "You are a task quality review expert.",
-    instruction: "Please evaluate the quality of the following task decomposition.",
+    expertRole: "You are a strict task quality review expert skilled in evaluating decomposition plans.",
+    instruction: "Please rigorously evaluate the quality of the following task decomposition. Pay special attention to: whether quantitative metrics are properly allocated to subtasks, whether there are parallel execution opportunities, and whether granularity is appropriate.",
     aspectsTitle: "Please evaluate the task decomposition quality from the following aspects:",
     aspects: {
-      coverage: "**Coverage**: Do subtasks completely cover all requirements of the root task?",
-      independence: "**Independence**: Can each subtask be executed independently?",
+      coverage: "**Coverage**: Do subtasks completely cover all requirements of the root task? Are there missing key steps?",
+      independence: "**Independence**: Can each subtask be executed independently? Can tasks without dependencies run in parallel?",
       granularity: "**Granularity**: Is the subtask granularity reasonable? Is it too fine-grained or too coarse?",
-      dependencies: "**Dependencies**: Are dependencies between subtasks reasonable?",
+      dependencies: "**Dependencies**: Are dependencies between subtasks reasonable? Are there unnecessary serial dependencies blocking parallel execution?",
       completeness: "**Completeness**: Are there any missing important steps?",
       redundancy: "**Redundancy**: Are there duplicate or unnecessary subtasks?",
+      quantitative: "**Quantitative Allocation**: If the root task has word count/quantity requirements, are they properly allocated to subtasks? Does the sum of all subtask metrics >= total requirement?",
     },
   },
   
   // Completion Review
   completionReview: {
-    expertRole: "You are a task quality review expert.",
-    instruction: "Please evaluate the completion quality of the following subtask.",
+    expertRole: "You are a strict task quality review expert skilled in multi-dimensional deep review.",
+    instruction: "Please rigorously evaluate the following subtask completion quality from multiple dimensions. Important: if the task has explicit word count/length requirements, you must verify whether the actual output meets them.",
     aspectsTitle: "Please evaluate the subtask completion quality from the following aspects:",
     aspects: {
-      completeness: "**Completeness**: Are all requirements in the task description completed?",
-      correctness: "**Correctness**: Is the output correct? Are there any errors?",
-      integrity: "**Integrity**: Is there any missing content?",
-      quality: "**Quality**: How is the output quality? Does it need improvement?",
+      completeness: "**Completeness**: Are all requirements in the task description completed? Are there any missing sub-items?",
+      correctness: "**Correctness**: Is the output accurate? Is the logic consistent? Are there factual errors?",
+      integrity: "**Integrity**: Is the content complete? Is the structure complete (has beginning and ending)? Is there obvious truncation or rushed ending?",
+      quality: "**Quality**: How is the output quality? Does the writing/code quality meet expectations?",
+      quantitative: "**Quantitative Compliance**: If the task specified word count, length, quantity or other quantitative metrics, does the actual output reach at least 70% of the requirement? Below 70% must be judged as restart. Please estimate actual word count and compare with the requirement.",
+      coherence: "**Coherence**: Is the content coherent throughout? Is the style consistent? Are there abrupt jumps or contradictions?",
     },
   },
   
   // Overall Review
   overallReview: {
-    expertRole: "You are a task quality review expert.",
-    instruction: "Please evaluate the overall completion quality of the following task.",
+    expertRole: "You are a strict task quality review expert skilled in holistic assessment.",
+    instruction: "Please rigorously evaluate the overall completion quality from a global perspective. Focus on: whether quantitative metrics are met, whether subtask outputs are coordinated, and whether there are obvious quality weaknesses.",
     aspectsTitle: "Please evaluate the overall completion quality from the following aspects:",
     aspects: {
-      goalAchievement: "**Goal Achievement**: Has the root task goal been achieved?",
-      completeness: "**Completeness**: Is there any missing important content?",
-      consistency: "**Consistency**: Are outputs of subtasks consistent? Are there any conflicts?",
-      quality: "**Quality**: How is the overall quality? Does it need improvement?",
+      goalAchievement: "**Goal Achievement**: Has the root task goal been achieved? Are quantitative metrics (word count, quantity, etc.) met?",
+      completeness: "**Completeness**: Is there any missing important content? Do all subtask outputs together form a complete deliverable?",
+      consistency: "**Consistency**: Are outputs of subtasks stylistically consistent? Are there contradictions or conflicts? Are terminology and naming consistent?",
+      quality: "**Quality**: How is the overall quality? Are there obvious quality weaknesses dragging down the overall level?",
+      coherence: "**Coherence**: Are transitions between parts natural? Are there abrupt breaks or repetitions?",
     },
   },
   

@@ -530,6 +530,36 @@ export function renderApp(state: AppViewState) {
               onClearRunEvents: () => state.clearRunEvents(),
               assistantName: state.assistantName,
               assistantAvatar: state.assistantAvatar,
+              // Attachment props
+              pendingAttachments: state.chatAttachments.map((a) => ({
+                fileName: a.fileName,
+                size: a.size,
+              })),
+              onFileDrop: (files: File[]) => {
+                for (const file of files) {
+                  if (file.size > 5_000_000) {
+                    state.lastError = `文件 ${file.name} 太大（${(file.size / 1024 / 1024).toFixed(1)}MB），最大 5MB`;
+                    continue;
+                  }
+                  const reader = new FileReader();
+                  reader.onload = () => {
+                    const base64 = (reader.result as string).split(",")[1] ?? "";
+                    state.chatAttachments = [
+                      ...state.chatAttachments,
+                      {
+                        fileName: file.name,
+                        size: file.size,
+                        content: base64,
+                        mimeType: file.type || "application/octet-stream",
+                      },
+                    ];
+                  };
+                  reader.readAsDataURL(file);
+                }
+              },
+              onRemoveAttachment: (index: number) => {
+                state.chatAttachments = state.chatAttachments.filter((_, i) => i !== index);
+              },
               });
             })()
           : nothing}

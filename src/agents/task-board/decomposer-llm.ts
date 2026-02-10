@@ -19,6 +19,7 @@ import type {
   SubTask as RecursiveSubTask,
   TaskTree
 } from "../intelligent-task-decomposition/types.js";
+import { extractJsonFromResponse } from "../intelligent-task-decomposition/json-extractor.js";
 
 /**
  * LLM 配置
@@ -319,12 +320,8 @@ ${feedback}
   private parseLLMResponse(response: string): SubTask[] {
     try {
       // 提取 JSON 内容（可能被包裹在代码块中）
-      const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/) || 
-                       response.match(/```\s*([\s\S]*?)\s*```/) ||
-                       [null, response];
-      
-      const jsonStr = jsonMatch[1] || response;
-      const parsed = JSON.parse(jsonStr.trim());
+      const jsonStr = extractJsonFromResponse(response);
+      const parsed = JSON.parse(jsonStr);
       
       if (!Array.isArray(parsed)) {
         throw new Error("LLM 响应不是数组");
@@ -727,12 +724,8 @@ ${subTasksStr}
   private parseAdjustmentResponse(response: string): TaskTreeChange[] {
     try {
       // 提取 JSON 内容
-      const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/) || 
-                       response.match(/```\s*([\s\S]*?)\s*```/) ||
-                       [null, response];
-      
-      const jsonStr = jsonMatch[1] || response;
-      const parsed = JSON.parse(jsonStr.trim());
+      const jsonStr = extractJsonFromResponse(response);
+      const parsed = JSON.parse(jsonStr);
       
       if (!Array.isArray(parsed)) {
         throw new Error("LLM 响应不是数组");

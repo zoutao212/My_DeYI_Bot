@@ -16,6 +16,7 @@
  */
 
 import path from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 /**
  * 单个文件的追踪记录
@@ -43,8 +44,22 @@ export interface TrackedFile {
  */
 const FILE_REGISTRY = new Map<string, TrackedFile[]>();
 
-/** 当前活跃的追踪任务 ID */
-let currentTrackingTaskId: string | null = null;
+/** 当前活跃的追踪任务 ID 栈（支持并行执行） */
+const activeTrackingStack: string[] = [];
+
+/**
+ * 🔧 并行安全：AsyncLocalStorage 隔离每个任务的追踪上下文
+ * 并行执行时，每个任务在自己的 async context 中运行，
+ * trackFileWrite 通过 ALS 获取正确的 taskId，不会串台。
+ */
+const trackingALS = new AsyncLocalStorage<string>();
+
+/**
+ * 获取当前追踪的任务 ID（优先 ALS，回退到栈顶）
+ */
+function resolveCurrentTaskId(): string | null {
+  return trackingALS.getStore() ?? activeTrackingStack[activeTrackingStack.length - 1] ?? null;
+}
 
 /**
  * 开始追踪某个子任务的文件产出
@@ -52,11 +67,12 @@ let currentTrackingTaskId: string | null = null;
  * @param taskId 子任务 ID
  */
 export function beginTracking(taskId: string): void {
-  currentTrackingTaskId = taskId;
+  // 🔧 并行安全：用栈替代单变量，支持多任务同时追踪
+  activeTrackingStack.push(taskId);
   if (!FILE_REGISTRY.has(taskId)) {
     FILE_REGISTRY.set(taskId, []);
   }
-  console.log(`[FileTracker] 🔍 开始追踪任务 ${taskId} 的文件产出`);
+  console.log(`[FileTracker] 🔍 开始追踪任务 ${taskId} 的文件产出 (active: ${activeTrackingStack.length})`);
 }
 
 /**
@@ -85,7 +101,7 @@ export function trackFileWrite(
     writeMode,
   };
 
-  const taskId = currentTrackingTaskId || "__unassociated__";
+  const taskId = resolveCurrentTaskId() || "__unassociated__";
   
   if (!FILE_REGISTRY.has(taskId)) {
     FILE_REGISTRY.set(taskId, []);
@@ -126,8 +142,10 @@ export function collectTrackedFiles(taskId: string): TrackedFile[] {
   FILE_REGISTRY.delete(taskId);
   FILE_REGISTRY.delete("__unassociated__");
   
-  if (currentTrackingTaskId === taskId) {
-    currentTrackingTaskId = null;
+  // 从栈中移除（并行安全：只移除匹配的第一个）
+  const stackIdx = activeTrackingStack.indexOf(taskId);
+  if (stackIdx >= 0) {
+    activeTrackingStack.splice(stackIdx, 1);
   }
   
   console.log(
@@ -142,8 +160,9 @@ export function collectTrackedFiles(taskId: string): TrackedFile[] {
  */
 export function clearTracking(taskId: string): void {
   FILE_REGISTRY.delete(taskId);
-  if (currentTrackingTaskId === taskId) {
-    currentTrackingTaskId = null;
+  const stackIdx = activeTrackingStack.indexOf(taskId);
+  if (stackIdx >= 0) {
+    activeTrackingStack.splice(stackIdx, 1);
   }
 }
 
@@ -151,7 +170,7 @@ export function clearTracking(taskId: string): void {
  * 获取当前追踪的任务 ID
  */
 export function getCurrentTrackingTaskId(): string | null {
-  return currentTrackingTaskId;
+  return resolveCurrentTaskId();
 }
 
 /**
@@ -165,4 +184,18 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * 🔧 并行安全：在 AsyncLocalStorage 上下文中执行回调
+ * 
+ * 并行执行多个任务时，每个任务应该用 runWithTracking 包裹，
+ * 确保 trackFileWrite 能正确关联到对应的 taskId。
+ * 
+ * @param taskId 子任务 ID
+ * @param fn 要执行的异步函数
+ * @returns fn 的返回值
+ */
+export async function runWithTracking<T>(taskId: string, fn: () => Promise<T>): Promise<T> {
+  return trackingALS.run(taskId, fn);
 }

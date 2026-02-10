@@ -9,6 +9,7 @@ import { isRoutableChannel } from "../route-reply.js";
 import { FOLLOWUP_QUEUES } from "./state.js";
 import type { FollowupRun } from "./types.js";
 import { findParallelGroups } from "../../../agents/intelligent-task-decomposition/dependency-analyzer.js";
+import { runWithTracking } from "../../../agents/intelligent-task-decomposition/file-tracker.js";
 import { getGlobalOrchestrator } from "../../../agents/tools/enqueue-task-tool.js";
 
 export function scheduleFollowupDrain(
@@ -133,9 +134,62 @@ export function scheduleFollowupDrain(
 
           const next = queue.items.shift();
           if (!next) { console.log(`[drain] ⚠️ queue task shift() returned undefined, breaking`); break; }
-          console.log(`[drain] ▶️ Running queue task individually: summary=${next.summaryLine || 'none'}, isQueueTask=${next.isQueueTask}, isRootTask=${next.isRootTask}, depth=${next.taskDepth}`);
-          await runFollowup(next);
-          console.log(`[drain] ✅ Queue task finished: summary=${next.summaryLine || 'none'}, remaining=${queue.items.length}`);
+
+          // 🔧 P2 修复：在串行执行前检测并行机会
+          // 将 next 放回队列头部，尝试并行执行
+          if (queue.items.length > 0 && queue.items.every((item) => item.isQueueTask || item.subTaskId)) {
+            queue.items.unshift(next); // 放回
+            try {
+              const orchestrator = getGlobalOrchestrator();
+              const sessionId = next.run?.sessionId;
+              const taskTree = sessionId ? await orchestrator.loadTaskTree(sessionId) : null;
+
+              if (taskTree && taskTree.subTasks.length > 0) {
+                const pendingTasks = taskTree.subTasks.filter(
+                  (t) => t.status === "pending" && t.rootTaskId === next.rootTaskId,
+                );
+                const groups = findParallelGroups(pendingTasks);
+
+                if (groups.length > 0 && groups[0].length > 1) {
+                  const parallelGroup = groups[0];
+                  const parallelItems: FollowupRun[] = [];
+
+                  for (const pgTask of parallelGroup) {
+                    const idx = queue.items.findIndex((item) => {
+                      if (item.subTaskId && pgTask.id) return item.subTaskId === pgTask.id;
+                      return item.prompt === pgTask.prompt;
+                    });
+                    if (idx >= 0) {
+                      parallelItems.push(queue.items.splice(idx, 1)[0]);
+                    }
+                  }
+
+                  if (parallelItems.length > 1) {
+                    console.log(`[drain] 🚀 Parallel execution: ${parallelItems.length} queue tasks`);
+                    await Promise.allSettled(parallelItems.map((item) =>
+                      runWithTracking(item.subTaskId ?? "unknown", () => runFollowup(item)),
+                    ));
+                    continue;
+                  } else {
+                    // 放回队列头部，回退到串行
+                    queue.items.unshift(...parallelItems);
+                  }
+                }
+              }
+            } catch {
+              // 并行分析失败，回退到串行
+            }
+            // 从队列头部重新取出（可能是原来的 next，也可能被并行消费了）
+            const serialNext = queue.items.shift();
+            if (!serialNext) { console.log(`[drain] ⚠️ queue task shift() returned undefined after parallel check, breaking`); break; }
+            console.log(`[drain] ▶️ Running queue task individually: summary=${serialNext.summaryLine || 'none'}, isQueueTask=${serialNext.isQueueTask}, isRootTask=${serialNext.isRootTask}, depth=${serialNext.taskDepth}`);
+            await runFollowup(serialNext);
+            console.log(`[drain] ✅ Queue task finished: summary=${serialNext.summaryLine || 'none'}, remaining=${queue.items.length}`);
+          } else {
+            console.log(`[drain] ▶️ Running queue task individually: summary=${next.summaryLine || 'none'}, isQueueTask=${next.isQueueTask}, isRootTask=${next.isRootTask}, depth=${next.taskDepth}`);
+            await runFollowup(next);
+            console.log(`[drain] ✅ Queue task finished: summary=${next.summaryLine || 'none'}, remaining=${queue.items.length}`);
+          }
           continue;
         }
 
@@ -269,7 +323,9 @@ export function scheduleFollowupDrain(
 
                 if (parallelItems.length > 1) {
                   console.log(`[drain] 🚀 Parallel execution: ${parallelItems.length} tasks`);
-                  await Promise.allSettled(parallelItems.map((item) => runFollowup(item)));
+                  await Promise.allSettled(parallelItems.map((item) =>
+                    runWithTracking(item.subTaskId ?? "unknown", () => runFollowup(item)),
+                  ));
                   continue;
                 } else {
                   // 放回队列头部

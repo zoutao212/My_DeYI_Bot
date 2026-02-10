@@ -431,6 +431,12 @@ export class FileManager {
     for (const subTask of taskTree.subTasks) {
       if (subTask.status !== "completed") continue;
       
+      // 🔧 P1 修复：跳过操作型/汇总型任务（它们不产生实际内容）
+      if (subTask.waitForChildren || subTask.metadata?.isSummaryTask || subTask.metadata?.isRootTask) {
+        console.log(`[FileManager] ⏭️ 跳过汇总/操作型任务: ${subTask.id} (${subTask.summary})`);
+        continue;
+      }
+      
       let found = false;
       
       // 策略 1：使用文件追踪器记录的完整路径（最精准）
@@ -510,23 +516,31 @@ export class FileManager {
       throw new Error("没有找到任何子任务的文件产出（已尝试：文件追踪 → artifacts → output.txt）");
     }
     
-    // 内容验证：检查是否有"摘要式"内容（疑似 Bug 2 残留）
-    const suspiciousCount = allFiles.filter(f => 
-      f.source === "output" && f.content.length < 500
-    ).length;
-    if (suspiciousCount > 0) {
-      console.warn(
-        `[FileManager] ⚠️ 发现 ${suspiciousCount} 个疑似摘要内容（< 500 字符），` +
-        `可能是 LLM 未使用 write 工具直接写入文件`
+    // 内容验证：过滤掉"摘要式"内容（疑似操作型任务的兜底输出）
+    const beforeFilter = allFiles.length;
+    const filteredFiles = allFiles.filter(f => {
+      if (f.source === "output" && f.content.length < 500) {
+        console.log(`[FileManager] 🗑️ 过滤疑似摘要内容: ${f.taskSummary} (${f.content.length} 字符)`);
+        return false;
+      }
+      return true;
+    });
+    const filteredCount = beforeFilter - filteredFiles.length;
+    if (filteredCount > 0) {
+      console.log(
+        `[FileManager] 🧹 已过滤 ${filteredCount} 个疑似摘要内容（< 500 字符）`
       );
     }
+    
+    // 使用过滤后的文件列表
+    const mergeFiles = filteredFiles.length > 0 ? filteredFiles : allFiles; // 如果全被过滤了，回退到原始列表
     
     // 合并内容（纯文本，不加 Markdown 标记，适合直接阅读）
     let mergedContent = "";
     
-    for (let i = 0; i < allFiles.length; i++) {
-      const file = allFiles[i];
-      if (allFiles.length > 1) {
+    for (let i = 0; i < mergeFiles.length; i++) {
+      const file = mergeFiles[i];
+      if (mergeFiles.length > 1) {
         mergedContent += `\n\n${"=".repeat(60)}\n`;
         mergedContent += `${file.taskSummary}\n`;
         mergedContent += `${"=".repeat(60)}\n\n`;
@@ -546,10 +560,10 @@ export class FileManager {
     
     console.log(`[FileManager] ✅ 合并完成：${mergedFilePath}`);
     console.log(
-      `[FileManager] 📦 合并了 ${allFiles.length} 个文件 ` +
-      `(tracked: ${allFiles.filter(f => f.source === "tracked").length}, ` +
-      `artifacts: ${allFiles.filter(f => f.source === "artifacts").length}, ` +
-      `output: ${allFiles.filter(f => f.source === "output").length})`
+      `[FileManager] 📦 合并了 ${mergeFiles.length} 个文件 ` +
+      `(tracked: ${mergeFiles.filter(f => f.source === "tracked").length}, ` +
+      `artifacts: ${mergeFiles.filter(f => f.source === "artifacts").length}, ` +
+      `output: ${mergeFiles.filter(f => f.source === "output").length})`
     );
     
     return mergedFilePath;

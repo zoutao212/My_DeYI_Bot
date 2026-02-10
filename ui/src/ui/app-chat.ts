@@ -1,4 +1,4 @@
-import { abortChatRun, loadChatHistory, sendChatMessage } from "./controllers/chat";
+import { abortChatRun, loadChatHistory, sendChatMessage, type ChatAttachment } from "./controllers/chat";
 import { loadSessions } from "./controllers/sessions";
 import { generateUUID } from "./uuid";
 import { resetToolStream } from "./app-tool-stream";
@@ -15,6 +15,7 @@ type ChatHost = {
   chatQueue: Array<{ id: string; text: string; createdAt: number }>;
   chatRunId: string | null;
   chatSending: boolean;
+  chatAttachments: Array<{ fileName: string; size: number; content: string; mimeType: string }>;
   sessionKey: string;
   basePath: string;
   hello: GatewayHelloOk | null;
@@ -98,8 +99,20 @@ async function sendChatMessageNow(
     }
     return false;
   }
+  // Collect and clear pending attachments before sending
+  const attachments: ChatAttachment[] | undefined =
+    host.chatAttachments.length > 0
+      ? host.chatAttachments.map((a) => ({
+          fileName: a.fileName,
+          mimeType: a.mimeType,
+          content: a.content,
+        }))
+      : undefined;
+  if (attachments) {
+    host.chatAttachments = [];
+  }
   resetToolStream(host as unknown as Parameters<typeof resetToolStream>[0]);
-  const ok = await sendChatMessage(host as unknown as ClawdbotApp, message);
+  const ok = await sendChatMessage(host as unknown as ClawdbotApp, message, attachments);
   if (!ok && opts?.previousDraft != null) {
     host.chatMessage = opts.previousDraft;
   }

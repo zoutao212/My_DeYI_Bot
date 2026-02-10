@@ -64,7 +64,7 @@ export function renderToolCardSidebar(
   // 检测 send_file 工具的文件卡片结果
   const fileCard = extractWebFileCard(card);
   if (fileCard) {
-    return renderFileCard(fileCard);
+    return renderFileCard(fileCard, onOpenSidebar);
   }
 
   const display = resolveToolDisplay({ name: card.name, args: card.args });
@@ -231,6 +231,15 @@ type WebFileCardData = {
   isText: boolean;
 };
 
+/**
+ * 检测消息是否包含 send_file 工具的 webFileCard 结果。
+ * 用于在 showThinking 关闭时仍然显示文件卡片。
+ */
+export function hasSendFileCard(message: unknown): boolean {
+  const cards = extractToolCards(message);
+  return cards.some((card) => extractWebFileCard(card) !== null);
+}
+
 function extractWebFileCard(card: ToolCard): WebFileCardData | null {
   if (card.kind !== "result") return null;
   if (card.name !== "send_file") return null;
@@ -281,53 +290,88 @@ function getFileTypeIcon(mimeType: string, isImage: boolean): string {
   return "📎";
 }
 
-function renderFileCard(fileCard: WebFileCardData) {
+function renderFileCard(fileCard: WebFileCardData, onOpenSidebar?: (content: string) => void) {
   const sizeText = formatFileSizeHuman(fileCard.fileSize);
   const typeIcon = getFileTypeIcon(fileCard.mimeType, fileCard.isImage);
   const ext = fileCard.fileName.includes(".")
     ? fileCard.fileName.split(".").pop()?.toUpperCase() ?? ""
     : "";
 
-  const handleDownload = async () => {
+  /** 通过 gateway WebSocket 获取文件内容 */
+  const fetchFileContent = async (): Promise<{ content: string; encoding?: string; mimeType: string; fileName: string } | null> => {
     try {
-      // 通过 gateway WebSocket 请求文件内容
       const app = (document.querySelector("clawdbot-app") as any);
-      const gw = app?.gw;
+      const gw = app?.client;
       if (!gw) {
-        console.error("[file-card] gateway not available");
-        return;
+        console.error("[file-card] gateway client not available");
+        return null;
       }
-      const result = await gw.request("chat.file.download", {
+      return await gw.request("chat.file.download", {
         filePath: fileCard.filePath,
       }) as { fileName: string; content: string; mimeType: string; encoding?: string };
-
-      if (!result?.content) return;
-
-      // 根据编码方式创建 Blob
-      let blob: Blob;
-      if (result.encoding === "base64") {
-        const binary = atob(result.content);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-          bytes[i] = binary.charCodeAt(i);
-        }
-        blob = new Blob([bytes], { type: result.mimeType });
-      } else {
-        blob = new Blob([result.content], { type: result.mimeType });
-      }
-
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = result.fileName || fileCard.fileName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
     } catch (err) {
-      console.error("[file-card] download failed:", err);
+      console.error("[file-card] fetch failed:", err);
+      return null;
     }
   };
+
+  const handleDownload = async () => {
+    const result = await fetchFileContent();
+    if (!result?.content) return;
+
+    let blob: Blob;
+    if (result.encoding === "base64") {
+      const binary = atob(result.content);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      blob = new Blob([bytes], { type: result.mimeType });
+    } else {
+      blob = new Blob([result.content], { type: result.mimeType });
+    }
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = result.fileName || fileCard.fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handlePreview = async () => {
+    if (!onOpenSidebar) return;
+    const result = await fetchFileContent();
+    if (!result?.content) return;
+
+    let text: string;
+    if (result.encoding === "base64") {
+      try {
+        text = decodeURIComponent(escape(atob(result.content)));
+      } catch {
+        text = atob(result.content);
+      }
+    } else {
+      text = result.content;
+    }
+
+    // 根据文件类型选择 markdown 格式
+    const langMap: Record<string, string> = {
+      json: "json", csv: "csv", xml: "xml", md: "markdown",
+    };
+    const fileExt = fileCard.fileName.split(".").pop()?.toLowerCase() ?? "";
+    const lang = langMap[fileExt] ?? "";
+
+    const sidebarContent = lang
+      ? `## 📄 ${fileCard.fileName}\n\n\`\`\`${lang}\n${text}\n\`\`\``
+      : `## 📄 ${fileCard.fileName}\n\n${text}`;
+
+    onOpenSidebar(sidebarContent);
+  };
+
+  const canPreview = fileCard.isText && onOpenSidebar;
 
   return html`
     <div class="chat-file-card">
@@ -342,15 +386,30 @@ function renderFileCard(fileCard: WebFileCardData) {
           ? html`<div class="chat-file-card__caption">${fileCard.caption}</div>`
           : nothing}
       </div>
-      <button
-        class="chat-file-card__download"
-        @click=${handleDownload}
-        title="下载文件"
-        aria-label="下载 ${fileCard.fileName}"
-      >
-        ${icons.fileText}
-        <span>下载</span>
-      </button>
+      <div class="chat-file-card__actions">
+        ${canPreview
+          ? html`
+              <button
+                class="chat-file-card__preview-btn"
+                @click=${handlePreview}
+                title="预览文件"
+                aria-label="预览 ${fileCard.fileName}"
+              >
+                ${icons.eye ?? "👁"}
+                <span>预览</span>
+              </button>
+            `
+          : nothing}
+        <button
+          class="chat-file-card__download"
+          @click=${handleDownload}
+          title="下载文件"
+          aria-label="下载 ${fileCard.fileName}"
+        >
+          ${icons.fileText}
+          <span>下载</span>
+        </button>
+      </div>
     </div>
   `;
 }

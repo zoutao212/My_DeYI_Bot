@@ -20,6 +20,7 @@ import type {
   SubTaskMetadata,
 } from "./types.js";
 import { getPrompts } from "./prompts-loader.js";
+import { extractJsonFromResponse } from "./json-extractor.js";
 import type { LLMCaller } from "./batch-executor.js";
 
 /**
@@ -485,12 +486,8 @@ ${prompts.jsonOnlyReminder}`;
   private parseDecompositionResponse(response: string, parentTask: SubTask): SubTask[] {
     try {
       // 尝试从 JSON 代码块中提取
-      const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/) || 
-                       response.match(/```\s*([\s\S]*?)\s*```/) ||
-                       [null, response];
-      
-      const jsonStr = jsonMatch[1] || response;
-      const parsed = JSON.parse(jsonStr.trim());
+      const jsonStr = extractJsonFromResponse(response);
+      const parsed = JSON.parse(jsonStr);
       
       if (!parsed.subTasks || !Array.isArray(parsed.subTasks)) {
         throw new Error("响应格式不正确：缺少 subTasks 数组");
@@ -542,12 +539,8 @@ ${prompts.jsonOnlyReminder}`;
   private parseAdjustmentResponse(response: string): TaskTreeChange[] {
     try {
       // 尝试从 JSON 代码块中提取
-      const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/) || 
-                       response.match(/```\s*([\s\S]*?)\s*```/) ||
-                       [null, response];
-      
-      const jsonStr = jsonMatch[1] || response;
-      const parsed = JSON.parse(jsonStr.trim());
+      const jsonStr = extractJsonFromResponse(response);
+      const parsed = JSON.parse(jsonStr);
       
       if (!parsed.changes || !Array.isArray(parsed.changes)) {
         throw new Error("响应格式不正确：缺少 changes 数组");
@@ -566,12 +559,8 @@ ${prompts.jsonOnlyReminder}`;
   private parseEstimationResponse(response: string): SubTaskMetadata {
     try {
       // 尝试从 JSON 代码块中提取
-      const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/) || 
-                       response.match(/```\s*([\s\S]*?)\s*```/) ||
-                       [null, response];
-      
-      const jsonStr = jsonMatch[1] || response;
-      const parsed = JSON.parse(jsonStr.trim());
+      const jsonStr = extractJsonFromResponse(response);
+      const parsed = JSON.parse(jsonStr);
       
       return {
         complexity: parsed.complexity || "medium",

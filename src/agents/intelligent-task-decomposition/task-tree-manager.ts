@@ -13,6 +13,11 @@ import type { TaskTree, SubTask, Checkpoint, ValidationResult } from "./types.js
  * 任务树管理器
  */
 export class TaskTreeManager {
+  /** 🔧 防抖：上次实际写入时间 */
+  private _lastWriteTime = new Map<string, number>();
+  /** 🔧 防抖：待执行的延迟写入 timer */
+  private _pendingSave = new Map<string, ReturnType<typeof setTimeout>>();
+
   /**
    * 获取任务树目录路径
    */
@@ -106,7 +111,11 @@ export class TaskTreeManager {
   }
 
   /**
-   * 保存任务树到磁盘（原子写入）
+   * 保存任务树到磁盘（原子写入 + 防抖）
+   * 
+   * 🔧 性能优化：短时间内多次 save 会合并为一次磁盘写入。
+   * 每个任务生命周期中 save 被调用 5-8 次，7 个子任务就是 35-56 次。
+   * 防抖将其压缩到实际需要的次数。
    */
   async save(taskTree: TaskTree): Promise<void> {
     const taskTreePath = this.getTaskTreePath(taskTree.id);
@@ -116,6 +125,44 @@ export class TaskTreeManager {
 
     // 更新时间戳
     taskTree.updatedAt = Date.now();
+
+    // 🔧 防抖：如果距离上次实际写入 < 500ms，延迟执行
+    const now = Date.now();
+    const DEBOUNCE_MS = 500;
+    const lastWrite = this._lastWriteTime.get(taskTree.id) ?? 0;
+    
+    if (now - lastWrite < DEBOUNCE_MS) {
+      // 设置延迟写入（如果已有 pending 的延迟写入，取消旧的）
+      if (this._pendingSave.has(taskTree.id)) {
+        clearTimeout(this._pendingSave.get(taskTree.id)!);
+      }
+      
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(async () => {
+          this._pendingSave.delete(taskTree.id);
+          try {
+            await this._doSave(taskTree, taskTreePath, backupPath, markdownPath, tmpPath);
+            resolve();
+          } catch (err) {
+            reject(err);
+          }
+        }, DEBOUNCE_MS);
+        this._pendingSave.set(taskTree.id, timer);
+      });
+    }
+
+    await this._doSave(taskTree, taskTreePath, backupPath, markdownPath, tmpPath);
+  }
+
+  /** 实际执行磁盘写入 */
+  private async _doSave(
+    taskTree: TaskTree,
+    taskTreePath: string,
+    backupPath: string,
+    markdownPath: string,
+    tmpPath: string,
+  ): Promise<void> {
+    this._lastWriteTime.set(taskTree.id, Date.now());
 
     // 备份现有文件
     try {

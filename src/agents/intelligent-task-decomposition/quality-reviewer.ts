@@ -31,6 +31,7 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { getPrompts } from "./prompts-loader.js";
+import { extractJsonFromResponse } from "./json-extractor.js";
 import type { LLMCaller } from "./batch-executor.js";
 
 /**
@@ -486,6 +487,12 @@ ${prompts.jsonOnlyReminder}`;
     // 🔧 BUG5 修复：优先使用轮次根任务描述，避免跨轮次误判
     const effectiveRootTask = rootTaskOverride || taskTree.rootTask;
 
+    // 🔧 P0 修复：提取子任务 prompt 中的字数要求，注入硬性校验规则
+    const wordCountHint = this.extractWordCountRequirement(subTask.prompt);
+    const wordCountRule = wordCountHint
+      ? `\n\n⚠️ 字数硬性校验规则：\n该子任务要求产出约 ${wordCountHint} 字。请估算实际输出的字数（中文按字符计数）。\n- 实际字数 >= 要求的 70%（即 >= ${Math.floor(wordCountHint * 0.7)} 字）→ 可以 continue\n- 实际字数 < 要求的 70%（即 < ${Math.floor(wordCountHint * 0.7)} 字）→ 必须 restart，并在 findings 中注明"字数不达标：预期 ${wordCountHint} 字，实际约 X 字"\n`
+      : "";
+
     return `${prompts.completionReview.expertRole} ${prompts.completionReview.instruction}
 
 ${prompts.labels.rootTask}：${effectiveRootTask}
@@ -499,10 +506,11 @@ ${prompts.labels.subTaskInfo}：
 ${prompts.completionReview.aspectsTitle}
 
 ${aspectsStr}
-
+${wordCountRule}
 ⚠️ 决策指引（overthrow vs restart）：
 - "overthrow"（推翻）仅用于任务本身不可能完成的结构性错误（如需求矛盾、技术上不可行）。
 - 如果输出存在风格偏差（如出现不合时代/世界观的元素、语气不当、角色人格泄露导致的不当内容），应使用 "restart"（重新执行），因为这类问题在重试时通常可以修正。
+- 如果输出字数/篇幅严重不足（低于要求的 70%），必须使用 "restart"。
 - 只评估子任务自身的输出质量，不要因为输出风格与你的偏好不同就判定 overthrow。
 
 ${prompts.jsonFormatInstruction}
@@ -518,6 +526,48 @@ ${prompts.jsonFormatInstruction}
 \`\`\`
 
 ${prompts.jsonOnlyReminder}`;
+  }
+
+  /**
+   * 🔧 P0: 从 prompt 文本中提取字数要求
+   * 支持多种中英文字数表达：3000字、3000 字、3000 words、三千字 等
+   * 
+   * @returns 提取到的字数数值，未找到返回 undefined
+   */
+  private extractWordCountRequirement(prompt: string): number | undefined {
+    // 匹配 "N字"、"N 字"、"N个字"、"N words"、"N characters" 等
+    const patterns = [
+      /(\d{3,})\s*[字个](?:左右|以上|以内)?/,
+      /(?:约|大约|至少|不少于|不低于)\s*(\d{3,})\s*[字个]/,
+      /(\d{3,})\s*(?:words?|characters?)/i,
+      /每[章节篇]\s*(?:约|大约)?\s*(\d{3,})\s*[字个]/,
+      /字数[：:]\s*(\d{3,})/,
+      /篇幅[：:]\s*(\d{3,})/,
+    ];
+    
+    for (const pattern of patterns) {
+      const match = prompt.match(pattern);
+      if (match?.[1]) {
+        const num = parseInt(match[1], 10);
+        if (num >= 100 && num <= 1_000_000) {
+          return num;
+        }
+      }
+    }
+    
+    // 匹配中文数字：三千字、五千字、一万字 等
+    const cnNumMap: Record<string, number> = {
+      "一千": 1000, "两千": 2000, "三千": 3000, "四千": 4000, "五千": 5000,
+      "六千": 6000, "七千": 7000, "八千": 8000, "九千": 9000,
+      "一万": 10000, "两万": 20000, "三万": 30000, "五万": 50000,
+    };
+    for (const [cn, num] of Object.entries(cnNumMap)) {
+      if (prompt.includes(`${cn}字`) || prompt.includes(`${cn}个字`)) {
+        return num;
+      }
+    }
+    
+    return undefined;
   }
 
   /**
@@ -639,12 +689,8 @@ ${prompts.jsonOnlyReminder}`;
   private parseReviewResponse(response: string): QualityReviewResult {
     const prompts = getPrompts();
     try {
-      const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/) || 
-                       response.match(/```\s*([\s\S]*?)\s*```/) ||
-                       [null, response];
-      
-      const jsonStr = jsonMatch[1] || response;
-      return JSON.parse(jsonStr.trim()) as QualityReviewResult;
+      const jsonStr = this.extractJson(response);
+      return JSON.parse(jsonStr) as QualityReviewResult;
     } catch (error) {
       console.error(`${prompts.qualityReviewer.errors.reviewFailed}:`, error);
       return {
@@ -663,12 +709,8 @@ ${prompts.jsonOnlyReminder}`;
   private parseFailureAnalysisResponse(response: string): FailureAnalysisResult {
     const prompts = getPrompts();
     try {
-      const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/) || 
-                       response.match(/```\s*([\s\S]*?)\s*```/) ||
-                       [null, response];
-      
-      const jsonStr = jsonMatch[1] || response;
-      return JSON.parse(jsonStr.trim()) as FailureAnalysisResult;
+      const jsonStr = this.extractJson(response);
+      return JSON.parse(jsonStr) as FailureAnalysisResult;
     } catch (error) {
       console.error(`${prompts.qualityReviewer.errors.failureAnalysisFailed}:`, error);
       return {
@@ -679,6 +721,13 @@ ${prompts.jsonOnlyReminder}`;
         decision: "adjust"
       };
     }
+  }
+
+  /**
+   * 从 LLM 响应中提取 JSON 字符串（兼容有/无闭合 ``` 的情况）
+   */
+  private extractJson(response: string): string {
+    return extractJsonFromResponse(response);
   }
 
   /**

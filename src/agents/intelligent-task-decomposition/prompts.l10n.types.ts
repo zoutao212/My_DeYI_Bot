@@ -177,6 +177,7 @@ export interface TaskDecompositionPromptsL10n {
       dependencies: string;
       completeness: string;
       redundancy: string;
+      quantitative: string;
     };
   };
   
@@ -190,6 +191,8 @@ export interface TaskDecompositionPromptsL10n {
       correctness: string;
       integrity: string;
       quality: string;
+      quantitative: string;
+      coherence: string;
     };
   };
   
@@ -203,6 +206,7 @@ export interface TaskDecompositionPromptsL10n {
       completeness: string;
       consistency: string;
       quality: string;
+      coherence: string;
     };
   };
   

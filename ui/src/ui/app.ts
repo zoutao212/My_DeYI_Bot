@@ -137,6 +137,8 @@ export class ClawdbotApp extends LitElement {
   @state() chatAvatarUrl: string | null = null;
   @state() chatThinkingLevel: string | null = null;
   @state() chatQueue: ChatQueueItem[] = [];
+  // Pending file attachments for chat compose
+  @state() chatAttachments: Array<{ fileName: string; size: number; content: string; mimeType: string }> = [];
   @state() chatSendApprovalRequest: {
     message: string;
     sessionKey: string;

@@ -41,7 +41,7 @@ import type { Orchestrator } from "../../agents/intelligent-task-decomposition/o
 
 // ── P10: 输出验证门（OutputValidator）──
 // 规则驱动，零 LLM 调用。在标记 completed 之前拦截明显无效输出。
-type OutputFailureCode = "hallucinated_tool_calls" | "output_too_short" | "context_overflow_signal";
+type OutputFailureCode = "hallucinated_tool_calls" | "output_too_short" | "context_overflow_signal" | "llm_refusal" | "excessive_repetition";
 interface OutputValidationResult {
   valid: boolean;
   failureCode?: OutputFailureCode;
@@ -72,13 +72,45 @@ function validateSubTaskOutput(
   const FILE_TOOLS = new Set(["write", "send_file", "read", "exec"]);
   const usedAnyTool = toolMetas.some((m) => FILE_TOOLS.has(m.toolName));
   if (!usedAnyTool && outputText.length < 200 && outputText.length > 0) {
-    // 极短输出 + 无工具调用 = 疑似上下文溢出
     return {
       valid: false,
       failureCode: "context_overflow_signal",
       failureReason: `输出仅 ${outputText.length} 字符且无工具调用，疑似上下文溢出`,
       suggestedAction: "retry",
     };
+  }
+
+  // 规则 3：检测 LLM 拒绝执行（常见的拒绝模式）
+  const refusalPatterns = [
+    /^(?:I (?:cannot|can't|am unable to|apologize)|抱歉|对不起|我无法|我不能)/i,
+    /(?:I'm not able to|as an AI|作为AI|作为一个AI)/i,
+  ];
+  if (outputText.length < 500 && refusalPatterns.some((p) => p.test(outputText.trim()))) {
+    return {
+      valid: false,
+      failureCode: "llm_refusal",
+      failureReason: "LLM 拒绝执行任务",
+      suggestedAction: "retry",
+    };
+  }
+
+  // 规则 4：检测重复内容（同一段文字重复 3 次以上）
+  if (outputText.length > 500) {
+    const lines = outputText.split("\n").filter(l => l.trim().length > 20);
+    const lineSet = new Map<string, number>();
+    for (const line of lines) {
+      const trimmed = line.trim();
+      lineSet.set(trimmed, (lineSet.get(trimmed) ?? 0) + 1);
+    }
+    const maxRepeat = Math.max(...lineSet.values(), 0);
+    if (maxRepeat >= 5) {
+      return {
+        valid: false,
+        failureCode: "excessive_repetition",
+        failureReason: `检测到严重重复内容（同一行重复 ${maxRepeat} 次），疑似 LLM 循环生成`,
+        suggestedAction: "retry",
+      };
+    }
   }
 
   return { valid: true };

@@ -13,6 +13,7 @@ import {
   renderReadingIndicatorGroup,
   renderStreamingGroup,
 } from "../chat/grouped-render";
+import { hasSendFileCard } from "../chat/tool-cards";
 import { renderMarkdownSidebar } from "./markdown-sidebar";
 import { renderChatFileList } from "./chat-file-list";
 import { renderChatFilePreview } from "./chat-file-preview";
@@ -90,6 +91,10 @@ export type ChatProps = {
   onFilePreview?: (fileName: string) => void;
   onFileDownload?: (fileName: string) => void;
   onFilePreviewClose?: () => void;
+  // Attachment handlers (drag-drop text files)
+  pendingAttachments?: Array<{ fileName: string; size: number }>;
+  onFileDrop?: (files: File[]) => void;
+  onRemoveAttachment?: (index: number) => void;
 };
 
 const COMPACTION_TOAST_DURATION_MS = 5000;
@@ -108,6 +113,12 @@ function formatTs(ts: number): string {
   } catch {
     return String(ts);
   }
+}
+
+function formatAttachmentSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 function renderRunPanelInChat(props: ChatProps) {
@@ -324,25 +335,72 @@ export function renderChat(props: ChatProps) {
           })
         : nothing}
 
-      <div class="chat-compose">
-        <label class="field chat-compose__field">
-          <span>Message</span>
-          <textarea
-            .value=${props.draft}
-            ?disabled=${!props.connected}
-            @keydown=${(e: KeyboardEvent) => {
-              if (e.key !== "Enter") return;
-              if (e.isComposing || e.keyCode === 229) return;
-              if (e.shiftKey) return; // Allow Shift+Enter for line breaks
-              if (!props.connected) return;
-              e.preventDefault();
-              if (canCompose) props.onSend();
-            }}
-            @input=${(e: Event) =>
-              props.onDraftChange((e.target as HTMLTextAreaElement).value)}
-            placeholder=${composePlaceholder}
-          ></textarea>
-        </label>
+      <div class="chat-compose" style="position: relative;"
+        @dragover=${(e: DragEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+          const el = (e.currentTarget as HTMLElement).querySelector(".chat-compose__drop-overlay") as HTMLElement | null;
+          if (el) el.style.display = "flex";
+        }}
+        @dragleave=${(e: DragEvent) => {
+          e.preventDefault();
+          const el = (e.currentTarget as HTMLElement).querySelector(".chat-compose__drop-overlay") as HTMLElement | null;
+          if (el) el.style.display = "none";
+        }}
+        @drop=${(e: DragEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const el = (e.currentTarget as HTMLElement).querySelector(".chat-compose__drop-overlay") as HTMLElement | null;
+          if (el) el.style.display = "none";
+          if (e.dataTransfer?.files?.length && props.onFileDrop) {
+            props.onFileDrop(Array.from(e.dataTransfer.files));
+          }
+        }}
+      >
+        <div class="chat-compose__drop-overlay" style="display: none;">
+          📎 拖放文件到此处
+        </div>
+        <div style="flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px;">
+          <label class="field chat-compose__field">
+            <span>Message</span>
+            <textarea
+              .value=${props.draft}
+              ?disabled=${!props.connected}
+              @keydown=${(e: KeyboardEvent) => {
+                if (e.key !== "Enter") return;
+                if (e.isComposing || e.keyCode === 229) return;
+                if (e.shiftKey) return; // Allow Shift+Enter for line breaks
+                if (!props.connected) return;
+                e.preventDefault();
+                if (canCompose) props.onSend();
+              }}
+              @input=${(e: Event) =>
+                props.onDraftChange((e.target as HTMLTextAreaElement).value)}
+              placeholder=${composePlaceholder}
+            ></textarea>
+          </label>
+          ${props.pendingAttachments && props.pendingAttachments.length > 0
+            ? html`
+                <div class="chat-compose__attachments">
+                  ${props.pendingAttachments.map(
+                    (att, idx) => html`
+                      <span class="chat-attachment-chip">
+                        <span class="chat-attachment-chip__name" title=${att.fileName}>${att.fileName}</span>
+                        <span class="chat-attachment-chip__size">${formatAttachmentSize(att.size)}</span>
+                        <button
+                          class="chat-attachment-chip__remove"
+                          type="button"
+                          aria-label="Remove attachment"
+                          @click=${() => props.onRemoveAttachment?.(idx)}
+                        >×</button>
+                      </span>
+                    `,
+                  )}
+                </div>
+              `
+            : nothing}
+        </div>
         <div class="chat-compose__actions">
           ${canAbort
             ? html`
@@ -428,7 +486,10 @@ function buildChatItems(props: ChatProps): Array<ChatItem | MessageGroup> {
     const normalized = normalizeMessage(msg);
 
     if (!props.showThinking && normalized.role.toLowerCase() === "toolresult") {
-      continue;
+      // Always show send_file results with webFileCard (file delivery cards)
+      if (!hasSendFileCard(msg)) {
+        continue;
+      }
     }
 
     items.push({
