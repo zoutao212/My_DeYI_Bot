@@ -254,6 +254,7 @@ export interface TaskDecompositionPromptsL10n {
     qualityStatusLabels: {
       pending: string;
       passed: string;
+      partial: string;
       needs_adjustment: string;
       needs_restart: string;
       needs_overthrow: string;

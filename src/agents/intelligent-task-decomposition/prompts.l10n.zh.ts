@@ -231,6 +231,7 @@ export const TASK_DECOMPOSITION_PROMPTS_ZH: TaskDecompositionPromptsL10n = {
     qualityStatusLabels: {
       pending: "待评估",
       passed: "通过",
+      partial: "部分完成",
       needs_adjustment: "需要调整",
       needs_restart: "需要重启",
       needs_overthrow: "需要推翻",

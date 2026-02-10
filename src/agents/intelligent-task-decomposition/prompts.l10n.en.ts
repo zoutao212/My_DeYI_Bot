@@ -231,6 +231,7 @@ export const TASK_DECOMPOSITION_PROMPTS_EN: TaskDecompositionPromptsL10n = {
     qualityStatusLabels: {
       pending: "Pending Review",
       passed: "Passed",
+      partial: "Partial",
       needs_adjustment: "Needs Adjustment",
       needs_restart: "Needs Restart",
       needs_overthrow: "Needs Overthrow",
