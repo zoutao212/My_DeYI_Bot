@@ -35,7 +35,7 @@ import { createAudioAsVoiceBuffer, createBlockReplyPipeline } from "./block-repl
 import { resolveBlockStreamingCoalescing } from "./block-streaming.js";
 import { createFollowupRunner } from "./followup-runner.js";
 import { enqueueFollowupRun, scheduleFollowupDrain, type FollowupRun, type QueueSettings } from "./queue.js";
-import { setCurrentFollowupRunContext } from "../../agents/tools/enqueue-task-tool.js";
+import { setCurrentFollowupRunContext, clearCurrentFollowupRunContext } from "../../agents/tools/enqueue-task-tool.js";
 import { getGlobalOrchestrator } from "../../agents/tools/enqueue-task-tool.js";
 import { createReplyToModeFilterForChannel, resolveReplyToMode } from "./reply-threading.js";
 import { persistSessionUsageUpdate } from "./session-usage.js";
@@ -266,11 +266,13 @@ export async function runReplyAgent(params: {
   // 🔧 设置全局上下文，让 enqueue_task 工具可以访问当前的 FollowupRun
   // isQueueTask = false 表示这不是队列任务（是用户直接发送的消息）
   // isRootTask = true 表示这是根任务（允许分解子任务）
+  // 🔧 P12 修复：传入 contextId 防止并行 runner 竞态清空
+  const agentRunContextId = crypto.randomUUID();
   setCurrentFollowupRunContext({ 
     ...followupRun, 
     isQueueTask: false,
     isRootTask: true  // 🆕 标记为根任务
-  });
+  }, agentRunContextId);
 
   activeSessionEntry = await runMemoryFlushIfNeeded({
     cfg,
@@ -584,7 +586,7 @@ export async function runReplyAgent(params: {
   } finally {
     blockReplyPipeline?.stop();
     typing.markRunComplete();
-    // 🔧 清理全局上下文
-    setCurrentFollowupRunContext(null);
+    // 🔧 P12 修复：安全清理上下文（仅当 contextId 匹配时才清空）
+    clearCurrentFollowupRunContext(agentRunContextId);
   }
 }

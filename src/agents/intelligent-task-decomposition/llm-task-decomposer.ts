@@ -117,11 +117,20 @@ export class LLMTaskDecomposer {
     // 2. 构建分解提示词
     const prompt = this.buildDecompositionPrompt(taskTree, subTask);
 
-    // 3. 调用 LLM 进行分解
-    const llmResponse = await this.callLLM(prompt);
+    // 3. 调用 LLM 进行分解（V3 修复：捕获 LLM 不可用错误，返回空数组而非占位符）
+    let llmResponse: string;
+    try {
+      llmResponse = await this.callLLM(prompt);
+    } catch (err) {
+      console.warn(`[LLMTaskDecomposer] ⚠️ 分解失败（LLM 不可用），任务 ${subTask.id} 将跳过分解直接执行:`, err);
+      return [];
+    }
 
     // 4. 解析分解结果
     const decomposedTasks = this.parseDecompositionResponse(llmResponse, subTask);
+
+    // 🆕 O4: chapterOutline 空壳回退 — LLM 未返回时自动从 masterBlueprint 提取
+    this.fillMissingChapterOutlines(decomposedTasks, taskTree);
 
     console.log(`[LLMTaskDecomposer] ✅ Decomposed task ${subTask.id} into ${decomposedTasks.length} subtasks`);
     return decomposedTasks;
@@ -148,6 +157,9 @@ export class LLMTaskDecomposer {
 
     // 3. 解析分解结果
     const decomposedTasks = this.parseDecompositionResponse(llmResponse, subTask);
+
+    // 🆕 O4: chapterOutline 空壳回退
+    this.fillMissingChapterOutlines(decomposedTasks, taskTree);
 
     console.log(`[LLMTaskDecomposer] ✅ Decomposed with lessons: ${decomposedTasks.length} subtasks`);
     return decomposedTasks;
@@ -199,6 +211,73 @@ export class LLMTaskDecomposer {
   }
 
   // ========================================
+  // 🆕 V3: 总纲领生成（Master Blueprint）
+  // ========================================
+
+  /**
+   * 生成总纲领（Master Blueprint）
+   *
+   * 在根任务首次分解前调用，让 LLM 先生成一份完整的创作/执行纲领。
+   * 纲领包含整体规划和每个子任务的详细大纲，是"指挥家的总谱"。
+   *
+   * @param rootTask 根任务描述（用户原始 prompt）
+   * @param taskType 任务类型提示（writing/coding/analysis 等）
+   * @returns 生成的总纲领文本，LLM 调用失败时返回 null
+   */
+  async generateMasterBlueprint(
+    rootTask: string,
+    taskType?: string,
+  ): Promise<string | null> {
+    const prompt = this.buildBlueprintPrompt(rootTask, taskType);
+    console.log(`[LLMTaskDecomposer] 🎼 生成总纲领，提示词长度: ${prompt.length}`);
+
+    try {
+      const response = await this.callLLM(prompt);
+
+      // 降级检测：如果返回的是 JSON 格式（callLLM 降级到规则驱动的占位符），说明未成功
+      if (response.trim().startsWith("{")) {
+        console.warn("[LLMTaskDecomposer] ⚠️ 总纲领生成降级到规则驱动，跳过");
+        return null;
+      }
+
+      console.log(`[LLMTaskDecomposer] ✅ 总纲领生成完成 (${response.length} chars)`);
+      return response;
+    } catch (err) {
+      console.warn("[LLMTaskDecomposer] ⚠️ 总纲领生成失败:", err);
+      return null;
+    }
+  }
+
+  /**
+   * 构建总纲领生成提示词（V3 国际化重构：从 getPrompts() 获取文本）
+   */
+  private buildBlueprintPrompt(rootTask: string, taskType?: string): string {
+    const prompts = getPrompts();
+
+    const typeHint = taskType === "writing"
+      ? prompts.blueprintTypeHints.writing
+      : taskType === "coding"
+      ? prompts.blueprintTypeHints.coding
+      : prompts.blueprintTypeHints.generic;
+
+    const consistencyList = prompts.blueprintConsistencyPoints
+      .map(p => `- ${p}`)
+      .join("\n");
+
+    return `${prompts.blueprintExpertRole} ${prompts.blueprintInstruction}
+${consistencyList}
+
+${typeHint}
+
+---
+**${prompts.blueprintOriginalTaskLabel}：**
+${rootTask}
+---
+
+${prompts.blueprintOutputFormatHint}`;
+  }
+
+  // ========================================
   // 私有辅助方法
   // ========================================
 
@@ -213,10 +292,21 @@ export class LLMTaskDecomposer {
       .map((req, index) => `${index + 1}. ${req}`)
       .join("\n");
     
+    // 🆕 V3: 如果存在总纲领，注入到分解提示词中（国际化）
+    const blueprintSection = taskTree.metadata?.masterBlueprint
+      ? `\n${prompts.blueprintDecompositionInstruction}
+
+${prompts.blueprintChapterOutlineInstruction}
+
+---
+${taskTree.metadata.masterBlueprint}
+---\n`
+      : "";
+
     return `${prompts.decompositionExpertRole} ${prompts.decompositionInstruction}
 
 ${prompts.rootTaskLabel}：${taskTree.rootTask}
-
+${blueprintSection}
 ${ancestorsStr}
 
 ${prompts.currentTaskLabel}：
@@ -240,7 +330,8 @@ ${prompts.jsonFormatInstruction}
       "metadata": {
         "complexity": "low" | "medium" | "high",
         "priority": "low" | "medium" | "high",
-        "estimatedDuration": 300000
+        "estimatedDuration": 300000,
+        "chapterOutline": "从纲领中提取的本子任务专属大纲（场景、角色、衔接点等详细内容）"
       }
     }
   ]
@@ -278,10 +369,17 @@ ${prompts.failureRecordTitle(index)}
     ].map((req, index) => `${index + 1}. ${req}`)
      .join("\n");
 
+    // 🆕 V3: 失败重分解也注入总纲领，保持上下文一致（国际化）
+    const blueprintSection = taskTree.metadata?.masterBlueprint
+      ? `\n${prompts.blueprintDecompositionInstruction}
+${taskTree.metadata.masterBlueprint.length > 4000 ? taskTree.metadata.masterBlueprint.substring(0, 4000) + "\n" + prompts.blueprintTruncatedHint : taskTree.metadata.masterBlueprint}
+---\n`
+      : "";
+
     return `${prompts.decompositionExpertRole} ${prompts.decompositionInstruction}
 
 ${prompts.rootTaskLabel}：${taskTree.rootTask}
-
+${blueprintSection}
 ${prompts.currentTaskLabel}：
 - ${prompts.taskIdLabel}: ${subTask.id}
 - ${prompts.taskDescriptionLabel}: ${subTask.prompt}
@@ -307,7 +405,8 @@ ${prompts.jsonFormatInstruction}
       "metadata": {
         "complexity": "low" | "medium" | "high",
         "priority": "low" | "medium" | "high",
-        "estimatedDuration": 300000
+        "estimatedDuration": 300000,
+        "chapterOutline": "从纲领中提取的本子任务专属大纲（场景、角色、衔接点等详细内容）"
       }
     }
   ]
@@ -454,34 +553,12 @@ ${prompts.jsonOnlyReminder}`;
       }
     }
 
-    // 降级：规则驱动默认分解方案
-    console.log(`[LLMTaskDecomposer] 使用规则驱动分解（降级），提示词长度: ${prompt.length}`);
-    return `{
-  "subTasks": [
-    {
-      "summary": "子任务 1",
-      "prompt": "子任务 1 的详细描述",
-      "dependencies": [],
-      "canDecompose": true,
-      "metadata": {
-        "complexity": "medium",
-        "priority": "high",
-        "estimatedDuration": 300000
-      }
-    },
-    {
-      "summary": "子任务 2",
-      "prompt": "子任务 2 的详细描述",
-      "dependencies": [],
-      "canDecompose": true,
-      "metadata": {
-        "complexity": "medium",
-        "priority": "medium",
-        "estimatedDuration": 300000
-      }
-    }
-  ]
-}`;
+    // 🔧 V3 修复：不再返回无意义的占位符 JSON（"子任务 1 的详细描述"）
+    // 这种假数据会被 parseDecompositionResponse 当作有效分解结果，
+    // 创建出 prompt 为空壳的子任务，永远无法正确执行。
+    // 改为抛出错误，让调用方（decomposeRecursively）正确处理失败。
+    console.error(`[LLMTaskDecomposer] ❌ LLM 不可用且无降级方案，提示词长度: ${prompt.length}`);
+    throw new Error("LLM 调用不可用：系统 LLM 调用器未初始化或调用失败，无法完成分解");
   }
 
   /**
@@ -526,6 +603,11 @@ ${prompts.jsonOnlyReminder}`;
           };
           console.log(`[LLMTaskDecomposer] 📝 检测到写作任务：${subTask.summary}`);
         }
+
+        // 🆕 V3: chapterOutline 提取确认（LLM 返回的 metadata.chapterOutline 已通过 item.metadata 透传）
+        if (subTask.metadata?.chapterOutline) {
+          console.log(`[LLMTaskDecomposer] 📖 章节大纲已提取：${subTask.summary} (${subTask.metadata.chapterOutline.length} chars)`);
+        }
         
         return subTask;
       });
@@ -538,6 +620,86 @@ ${prompts.jsonOnlyReminder}`;
     } catch (error) {
       console.error(`[LLMTaskDecomposer] 解析分解响应失败:`, error);
       throw new Error(`解析分解响应失败: ${error}`);
+    }
+  }
+
+  /**
+   * 🆕 O4: chapterOutline 空壳回退
+   *
+   * LLM 分解时可能不返回 metadata.chapterOutline，导致子任务执行时
+   * 只能看到完整纲领（6000 字）而非精准的章节大纲。
+   * 本方法从 masterBlueprint 中按子任务序号/summary 关键词自动提取对应段落。
+   */
+  private fillMissingChapterOutlines(subTasks: SubTask[], taskTree: TaskTree): void {
+    const blueprint = taskTree.metadata?.masterBlueprint;
+    if (!blueprint) return;
+
+    // 统计缺失数
+    const missing = subTasks.filter(t => !t.metadata?.chapterOutline);
+    if (missing.length === 0) return;
+
+    // 按章节标题切分纲领（支持 "第N章"、"Chapter N"、"## N."、"**第N章**" 等格式）
+    const chapterPattern = /(?:^|\n)(?:#{1,3}\s*)?(?:\*{0,2})(?:第[一二三四五六七八九十百千\d]+[章节篇幕]|Chapter\s+\d+|\d+[\.\)]\s*(?:第[一二三四五六七八九十百千\d]+[章节篇幕]|Chapter))(?:\*{0,2})[^\n]*/gi;
+    const matches = [...blueprint.matchAll(chapterPattern)];
+
+    if (matches.length === 0) {
+      // 纲领中没有明确的章节标题，跳过回退
+      console.log(`[LLMTaskDecomposer] ⚠️ O4: 纲领中未找到章节标题，跳过 chapterOutline 回退`);
+      return;
+    }
+
+    // 构建章节段落映射：每个章节标题 → 到下一个章节标题之间的文本
+    const sections: Array<{ title: string; content: string; index: number }> = [];
+    for (let i = 0; i < matches.length; i++) {
+      const start = matches[i].index!;
+      const end = i + 1 < matches.length ? matches[i + 1].index! : blueprint.length;
+      sections.push({
+        title: matches[i][0].trim(),
+        content: blueprint.substring(start, end).trim(),
+        index: i,
+      });
+    }
+
+    // 为每个缺少 chapterOutline 的子任务匹配对应章节
+    let filled = 0;
+    for (const subTask of missing) {
+      if (!subTask.metadata) subTask.metadata = {};
+
+      // 策略 1：按子任务在数组中的序号匹配（第 1 个子任务 → 第 1 章）
+      const taskIndex = subTasks.indexOf(subTask);
+      let matched: typeof sections[0] | undefined;
+
+      // 策略 2：按 summary 中的章节关键词匹配
+      const summaryLower = (subTask.summary ?? "").toLowerCase();
+      const chapterNumMatch = summaryLower.match(/第([一二三四五六七八九十\d]+)[章节篇幕]|chapter\s*(\d+)/i);
+      if (chapterNumMatch) {
+        const numStr = chapterNumMatch[1] || chapterNumMatch[2];
+        // 中文数字转阿拉伯
+        const cnMap: Record<string, number> = { "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10 };
+        const num = cnMap[numStr] ?? parseInt(numStr, 10);
+        if (!isNaN(num) && num >= 1 && num <= sections.length) {
+          matched = sections[num - 1];
+        }
+      }
+
+      // 策略 3：回退到位置索引
+      if (!matched && taskIndex >= 0 && taskIndex < sections.length) {
+        matched = sections[taskIndex];
+      }
+
+      if (matched) {
+        // 截断单章大纲到 1500 字符，避免过长
+        subTask.metadata.chapterOutline = matched.content.length > 1500
+          ? matched.content.substring(0, 1500) + "\n...[大纲已截断]"
+          : matched.content;
+        filled++;
+      }
+    }
+
+    if (filled > 0) {
+      console.log(
+        `[LLMTaskDecomposer] 📖 O4: 自动回退填充 ${filled}/${missing.length} 个子任务的 chapterOutline`,
+      );
     }
   }
 

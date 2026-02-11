@@ -110,6 +110,41 @@ export interface TaskDecompositionPromptsL10n {
   };
   
   // ========================================
+  // 🆕 V3: 总纲领生成提示词（Master Blueprint）
+  // ========================================
+
+  /** 总纲领生成 — 专家角色描述 */
+  blueprintExpertRole: string;
+
+  /** 总纲领生成 — 整体指令（纲领用途、详细度要求） */
+  blueprintInstruction: string;
+
+  /** 总纲领生成 — 保证并行一致性的要点列表 */
+  blueprintConsistencyPoints: string[];
+
+  /** 总纲领生成 — 按任务类型区分的内容要求 */
+  blueprintTypeHints: {
+    writing: string;
+    coding: string;
+    generic: string;
+  };
+
+  /** 总纲领生成 — 原始任务标签 */
+  blueprintOriginalTaskLabel: string;
+
+  /** 总纲领生成 — 输出格式提示（Markdown，不要 JSON） */
+  blueprintOutputFormatHint: string;
+
+  /** 分解提示词中的纲领注入指令（告知 LLM 如何基于纲领分解） */
+  blueprintDecompositionInstruction: string;
+
+  /** 分解提示词中的 chapterOutline 提取指令 */
+  blueprintChapterOutlineInstruction: string;
+
+  /** 纲领截断提示 */
+  blueprintTruncatedHint: string;
+
+  // ========================================
   // 任务估算提示词
   // ========================================
   

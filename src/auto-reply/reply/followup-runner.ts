@@ -31,7 +31,7 @@ import { persistSessionUsageUpdate } from "./session-usage.js";
 import { incrementCompactionCount } from "./session-updates.js";
 import type { TypingController } from "./typing.js";
 import { createTypingSignaler } from "./typing-mode.js";
-import { setCurrentFollowupRunContext } from "../../agents/tools/enqueue-task-tool.js";
+import { setCurrentFollowupRunContext, clearCurrentFollowupRunContext } from "../../agents/tools/enqueue-task-tool.js";
 import { getGlobalOrchestrator } from "../../agents/tools/enqueue-task-tool.js";
 import { buildSiblingContext } from "../../agents/memory/pipeline-integration.js";
 import { createMemoryService } from "../../agents/memory/factory.js";
@@ -40,10 +40,11 @@ import { collectTrackedFiles, clearTracking } from "../../agents/intelligent-tas
 import { deriveExecutionRole, createExecutionContext } from "../../agents/intelligent-task-decomposition/execution-context.js";
 import type { SubTask, TaskTree, ExecutionContext } from "../../agents/intelligent-task-decomposition/types.js";
 import type { Orchestrator } from "../../agents/intelligent-task-decomposition/orchestrator.js";
+import { TaskProgressReporter, getTaskProgressFromTree } from "../../agents/intelligent-task-decomposition/task-progress-reporter.js";
 
 // ── P10: 输出验证门（OutputValidator）──
 // 规则驱动，零 LLM 调用。在标记 completed 之前拦截明显无效输出。
-type OutputFailureCode = "hallucinated_tool_calls" | "output_too_short" | "context_overflow_signal" | "llm_refusal" | "excessive_repetition";
+type OutputFailureCode = "hallucinated_tool_calls" | "output_too_short" | "context_overflow_signal" | "llm_refusal" | "excessive_repetition" | "delegation_attempt";
 interface OutputValidationResult {
   valid: boolean;
   failureCode?: OutputFailureCode;
@@ -54,6 +55,7 @@ interface OutputValidationResult {
 function validateSubTaskOutput(
   outputText: string,
   toolMetas: Array<{ toolName: string; [k: string]: unknown }>,
+  context?: { isRootTask?: boolean },
 ): OutputValidationResult {
   // 规则 1：检测 LLM 把 tool call 幻觉为纯文本
   const hallucinationPatterns = [
@@ -66,6 +68,25 @@ function validateSubTaskOutput(
       valid: false,
       failureCode: "hallucinated_tool_calls",
       failureReason: "LLM 将 tool call 幻觉为纯文本输出，非真实工具调用",
+      suggestedAction: "retry",
+    };
+  }
+
+  // 规则 1.5：检测 LLM 委派行为（调用 sessions_spawn/enqueue_task 而非直接执行）
+  // 根因 P13/P14：LLM 在子任务中调用 sessions_spawn 绕过任务系统，
+  // 导致输出不被追踪，只有 191 字元叙述被当作 output → 字数不达标 → 死循环
+  const DELEGATION_TOOLS = new Set(["sessions_spawn", "enqueue_task", "batch_enqueue_tasks"]);
+  const usedDelegationTool = toolMetas.some((m) => DELEGATION_TOOLS.has(m.toolName));
+  // 根任务调用 enqueue_task 是正常分解行为，不拦截；只对非根子任务拦截
+  if (usedDelegationTool && !context?.isRootTask) {
+    const delegationToolNames = toolMetas
+      .filter((m) => DELEGATION_TOOLS.has(m.toolName))
+      .map((m) => m.toolName)
+      .join(", ");
+    return {
+      valid: false,
+      failureCode: "delegation_attempt",
+      failureReason: `LLM 尝试委派任务（调用了 ${delegationToolNames}），而非直接执行。子任务必须亲自完成，禁止委派。`,
       suggestedAction: "retry",
     };
   }
@@ -391,8 +412,9 @@ export function createFollowupRunner(params: {
   };
 
   return async (queued: FollowupRun) => {
+    const runId = crypto.randomUUID();
+    let progressReporter: TaskProgressReporter | null = null;
     try {
-      const runId = crypto.randomUUID();
       if (queued.run.sessionKey) {
         registerAgentRunContext(runId, {
           sessionKey: queued.run.sessionKey,
@@ -423,6 +445,15 @@ export function createFollowupRunner(params: {
       let startDecisionCtx: ExecutionContext | undefined;
       if (taskTree && subTask) {
         console.log(`[followup-runner] 🔍 Found sub task in tree: ${subTask.id}`);
+
+        // 🆕 初始化任务进度报告器
+        const progressInfo = getTaskProgressFromTree(taskTree, queued.rootTaskId);
+        progressReporter = new TaskProgressReporter(progressInfo.total);
+        progressReporter.updateCounts(progressInfo.completed, progressInfo.failed, progressInfo.total);
+        progressReporter.setSender(async (text: string) => {
+          try { await sendFollowupPayloads([{ text }], queued); } catch { /* 进度消息发送失败不阻塞主流程 */ }
+        });
+        progressReporter.onTaskStart(subTask.summary ?? queued.summaryLine ?? "子任务");
 
         const startDecision = orchestrator.onTaskStarting(taskTree, subTask, {
           isQueueTask: queued.isQueueTask,
@@ -513,6 +544,7 @@ export function createFollowupRunner(params: {
               depth: effectiveDepth,
             });
 
+        // 🔧 P12 修复：传入 runId 作为 contextId，防止并行 runner 的 finally 块互相清空上下文
         setCurrentFollowupRunContext({ 
           ...queued, 
           isQueueTask: effectiveIsQueueTask,
@@ -521,8 +553,11 @@ export function createFollowupRunner(params: {
           taskDepth: effectiveDepth,
           rootTaskId: queued.rootTaskId,
           executionContext: execCtx,
-        });
+        }, runId);
         
+        // 🆕 进度报告：开始等待 LLM 回复
+        progressReporter?.onLLMStart();
+
         const fallbackResult = await runWithModelFallback({
           cfg: queued.run.config,
           provider: queued.run.provider,
@@ -576,7 +611,7 @@ export function createFollowupRunner(params: {
                     console.log(`[followup-runner] 🔄 注入迭代优化指令 (previousOutput=${subTask.metadata.previousOutput?.length ?? 0} chars, findings=${subTask.metadata.lastFailureFindings?.length ?? 0})`);
                   }
                   
-                  return `[⚠️ 强制规则] 你必须使用 write 工具将生成内容写入 .txt 文件，保存到 ${taskOutputDir}/ 目录下（文件名含任务摘要）。然后在聊天中仅回复简短确认。禁止将完整内容直接输出到聊天。${iterationHint}\n\n${queued.prompt}`;
+                  return `[⚠️ 强制规则] 你必须亲自使用 write 工具将生成内容写入 .txt 文件，保存到 ${taskOutputDir}/ 目录下（文件名含任务摘要）。然后在聊天中仅回复简短确认。禁止将完整内容直接输出到聊天。\n[🚫 禁止委派] 严禁调用 enqueue_task、sessions_spawn、batch_enqueue_tasks。你必须自己直接完成创作，不能把任务交给任何人。${iterationHint}\n\n${queued.prompt}`;
                 }
                 return queued.prompt;
               })(),
@@ -595,10 +630,34 @@ export function createFollowupRunner(params: {
                 // 🔧 子任务强制落盘（二级强化，主指令已注入 prompt 本体）
                 const isSubTask = Boolean(queued.subTaskId);
                 const persistInstruction = isSubTask
-                  ? "\n\n[SYSTEM] 子任务必须用 write 工具落盘，禁止纯文本输出。"
+                  ? "\n\n[SYSTEM] 子任务必须用 write 工具落盘，禁止纯文本输出。严禁使用 enqueue_task/sessions_spawn/batch_enqueue_tasks 委派任务，必须亲自完成。"
                   : "";
 
-                const combined = [base, siblingCtx, persistInstruction].filter(Boolean).join("");
+                // 🆕 V3: 注入总纲领（Master Blueprint）到子任务上下文
+                // 让每个并行执行的子任务都能看到"指挥家的总谱"，保证内容一致性
+                let blueprintCtx = "";
+                if (isSubTask && taskTree?.metadata?.masterBlueprint) {
+                  const blueprint = taskTree.metadata.masterBlueprint;
+                  // 🔧 O6: 智能截断纲领——保留"前3000（世界观/角色设定）+ 后3000（后面章节大纲）"
+                  // 原策略"前6000一刀切"会导致后面章节（如第5、6章）的大纲完全丢失
+                  const MAX_BLUEPRINT = 6000;
+                  const truncated = blueprint.length > MAX_BLUEPRINT
+                    ? blueprint.substring(0, MAX_BLUEPRINT / 2)
+                      + "\n\n...[纲领中段已省略，保留首尾关键内容]...\n\n"
+                      + blueprint.substring(blueprint.length - MAX_BLUEPRINT / 2)
+                    : blueprint;
+                  blueprintCtx = `\n\n[📋 总纲领 / Master Blueprint]\n以下是整体任务的详细规划纲领，你必须严格遵循其中与你当前子任务相关的部分。\n确保角色描述、世界观设定、风格要求与纲领一致。\n---\n${truncated}\n---`;
+                  console.log(`[followup-runner] 🎼 注入总纲领 (${blueprint.length} chars, truncated=${blueprint.length > 6000})`);
+                }
+
+                // 🆕 V3: 注入子任务专属大纲（chapterOutline）
+                let chapterOutlineCtx = "";
+                if (isSubTask && subTask?.metadata?.chapterOutline) {
+                  chapterOutlineCtx = `\n\n[📖 本任务专属大纲]\n以下是你当前子任务的详细大纲，请严格按此大纲完成创作/执行：\n---\n${subTask.metadata.chapterOutline}\n---`;
+                  console.log(`[followup-runner] 📖 注入章节大纲 (${subTask.metadata.chapterOutline.length} chars)`);
+                }
+
+                const combined = [base, siblingCtx, persistInstruction, blueprintCtx, chapterOutlineCtx].filter(Boolean).join("");
                 return combined || undefined;
               })(),
               ownerNumbers: queued.run.ownerNumbers,
@@ -629,6 +688,13 @@ export function createFollowupRunner(params: {
         runResult = fallbackResult.result;
         fallbackProvider = fallbackResult.provider;
         fallbackModel = fallbackResult.model;
+
+        // 🆕 进度报告：LLM 回复完成
+        {
+          const outputChars = (fallbackResult.result.payloads ?? [])
+            .reduce((sum, p) => sum + (p.text?.length ?? 0), 0);
+          progressReporter?.onLLMComplete(outputChars > 0 ? outputChars : undefined);
+        }
         
         // 🔧 如果找到了子任务，更新状态为 "completed" 并保存输出
         if (taskTree && subTask) {
@@ -648,7 +714,8 @@ export function createFollowupRunner(params: {
           const outputText = payloadArray.map((p) => p.text).filter(Boolean).join("\n");
 
           // 🆕 P10: 输出验证门 — 在标记 completed 之前拦截明显无效输出
-          const validation = validateSubTaskOutput(outputText, runResult.toolMetas ?? []);
+          const isRootTaskExecution = Boolean(queued.isRootTask || queued.isNewRootTask);
+          const validation = validateSubTaskOutput(outputText, runResult.toolMetas ?? [], { isRootTask: isRootTaskExecution });
           if (!validation.valid) {
             console.warn(
               `[followup-runner] ⚠️ OutputValidator 拦截: ${validation.failureCode} — ${validation.failureReason}`,
@@ -754,9 +821,14 @@ export function createFollowupRunner(params: {
           // 🆕 V2 Phase 4: 统一后处理（onTaskCompleted 钩子替代散装逻辑）
           // 内部编排：postProcess + 质量评估 + 轮次完成检查 + markRoundCompleted
           try {
+            // 🆕 进度报告：开始质量评估
+            progressReporter?.onQualityReviewStart();
+
             const postResult = await orchestrator.onTaskCompleted(taskTree, subTask, queued.rootTaskId);
 
             if (postResult.needsRequeue) {
+              progressReporter?.onQualityReviewComplete(false);
+              progressReporter?.onTaskRestart(subTask.retryCount ?? 1);
               console.log(
                 `[followup-runner] 🔄 子任务 ${subTask.id} 质量不达标，重新入队 (restart): ` +
                 `${JSON.stringify(postResult.findings)}`,
@@ -807,6 +879,8 @@ export function createFollowupRunner(params: {
             }
 
             if (postResult.markedFailed) {
+              progressReporter?.onQualityReviewComplete(false);
+              progressReporter?.onTaskFailed("质量严重不通过 (overthrow)");
               console.error(
                 `[followup-runner] ❌ 子任务 ${subTask.id} 质量严重不通过 (overthrow): ` +
                 `${JSON.stringify(postResult.findings)}`,
@@ -818,6 +892,10 @@ export function createFollowupRunner(params: {
               }
               return;
             }
+
+            // 🆕 进度报告：质检通过 + 任务完成
+            progressReporter?.onQualityReviewComplete(true);
+            progressReporter?.onTaskComplete();
 
             console.log(`[followup-runner] ✅ Sub task completed: ${subTask.id}`);
 
@@ -1022,9 +1100,6 @@ export function createFollowupRunner(params: {
 
       await sendFollowupPayloads(finalPayloads, queued);
 
-      // 注意：不再自动发送任务进度提示
-      // 用户可以通过调用 show_task_board 工具主动查看任务看板
-
       // 🆕 触发队列继续执行下一个任务
       if (queued.run.sessionKey) {
         const queueKey = queued.run.sessionKey;
@@ -1037,9 +1112,11 @@ export function createFollowupRunner(params: {
       console.error(`[followup-runner] ❌ Unhandled error in followup runner: ${msg}`);
       defaultRuntime.error?.(`Followup runner unhandled error: ${msg}`);
     } finally {
+      // 🆕 进度报告器清理（停止所有定时器）
+      progressReporter?.dispose();
       typing.markRunComplete();
-      // 🔧 清理全局上下文
-      setCurrentFollowupRunContext(null);
+      // 🔧 P12 修复：安全清理上下文（仅当 contextId 匹配时才清空，防止并行 runner 覆盖）
+      clearCurrentFollowupRunContext(runId);
     }
   };
 }

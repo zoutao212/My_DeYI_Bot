@@ -67,8 +67,13 @@ type EnqueueTaskOptions = {
  * 
  * 这是一个临时解决方案，用于在工具执行时访问当前的 run 上下文。
  * 在 agent-runner 中设置，在 enqueue_task 工具中读取。
+ * 
+ * 🔧 P12 修复：新增 contextId 防止并行 runner 的 finally 块互相清空上下文。
+ * 每个 runner 设置上下文时携带唯一 contextId（runId），
+ * 清理时只在 ID 匹配时才清空，避免 runner A 的上下文被 runner B 的 finally 误清。
  */
 let currentFollowupRunContext: FollowupRun | null = null;
+let currentFollowupRunContextId: string | null = null;
 
 /**
  * 全局 Orchestrator 实例
@@ -85,9 +90,26 @@ let llmCallerModel = "";
  * 应该在 agent-runner 开始执行时调用。
  * 
  * @param followupRun - 当前的 FollowupRun 对象
+ * @param contextId - 可选的上下文标识（推荐传 runId），用于 P12 竞态保护
  */
-export function setCurrentFollowupRunContext(followupRun: FollowupRun | null): void {
+export function setCurrentFollowupRunContext(followupRun: FollowupRun | null, contextId?: string): void {
   currentFollowupRunContext = followupRun;
+  currentFollowupRunContextId = contextId ?? null;
+}
+
+/**
+ * 🔧 P12 修复：安全清理上下文
+ * 
+ * 仅在当前上下文 ID 与传入的 ID 匹配时才清空。
+ * 防止并行 runner 的 finally 块互相清空上下文。
+ * 
+ * @param contextId - 要清理的上下文标识
+ */
+export function clearCurrentFollowupRunContext(contextId: string): void {
+  if (currentFollowupRunContextId === contextId) {
+    currentFollowupRunContext = null;
+    currentFollowupRunContextId = null;
+  }
 }
 
 /**

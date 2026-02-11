@@ -151,13 +151,25 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
   if (typeof original !== "function") return;
 
   const ATTEMPT_WINDOW_MS = 5 * 60_000;
-  const MAX_ATTEMPTS_PER_KEY = 1; // 最多 1 次重试（总共 2 次请求：1 次原始 + 1 次重试）
-  const RETRY_DELAY_MS = 1000; // 重试前等待 1 秒
+  const MAX_ATTEMPTS_PER_KEY = 3; // 最多 3 次重试（总共 4 次请求：1 次原始 + 3 次重试）
+  const BASE_RETRY_DELAY_MS = 2000; // 基础重试延迟 2 秒
   const attempts = new Map<string, { firstAtMs: number; failureCount: number }>();
   
-  // 添加请求队列，避免并发请求
-  let lastRequestTime = 0;
-  const MIN_REQUEST_INTERVAL_MS = 1000; // 最小请求间隔 1 秒
+  // 🔧 P17 修复：用串行队列替代竞态的 lastRequestTime
+  // 原问题：多个并发 wrapped() 调用同时读取 lastRequestTime，全部通过检查后才各自更新
+  // 修复：用 Promise 链保证请求串行化，每个请求之间至少间隔 MIN_REQUEST_GAP_MS
+  let requestGatePromise = Promise.resolve();
+  const MIN_REQUEST_GAP_MS = 1500; // 请求间隔 1.5 秒
+
+  // 🔧 P18+P20 修复：429 指数退避 + jitter
+  function computeRetryDelay(failureCount: number): number {
+    // 指数退避：2s → 4s → 8s，上限 30s
+    const exponentialDelay = BASE_RETRY_DELAY_MS * Math.pow(2, failureCount - 1);
+    const cappedDelay = Math.min(exponentialDelay, 30_000);
+    // 添加 ±25% jitter 避免多个重试同时触发
+    const jitter = cappedDelay * (0.75 + Math.random() * 0.5);
+    return Math.round(jitter);
+  }
 
   function computeAttemptKey(payload: LlmApprovalRequestPayload): string {
     const stable = JSON.stringify({
@@ -206,14 +218,13 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
         return await original(input, init);
       }
       
-      // 添加请求间隔控制，避免并发请求
-      const now = Date.now();
-      const timeSinceLastRequest = now - lastRequestTime;
-      if (timeSinceLastRequest < MIN_REQUEST_INTERVAL_MS) {
-        const waitTime = MIN_REQUEST_INTERVAL_MS - timeSinceLastRequest;
-        await new Promise(resolve => setTimeout(resolve, waitTime));
-      }
-      lastRequestTime = Date.now();
+      // 🔧 P17 修复：串行队列保证请求间隔，消除 TOCTOU 竞态
+      await new Promise<void>((resolve) => {
+        requestGatePromise = requestGatePromise.then(async () => {
+          await new Promise(r => setTimeout(r, MIN_REQUEST_GAP_MS));
+          resolve();
+        });
+      });
 
       const payload = await buildApprovalPayload({ input, init });
       if (!payload) {
@@ -231,10 +242,11 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
         );
       }
       
-      // 如果是重试请求，等待 1 秒
+      // 如果是重试请求，使用指数退避等待
       if (attemptEntry && attemptEntry.failureCount > 0) {
-        console.warn(`LLM 请求重试中（第 ${attemptEntry.failureCount} 次失败后重试），等待 ${RETRY_DELAY_MS}ms...`);
-        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+        const retryDelay = computeRetryDelay(attemptEntry.failureCount);
+        console.warn(`LLM 请求重试中（第 ${attemptEntry.failureCount} 次失败后重试），等待 ${retryDelay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
       }
 
       const approvals = loadLlmApprovals();
@@ -353,8 +365,8 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
     input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> {
-    // 添加 60 秒超时（大 payload 需要更长时间）
-    const TIMEOUT_MS = 60000; // 60 秒
+    // 🔧 P19 修复：从 60s 提高到 180s，创作任务（3000+ 字）需要更长时间
+    const TIMEOUT_MS = 180_000; // 180 秒
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
       console.warn(`[llm-gated-fetch] ⚠️ LLM 请求超时（${TIMEOUT_MS}ms），正在中断请求...`);
@@ -690,9 +702,10 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
         console.warn("[llm-gated-fetch] ⚠️ 可重试的错误，正在重试...");
       }
       
-      // 重试
-      console.warn(`[llm-gated-fetch] 🔄 正在重试 LLM 请求（第 ${currentAttempt?.failureCount || 1} 次失败后重试）...`);
-      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+      // 重试（使用指数退避）
+      const retryDelay = computeRetryDelay(currentAttempt?.failureCount || 1);
+      console.warn(`[llm-gated-fetch] 🔄 正在重试 LLM 请求（第 ${currentAttempt?.failureCount || 1} 次失败后重试），等待 ${retryDelay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
       return executeRequestWithRetry(attemptKey, input, init);
     }
   };

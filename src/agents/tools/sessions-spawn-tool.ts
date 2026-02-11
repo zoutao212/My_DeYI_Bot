@@ -19,6 +19,7 @@ import { buildSubagentSystemPrompt } from "../subagent-announce.js";
 import { registerSubagentRun } from "../subagent-registry.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readStringParam } from "./common.js";
+import { getCurrentFollowupRunContext } from "./enqueue-task-tool.js";
 import {
   resolveDisplaySessionKey,
   resolveInternalSessionKey,
@@ -115,6 +116,17 @@ export function createSessionsSpawnTool(opts?: {
         return jsonResult({
           status: "forbidden",
           error: "sessions_spawn is not allowed from sub-agent sessions",
+        });
+      }
+
+      // 🔧 P13 修复：子任务执行上下文中禁止使用 sessions_spawn
+      // 根因：LLM 在 depth>0 子任务中调用 sessions_spawn 绕过任务系统，
+      // 导致子 session 的输出不被追踪，只有元叙述被当作 output
+      const followupCtx = getCurrentFollowupRunContext();
+      if (followupCtx && followupCtx.isQueueTask && !followupCtx.isRootTask && !followupCtx.isNewRootTask) {
+        return jsonResult({
+          status: "forbidden",
+          error: "❌ 你正在执行一个子任务，不能使用 sessions_spawn 委派。\n\n✅ 正确做法：\n1. 直接使用 write 工具将内容写入文件\n2. 在聊天中回复简短确认\n3. 不要把任务交给别人",
         });
       }
       const requesterInternalKey = requesterSessionKey

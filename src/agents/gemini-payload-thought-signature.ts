@@ -38,6 +38,15 @@ function shouldEnable(params: {
     ? modelStr.split("/")[0]
     : "";
   const effectiveProvider = providerStr || providerFromModel;
+  const apiStr = (params.modelApi ?? "").trim().toLowerCase();
+
+  // P22: 对标准 OpenAI API（openai-completions / openai-responses）默认禁用
+  // thought_signature 是 Gemini 专有字段，注入到 OpenAI 格式会污染 payload、
+  // 增加 token 消耗、并可能导致模型行为异常
+  if (apiStr === "openai-completions" || apiStr === "openai-responses") {
+    log.debug(`[thought_signature] Disabled for ${apiStr} API (provider: ${effectiveProvider})`);
+    return false;
+  }
 
   // 对 yinli 禁用 thought_signature
   // 原因：yinli 的 API 不支持 thought_signature，会返回 "Corrupted thought signature" 错误
@@ -46,22 +55,15 @@ function shouldEnable(params: {
     return false;
   }
 
-  // 对 vectorengine 禁用 Gemini 格式转换
+  // 对 vectorengine 禁用
   // 原因：vectorengine 声称 OpenAI 兼容，但实际上不支持 Gemini 格式
-  // 后台报错："请求失败,如果多次出现，请联系客服"
   if (effectiveProvider.includes("vectorengine")) {
-    log.debug(`[thought_signature] Disabled for vectorengine provider (use OpenAI format)`);
+    log.debug(`[thought_signature] Disabled for vectorengine provider`);
     return false;
   }
-  // 所以必须启用 patcher
-  if (effectiveProvider.includes("vectorengine")) {
-    log.debug(`[thought_signature] Enabled for vectorengine provider (Gemini format + thought_signature required)`);
-    return true;
-  }
 
-  // 对其他 provider，默认启用 thought_signature patcher
-  // 这样可以确保中转 API 不会因为缺少 thought_signature 而报错
-  log.debug(`[thought_signature] Enabled for provider: ${effectiveProvider}`);
+  // 对其他 provider + google-generative-ai API，启用 thought_signature patcher
+  log.debug(`[thought_signature] Enabled for provider: ${effectiveProvider}, api: ${apiStr}`);
   return true;
 }
 

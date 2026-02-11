@@ -522,6 +522,24 @@ export interface TaskTreeMetadata {
     toolDependencies: number;
     historicalPerformance: number;
   };
+
+  // 🆕 V3: 总纲领（Master Blueprint）— 多智能体编排的共享上下文
+
+  /**
+   * AI 生成的总纲领/创作大纲
+   *
+   * 在根任务首次分解前由 LLM 生成，包含：
+   * - 整体规划（如完整剧情大纲、架构设计、项目蓝图）
+   * - 子任务间的协调约束（角色一致性、风格统一、接口规范）
+   * - 各子任务的详细大纲
+   *
+   * 所有子任务执行时通过 extraSystemPrompt 注入此纲领，
+   * 实现"指挥家不亲自演奏，但确保每件乐器在正确时间发出正确声音"。
+   */
+  masterBlueprint?: string;
+
+  /** masterBlueprint 生成时间 */
+  blueprintGeneratedAt?: number;
 }
 
 /**
@@ -622,6 +640,24 @@ export interface SubTaskMetadata {
 
   /** 上一次执行产生的文件路径（restart 时保存，供参考） */
   previousProducedFilePaths?: string[];
+
+  // 🆕 V3: 子任务级大纲与并行标记
+
+  /**
+   * 子任务专属大纲（由 masterBlueprint 派生）
+   *
+   * 例如对于小说写作：每章的详细内容大纲（场景、角色行动、情感节点、衔接点）
+   * 例如对于项目开发：该模块的接口规范、依赖说明、验收标准
+   */
+  chapterOutline?: string;
+
+  /**
+   * 是否可安全并行执行
+   *
+   * 当 masterBlueprint 存在且子任务间无数据依赖时标记为 true。
+   * 让 drain.ts 的并行调度器优先并发执行这些任务。
+   */
+  parallelSafe?: boolean;
 }
 
 /**

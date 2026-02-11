@@ -92,6 +92,65 @@ export const TASK_DECOMPOSITION_PROMPTS_EN: TaskDecompositionPromptsL10n = {
   },
   
   // ========================================
+  // 🆕 V3: Master Blueprint Generation Prompts
+  // ========================================
+
+  blueprintExpertRole: "You are a senior project planning expert.",
+
+  blueprintInstruction: `Your task is to generate a **complete, detailed Master Blueprint** for the following large-scale task.
+
+This blueprint will serve as the "conductor's score", guiding multiple independent executors (each seeing only their subtask + this blueprint) to work in parallel.
+Therefore, the blueprint must be detailed enough so that each executor, even without knowing other executors' specific outputs, can ensure:`,
+
+  blueprintConsistencyPoints: [
+    "Consistent content style",
+    "Consistent character/concept descriptions",
+    "Clear interfaces/connection points",
+    "No contradictions or redundancy",
+  ],
+
+  blueprintTypeHints: {
+    writing: `This is a creative writing task. Please generate a complete creative blueprint including:
+1. **World Building**: Core settings, background rules, important locations
+2. **Character Profiles**: Each character's personality traits, motivations, growth arcs, relationship networks
+3. **Main Plot**: Complete outline of beginning-development-climax-resolution, key turning points
+4. **Detailed Chapter Outlines**: For each chapter/section:
+   - Core plot points (opening→development→climax→resolution)
+   - Appearing characters and their actions
+   - Scene description key points
+   - Connection points with preceding/following chapters ("hooks")
+   - Target word count and style requirements
+5. **Style Guide**: Narrative perspective, language style, atmospheric tone
+6. **Continuity Markers**: Foreshadowing between chapters, callbacks, character state changes`,
+    coding: `This is a coding task. Please generate a complete technical blueprint including:
+1. **Architecture Design**: Module division, interface definitions, data flow
+2. **Detailed Module Specifications**: Input/output, dependencies, key function signatures
+3. **Implementation Order**: Which modules can be developed in parallel, which have sequential dependencies
+4. **Quality Standards**: Acceptance criteria and test points for each module`,
+    generic: `Based on the task content, please generate a complete execution blueprint including:
+1. **Overall Goals** and success criteria
+2. **Step-by-step Plan**: Detailed description and acceptance criteria for each subtask
+3. **Dependencies and coordination between subtasks**
+4. **Quality control points**`,
+  },
+
+  blueprintOriginalTaskLabel: "Original Task",
+
+  blueprintOutputFormatHint: "Please output the blueprint content directly (Markdown format). Do not output JSON or explain your thinking process.\nThe blueprint should be detailed enough for each executor to independently complete their work by looking at only their section.",
+
+  blueprintDecompositionInstruction: `📋 **Master Blueprint**: Below is the pre-generated detailed planning blueprint for this task.
+When decomposing subtasks, each subtask's prompt must include the detailed requirements from the corresponding section of the blueprint (scenes, characters, connection points, etc.).
+Do not generate vague prompts — incorporate the specific content from the blueprint into each subtask.
+Also, if subtasks have no data dependencies (e.g., individual chapter writing), set dependencies to an empty array [],
+so the system can execute them in parallel for faster completion.`,
+
+  blueprintChapterOutlineInstruction: `🔑 **Important**: Each subtask's metadata must include a "chapterOutline" field,
+extracting the chapter/module outline corresponding to that subtask from the blueprint (scenes, character actions, emotional nodes, connection points, etc.) verbatim.
+This outline will serve as the executor's dedicated guide, ensuring content consistency during parallel execution.`,
+
+  blueprintTruncatedHint: "...[Blueprint truncated]",
+
+  // ========================================
   // Task Estimation Prompts
   // ========================================
   

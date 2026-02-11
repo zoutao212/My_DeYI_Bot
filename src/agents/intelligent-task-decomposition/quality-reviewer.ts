@@ -157,9 +157,16 @@ export class QualityReviewer {
       if (producedPaths && producedPaths.length > 0) {
         try {
           const fs = await import("node:fs/promises");
+          const nodePath = await import("node:path");
+          const nodeOs = await import("node:os");
           const contents: string[] = [];
-          for (const filePath of producedPaths) {
+          for (const rawFilePath of producedPaths) {
             try {
+              // 🔧 P6/P11 修复：相对路径解析（与 orchestrator 对齐）
+              let filePath = rawFilePath;
+              if (!nodePath.default.isAbsolute(filePath)) {
+                filePath = nodePath.default.join(nodeOs.default.homedir(), "clawd", filePath);
+              }
               const content = await fs.readFile(filePath, "utf-8");
               contents.push(content);
             } catch {
@@ -533,6 +540,22 @@ ${prompts.jsonOnlyReminder}`;
       ? `\n\n📋 历史信息：这是第 ${subTask.retryCount ?? 0} 次重试。上次被打回的原因：\n${previousFindings.map((f, i) => `${i + 1}. ${f}`).join("\n")}\n请重点检查这些问题是否已改进。如果已改进，即使其他方面略有不足也可以 continue。\n`
       : "";
 
+    // 🆕 V3: 注入总纲领摘要 + 子任务专属大纲到质检 prompt
+    // 让质检 LLM 能判断输出是否符合纲领的角色/风格/世界观要求
+    let blueprintReviewCtx = "";
+    if (taskTree.metadata?.masterBlueprint) {
+      const bp = taskTree.metadata.masterBlueprint;
+      // 截断到 2000 字符，质检只需要核心要素（角色、风格、世界观），不需要完整纲领
+      const truncatedBp = bp.length > 2000
+        ? bp.substring(0, 2000) + "\n...[纲领已截断]"
+        : bp;
+      blueprintReviewCtx = `\n\n📋 **总纲领摘要**（用于判断内容一致性）：\n${truncatedBp}\n`;
+    }
+    let chapterOutlineCtx = "";
+    if (subTask.metadata?.chapterOutline) {
+      chapterOutlineCtx = `\n📖 **本子任务专属大纲**：\n${subTask.metadata.chapterOutline}\n请重点检查输出是否覆盖了大纲中的核心情节点、角色行动和衔接点。\n`;
+    }
+
     // 🔧 关键修复：优先使用文件内容作为质检对象
     // subTask.output 可能只是 LLM 的确认消息（如"已创作完成"），不是实际产出。
     // 当有文件内容时，用文件内容替代 output，让质检 LLM 看到真实产出。
@@ -553,7 +576,7 @@ ${prompts.labels.subTaskInfo}：
 - ${prompts.labels.description}: ${subTask.prompt}
 - ${prompts.labels.status}: ${subTask.status}
 ${outputSection}
-
+${blueprintReviewCtx}${chapterOutlineCtx}
 ${prompts.completionReview.aspectsTitle}
 
 ${aspectsStr}
@@ -596,6 +619,18 @@ ${prompts.jsonOnlyReminder}`;
    * @returns 提取到的字数数值，未找到返回 undefined
    */
   extractWordCountRequirement(prompt: string): number | undefined {
+    // 🔧 P7 修复：续写子任务的 prompt 同时包含"原始任务：...（3000字）"和"本部分要求：约 1318 字"，
+    // 必须优先匹配"本部分要求"，否则贪心匹配到原始任务的 3000 字，导致续写片段永远达不到字数要求，
+    // 触发无限 restart → decompose 循环。
+    const continuationPattern = /本部分要求[：:]?\s*(?:约|大约)?\s*(\d{3,})\s*[字个]/;
+    const contMatch = prompt.match(continuationPattern);
+    if (contMatch?.[1]) {
+      const num = parseInt(contMatch[1], 10);
+      if (num >= 100 && num <= 1_000_000) {
+        return num;
+      }
+    }
+
     // 匹配 "N字"、"N 字"、"N个字"、"N words"、"N characters" 等
     const patterns = [
       /(\d{3,})\s*[字个](?:左右|以上|以内)?/,

@@ -12,6 +12,31 @@ import { findParallelGroups } from "../../../agents/intelligent-task-decompositi
 import { runWithTracking } from "../../../agents/intelligent-task-decomposition/file-tracker.js";
 import { getGlobalOrchestrator } from "../../../agents/tools/enqueue-task-tool.js";
 
+// ☆新 V3: 并行并发上限，防止同时发射过多 LLM 请求导致 rate limiting 或 token 预算瞬间耗尽
+// 🔧 P21 修复：从 3 降到 2，trace 证明 3 并发就触发上游 429
+const MAX_PARALLEL_CONCURRENCY = 2;
+const PARALLEL_BATCH_COOLDOWN_MS = 3000; // 批次之间冷却 3 秒
+
+/**
+ * 分批并发执行：每批最多 MAX_PARALLEL_CONCURRENCY 个任务
+ */
+async function runParallelChunked(
+  items: FollowupRun[],
+  runner: (item: FollowupRun) => Promise<void>,
+): Promise<void> {
+  for (let i = 0; i < items.length; i += MAX_PARALLEL_CONCURRENCY) {
+    const chunk = items.slice(i, i + MAX_PARALLEL_CONCURRENCY);
+    if (i > 0) {
+      // 🔧 P21 修复：批次之间添加冷却时间，避免上游 rate limiting
+      console.log(`[drain] 🔄 并行批次 ${Math.floor(i / MAX_PARALLEL_CONCURRENCY) + 1}: ${chunk.length} tasks，冷却 ${PARALLEL_BATCH_COOLDOWN_MS}ms`);
+      await new Promise(r => setTimeout(r, PARALLEL_BATCH_COOLDOWN_MS));
+    }
+    await Promise.allSettled(chunk.map((item) =>
+      runWithTracking(item.subTaskId ?? "unknown", () => runner(item)),
+    ));
+  }
+}
+
 export function scheduleFollowupDrain(
   key: string,
   runFollowup: (run: FollowupRun) => Promise<void>,
@@ -30,6 +55,8 @@ export function scheduleFollowupDrain(
       let drainIteration = 0;
       let waitCount = 0; // 🔧 P4 修复：wait 分支安全阀计数器
       const MAX_WAIT_ITERATIONS = 30; // 最多等待 30 次 × 2 秒 = 60 秒
+      const drainStartTime = Date.now(); // 🆕 drain 整体计时
+      let tasksCompletedInDrain = 0;
       while (queue.items.length > 0 || queue.droppedCount > 0) {
         drainIteration++;
         console.log(`[drain] 🔄 Iteration ${drainIteration}: items=${queue.items.length}, droppedCount=${queue.droppedCount}, mode=${queue.mode}`);
@@ -176,10 +203,11 @@ export function scheduleFollowupDrain(
                           }
                         }
                         if (parallelItems.length > 1) {
-                          console.log(`[drain] 🚀 Tree-driven parallel: ${parallelItems.length} tasks`);
-                          await Promise.allSettled(parallelItems.map((item) =>
-                            runWithTracking(item.subTaskId ?? "unknown", () => runFollowup(item)),
-                          ));
+                          console.log(`[drain] 🚀 Tree-driven parallel: ${parallelItems.length} tasks (max concurrency=${MAX_PARALLEL_CONCURRENCY})`);
+                          const batchStart = Date.now();
+                          await runParallelChunked(parallelItems, runFollowup);
+                          tasksCompletedInDrain += parallelItems.length;
+                          console.log(`[drain] ✅ 并行批次完成: ${parallelItems.length} tasks, 耗时 ${Math.round((Date.now() - batchStart) / 1000)}s, 总完成 ${tasksCompletedInDrain}`);
                           continue;
                         }
                         // 只匹配到 1 个或 0 个，放回队列回退到串行
@@ -203,7 +231,8 @@ export function scheduleFollowupDrain(
                           // 用 runWithTracking 确保每个任务在自己的 ALS 上下文中运行。
                           const trackingId = matched.subTaskId ?? "unknown";
                           await runWithTracking(trackingId, () => runFollowup(matched));
-                          console.log(`[drain] ✅ Done: ${matched.summaryLine || 'none'}, remaining=${queue.items.length}`);
+                          tasksCompletedInDrain++;
+                          console.log(`[drain] ✅ Done: ${matched.summaryLine || 'none'}, remaining=${queue.items.length}, 总完成=${tasksCompletedInDrain}`);
                           continue;
                         }
                       }
@@ -411,10 +440,8 @@ export function scheduleFollowupDrain(
                 }
 
                 if (parallelItems.length > 1) {
-                  console.log(`[drain] 🚀 Parallel execution: ${parallelItems.length} tasks`);
-                  await Promise.allSettled(parallelItems.map((item) =>
-                    runWithTracking(item.subTaskId ?? "unknown", () => runFollowup(item)),
-                  ));
+                  console.log(`[drain] 🚀 Parallel execution: ${parallelItems.length} tasks (max concurrency=${MAX_PARALLEL_CONCURRENCY})`);
+                  await runParallelChunked(parallelItems, runFollowup);
                   continue;
                 } else {
                   // 放回队列头部
@@ -438,7 +465,62 @@ export function scheduleFollowupDrain(
         }
         console.log(`[drain] ✅ Task finished: summary=${next.summaryLine || 'none'}, remaining=${queue.items.length}`);
       }
-      console.log(`[drain] 🏁 While loop exited: items=${queue.items.length}, droppedCount=${queue.droppedCount}`);
+      const drainTotalSec = Math.round((Date.now() - drainStartTime) / 1000);
+      console.log(`[drain] 🏁 While loop exited: items=${queue.items.length}, droppedCount=${queue.droppedCount}, 完成=${tasksCompletedInDrain}, 总耗时=${drainTotalSec}s`);
+
+      // 🔧 P16 修复：drain 退出前检查任务树中是否有可执行的孤儿任务
+      // 根因：进程重启后内存队列丢失，pending 任务在任务树中但无对应的 FollowupRun。
+      // drain while 循环因 queue.items.length===0 而退出，pending 任务永远不会被执行。
+      // 修复：退出前扫描任务树，为可执行的 pending 任务构造 synthetic FollowupRun 并入队。
+      if (queue.items.length === 0) {
+        try {
+          const lastQueueItem = queue.lastRun ? { run: queue.lastRun } as FollowupRun : null;
+          const peekForRecovery = lastQueueItem;
+          if (peekForRecovery?.run?.sessionId) {
+            const orchestrator = getGlobalOrchestrator();
+            const sessionId = peekForRecovery.run.sessionId;
+            const taskTree = await orchestrator.loadTaskTree(sessionId);
+            if (taskTree && taskTree.status === "active") {
+              // 找到所有活跃轮次中可执行的 pending 任务
+              const activeRounds = (taskTree.rounds ?? []).filter(
+                r => r.status === "active" || !r.status,
+              );
+              for (const round of activeRounds) {
+                const schedule = orchestrator.getNextExecutableTasksForDrain(taskTree, round.id);
+                if (schedule.action === "execute" && schedule.tasks && schedule.tasks.length > 0) {
+                  console.log(
+                    `[drain] 🔧 P16: 发现 ${schedule.tasks.length} 个孤儿 pending 任务 (Round ${round.id})，构造 synthetic FollowupRun 入队`,
+                  );
+                  for (const orphanTask of schedule.tasks) {
+                    const syntheticRun: FollowupRun = {
+                      prompt: orphanTask.prompt,
+                      summaryLine: orphanTask.summary,
+                      enqueuedAt: Date.now(),
+                      run: peekForRecovery.run,
+                      isQueueTask: true,
+                      isRootTask: false,
+                      isNewRootTask: false,
+                      taskDepth: orphanTask.depth ?? 0,
+                      subTaskId: orphanTask.id,
+                      rootTaskId: orphanTask.rootTaskId ?? round.id,
+                    };
+                    queue.items.push(syntheticRun);
+                  }
+                  if (schedule.treeModified) {
+                    await orchestrator.saveTaskTree(taskTree);
+                  }
+                }
+              }
+            }
+          }
+        } catch (recoveryErr) {
+          console.warn(`[drain] ⚠️ P16: 孤儿任务恢复失败（不阻塞）: ${recoveryErr}`);
+        }
+        // 如果恢复了孤儿任务，重新进入 drain 循环
+        if (queue.items.length > 0) {
+          console.log(`[drain] 🔄 P16: 恢复了 ${queue.items.length} 个孤儿任务，重新调度 drain`);
+        }
+      }
     } catch (err) {
       defaultRuntime.error?.(`followup queue drain failed for ${key}: ${String(err)}`);
       console.error(`[drain] ❌ Drain loop crashed:`, err);
