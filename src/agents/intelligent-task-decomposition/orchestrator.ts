@@ -27,6 +27,7 @@ import { createSystemLLMCaller, type SystemLLMCallerConfig } from "./system-llm-
 import { classifyTaskIntent, type TaskIntentResult } from "./task-intent-classifier.js";
 import { deriveExecutionRole, createExecutionContext } from "./execution-context.js";
 import { getPrompts } from "./prompts-loader.js";
+import { classifyTaskType, classifyAndEnrich, getBlueprintTypeKey, isWordCountCritical, requiresFileOutput, type TaskTypeClassification } from "./task-type-classifier.js";
 import type { ClawdbotConfig } from "../../config/config.js";
 
 /**
@@ -579,6 +580,78 @@ export class Orchestrator {
             `[Orchestrator] ✅ P5 精确字数前置检查通过：要求 ${wordCountReq} 字，实际 ${actualLength} 字（${Math.round(actualLength / wordCountReq * 100)}%）`,
           );
         } // end if (wordCountReq && subTask.output)
+
+        // ── 🆕 V6: 通用前置验证（非写作任务的规则驱动质检） ──
+        // 写作类的字数检查已在上方处理完毕，此处处理其他任务类型的验证策略
+        // （completeness / file_output / structured_output / tool_usage 等）
+        // 仅当有 critical 级别失败时才触发 restart/decompose，warning 只记录不阻塞
+        {
+          const taskType = subTask.taskType ?? "generic";
+          const strategies = subTask.metadata?.validationStrategies ?? [];
+          // 跳过写作类（已由上方字数检查覆盖）和无策略的任务
+          const nonWritingStrategies = strategies.filter(s => s !== "word_count");
+          if (nonWritingStrategies.length > 0) {
+            try {
+              const { validateTaskOutput } = await import("./task-output-validator.js");
+              const validationCtx = {
+                actualContent: subTask.output ?? undefined,
+                actualLength: (subTask.output ?? "").length,
+                producedFilePaths: subTask.metadata?.producedFilePaths,
+                fallbackFilePath: subTask.metadata?.fallbackFilePath,
+              };
+              const validationResult = await validateTaskOutput(subTask, taskTree, validationCtx);
+
+              if (validationResult.hasCriticalFailure) {
+                const currentRetry = subTask.retryCount ?? 0;
+                const maxRetries = this.getDefaultMaxRetries();
+                const failedDetails = validationResult.results
+                  .filter(r => !r.passed)
+                  .map(r => `[${r.strategy}] ${r.reason}`)
+                  .join("; ");
+
+                if (validationResult.suggestedDecision === "decompose") {
+                  console.log(`[Orchestrator] 🆕 V6 前置验证: critical 失败，建议 decompose → ${failedDetails}`);
+                  try {
+                    const newSubTasks = await this.decomposeFailedTask(taskTree, subTask);
+                    if (newSubTasks.length > 0) {
+                      result.decision = "decompose";
+                      result.decomposedTaskIds = newSubTasks.map(t => t.id);
+                      result.findings = [`V6 前置验证失败(${taskType}): ${failedDetails}`];
+                      await this.taskTreeManager.save(taskTree);
+                      return result;
+                    }
+                  } catch (decompErr) {
+                    console.warn(`[Orchestrator] ⚠️ V6 decompose 失败，回退到 restart: ${decompErr}`);
+                  }
+                }
+
+                if (currentRetry < maxRetries) {
+                  console.warn(`[Orchestrator] ⚠️ V6 前置验证: critical 失败，restart (${currentRetry + 1}/${maxRetries}) → ${failedDetails}`);
+                  if (!subTask.metadata) subTask.metadata = {};
+                  subTask.metadata.lastFailureFindings = [`V6验证失败: ${failedDetails}`];
+                  await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
+                  subTask.retryCount = currentRetry + 1;
+                  result.decision = "restart";
+                  result.needsRequeue = true;
+                  result.findings = [`V6 前置验证失败(${taskType}): ${failedDetails}`];
+                  await this.taskTreeManager.save(taskTree);
+                  return result;
+                }
+                // 重试耗尽
+                console.warn(`[Orchestrator] ❌ V6 前置验证: 重试耗尽 (${currentRetry}/${maxRetries})，标记失败`);
+                await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
+                subTask.error = `V6 前置验证重试耗尽: ${failedDetails}`;
+                result.decision = "overthrow";
+                result.markedFailed = true;
+                await this.taskTreeManager.save(taskTree);
+                return result;
+              }
+            } catch (validatorErr) {
+              // 验证器本身出错不阻塞，降级到 LLM 质检
+              console.warn(`[Orchestrator] ⚠️ V6 前置验证出错，降级到 LLM 质检: ${validatorErr}`);
+            }
+          }
+        }
 
         // 🔧 LLM 质检：使用子任务所属轮次的实际根任务描述
         // 质检 LLM 现在能看到实际文件内容（在 reviewSubTaskCompletion 中读取并注入）
@@ -1283,50 +1356,62 @@ export class Orchestrator {
     // 🆕 V5: chunk 子任务不再分解（Map/Reduce/Finalize 子任务直接执行）
     if (subTask.metadata?.isChunkTask) return false;
     
-    // 🔧 多维度启发式判断（替代单一的 prompt 长度阈值）
     const prompt = subTask.prompt;
     const promptLen = prompt.length;
-    
-    // 维度 1：prompt 长度（基础信号）
-    const isLongPrompt = promptLen > 800;
-    
-    // 维度 2：量化指标检测（字数要求 > 5000 字的任务值得分解）
-    const wordCountMatch = prompt.match(/(\d{4,})\s*[字个]/);
-    const hasLargeWordCount = wordCountMatch ? parseInt(wordCountMatch[1], 10) >= 5000 : false;
 
-    // 🆕 V4 维度：写作类字数分段候选（字数要求 >= 1500 字即可分段，不依赖 LLM）
-    // 常量 SEGMENT_TARGET_CHARS 范围 800-1600，超过此范围的写作任务都值得拆分
+    // 🆕 V6: 统一任务类型分类（替代散落的关键词匹配）
+    const classification = classifyAndEnrich(subTask);
+    
+    // ── 维度 1: 分类器建议（基于任务类型特征的启发式判断） ──
+    const classifierSuggestsDecompose = classification.shouldAutoDecompose;
+
+    // ── 维度 2: 写作分段候选（V4 向后兼容） ──
     const extractedWordCount = this.qualityReviewer.extractWordCountRequirement(prompt);
     const isWritingSegmentCandidate = !!(
       extractedWordCount &&
       extractedWordCount >= 1500 &&
-      this.isWritingPrompt(prompt)
+      classification.type === "writing"
     );
-    
-    // 维度 3：多步骤信号（包含列表、编号、"步骤"等关键词）
+
+    // ── 维度 3: 大输入文件分析候选（V5 向后兼容） ──
+    const detectedFilePath = this.detectInputFilePath(prompt);
+    const isLargeInputCandidate = !!(
+      detectedFilePath &&
+      (classification.type === "analysis" || classification.type === "research")
+    );
+
+    // ── 维度 4: 多步骤信号（通用） ──
     const multiStepSignals = [
       /(?:第[一二三四五六七八九十\d]+[章节步]|step\s*\d)/i,
-      /(?:\d+[\.\)]\s*\S)/,  // 编号列表
+      /(?:\d+[\.\)]\s*\S)/,
       /(?:首先|其次|然后|最后|接着)/,
       /(?:分别|依次|逐一)/,
     ];
     const hasMultiStepSignals = multiStepSignals.filter(p => p.test(prompt)).length >= 2;
     
-    // 🆕 V5 维度：大输入文件分析候选（prompt 含文件路径 + 分析关键词）
-    // 同步检测仅判断"prompt 里是否有疑似文件路径 + 分析意图"，
-    // 实际文件大小探测在 decomposeSubTask() 中异步完成
-    const detectedFilePath = this.detectInputFilePath(prompt);
-    const isLargeInputCandidate = !!(detectedFilePath && this.isAnalysisPrompt(prompt));
+    // ── 维度 5: 量化指标（字数/数量要求大） ──
+    const wordCountMatch = prompt.match(/(\d{4,})\s*[字个]/);
+    const hasLargeWordCount = wordCountMatch ? parseInt(wordCountMatch[1], 10) >= 5000 : false;
 
-    // 综合判断：写作分段候选/大输入候选直接通过，其他任务保持原有逻辑
-    const score = (isLongPrompt ? 1 : 0) + (hasLargeWordCount ? 1 : 0) + (hasMultiStepSignals ? 1 : 0);
-    const shouldDecompose = isWritingSegmentCandidate || isLargeInputCandidate || (score >= 1 && (isLongPrompt || hasLargeWordCount));
+    // ── 维度 6: prompt 长度（基础信号） ──
+    const isLongPrompt = promptLen > 800;
+
+    // 综合判断：
+    // - 写作分段/大输入候选 → 直接通过
+    // - 分类器建议分解 → 直接通过
+    // - 多维度综合得分 → 超过阈值通过
+    const legacyScore = (isLongPrompt ? 1 : 0) + (hasLargeWordCount ? 1 : 0) + (hasMultiStepSignals ? 1 : 0);
+    const shouldDecompose = 
+      isWritingSegmentCandidate ||
+      isLargeInputCandidate ||
+      classifierSuggestsDecompose ||
+      (legacyScore >= 1 && (isLongPrompt || hasLargeWordCount));
     
     if (shouldDecompose) {
       console.log(
-        `[Orchestrator] 📊 P2: 子任务 ${subTask.id} prompt=${promptLen} 字符, ` +
+        `[Orchestrator] 📊 V6: 子任务 ${subTask.id} type=${classification.type}(${classification.confidence}%) prompt=${promptLen}字符, ` +
         `depth=${subTask.depth ?? 0}/${maxDepth}, ` +
-        `signals=[long=${isLongPrompt}, wordCount=${hasLargeWordCount}, multiStep=${hasMultiStepSignals}` +
+        `signals=[classifier=${classifierSuggestsDecompose}, long=${isLongPrompt}, wordCount=${hasLargeWordCount}, multiStep=${hasMultiStepSignals}` +
         `, writingSegment=${isWritingSegmentCandidate}(${extractedWordCount ?? 0}字)` +
         `, largeInput=${isLargeInputCandidate}(${detectedFilePath ?? "none"})] → 推荐自动分解`,
       );
@@ -1776,24 +1861,13 @@ export class Orchestrator {
       (subTask.depth ?? 0) === 0 &&
       !taskTree.metadata?.masterBlueprint
     ) {
-      // 自动检测任务类型（writing/coding/analysis）— 轻量关键词匹配，无需额外 LLM 调用
-      const rootTaskLower = taskTree.rootTask.toLowerCase();
-      const writingKeywords = [
-        "写", "创作", "撰写", "小说", "文章", "故事", "翻译", "论文", "报告", "剧本", "散文", "诗",
-        "write", "novel", "story", "chapter", "essay", "article", "blog", "translate", "script",
-      ];
-      const codingKeywords = [
-        "代码", "编程", "开发", "实现", "重构", "修复", "优化",
-        "code", "develop", "implement", "api", "function", "refactor", "bug", "feature", "fix",
-      ];
-      const taskType = writingKeywords.some(k => rootTaskLower.includes(k))
-        ? "writing"
-        : codingKeywords.some(k => rootTaskLower.includes(k))
-          ? "coding"
-          : "generic";
+      // 🆕 V6: 用统一分类器替代散落的关键词匹配
+      const rootClassification = classifyTaskType(taskTree.rootTask);
+      const taskType = getBlueprintTypeKey(rootClassification.type);
 
-      // O1: 按任务类型区分复杂度阈值 — 写作类对纲领依赖度更高，门槛更低
-      const complexityThreshold = taskType === "writing" ? 10 : 30;
+      // O1: 按任务类型区分复杂度阈值 — 写作类和设计类对纲领依赖度更高，门槛更低
+      const lowThresholdTypes = ["writing", "design", "research"];
+      const complexityThreshold = lowThresholdTypes.includes(taskType) ? 10 : 30;
       const currentComplexity = taskTree.metadata?.complexityScore ?? 0;
       if (currentComplexity <= complexityThreshold) {
         console.log(
@@ -1857,7 +1931,9 @@ export class Orchestrator {
 
     // 🆕 V4: 写作分段快捷路径 — 跳过 LLM 分解，直接按字数拆分
     // 条件：写作类 prompt + 字数要求 >= 1500 + 非分段子任务
-    if (this.isWritingPrompt(subTask.prompt) && !subTask.metadata?.isSegment) {
+    // 🆕 V6: 用统一分类器替代 isWritingPrompt()
+    const subTaskClassification = classifyTaskType(subTask.prompt);
+    if (subTaskClassification.type === "writing" && !subTask.metadata?.isSegment) {
       const extractedWC = this.qualityReviewer.extractWordCountRequirement(subTask.prompt);
       if (extractedWC && extractedWC >= 1500) {
         console.log(

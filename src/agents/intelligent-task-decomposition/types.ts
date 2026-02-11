@@ -268,10 +268,14 @@ export type TaskType =
   | "writing"      // 创作型：LLM 生成内容并写入文件
   | "coding"       // 编码型：LLM 编写/修改代码
   | "analysis"     // 分析型：LLM 阅读内容并产出结论
+  | "research"     // 研究型：LLM 搜索、整理、综合信息
+  | "data"         // 数据型：LLM 处理、转换、统计数据
+  | "design"       // 设计型：LLM 产出架构、方案、系统设计
   | "merge"        // 合并型：系统拼接多个文件（不应走 LLM）
   | "delivery"     // 交付型：系统发送文件到用户（不应走 LLM）
   | "planning"     // 规划型：LLM 产出大纲/计划
   | "review"       // 审校型：LLM 阅读并校对/修改
+  | "automation"   // 自动化型：LLM 编排多工具调用完成操作流
   | "generic";     // 通用型：无法分类，走标准 LLM
 
 // ========================================
@@ -707,6 +711,27 @@ export interface SubTaskMetadata {
    * 让 drain.ts 的并行调度器优先并发执行这些任务。
    */
   parallelSafe?: boolean;
+
+  // 🆕 V6: 泛化验证相关字段
+
+  /**
+   * 子任务的验证策略列表（由 classifyTaskType 自动填充）
+   *
+   * 不同任务类型使用不同的验证策略：
+   * - word_count: 字数检查（写作类）
+   * - file_output: 文件产出检查（写作/编码/数据类）
+   * - code_syntax: 代码语法检查（编码类）
+   * - completeness: 完成度检查（通用）
+   * - structured_output: 结构化输出检查（数据/分析类）
+   * - tool_usage: 工具调用检查（自动化类）
+   */
+  validationStrategies?: string[];
+
+  /** 验证通过的策略列表（执行后由 validator 填充） */
+  passedValidations?: string[];
+
+  /** 验证失败的策略及原因 */
+  failedValidations?: Array<{ strategy: string; reason: string }>;
 }
 
 /**
@@ -808,7 +833,7 @@ export interface QualityReviewResult {
    * - off_topic: 跑题/偏离任务要求 → restart
    * - other: 其他/无法分类 → 正常 restart
    */
-  failureType?: "word_count" | "content_confusion" | "quality" | "style" | "repetition" | "off_topic" | "other";
+  failureType?: "word_count" | "content_confusion" | "quality" | "style" | "repetition" | "off_topic" | "incomplete" | "wrong_format" | "tool_misuse" | "logic_error" | "other";
 }
 
 /**

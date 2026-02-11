@@ -21,6 +21,7 @@ import type {
 } from "./types.js";
 import { getPrompts } from "./prompts-loader.js";
 import { extractJsonFromResponse } from "./json-extractor.js";
+import { classifyAndEnrich } from "./task-type-classifier.js";
 import type { LLMCaller } from "./batch-executor.js";
 
 /**
@@ -593,15 +594,22 @@ ${prompts.jsonOnlyReminder}`;
           metadata: item.metadata || {}
         };
         
-        // 🆕 自动识别写作任务并标记
-        const isWritingTask = this.detectWritingTask(subTask.prompt, subTask.summary);
-        if (isWritingTask) {
-          subTask.metadata = {
-            ...subTask.metadata,
-            requiresFileOutput: true,
-            expectedFileTypes: ["txt", "md", "doc", "docx", "pdf"]
-          };
-          console.log(`[LLMTaskDecomposer] 📝 检测到写作任务：${subTask.summary}`);
+        // 🆕 V6: 统一任务类型分类（替代原有的 detectWritingTask 单点检测）
+        // 自动设置 taskType 和 validationStrategies
+        try {
+          const classification = classifyAndEnrich(subTask);
+          console.log(`[LLMTaskDecomposer] 🏷️ V6 分类: ${subTask.summary} → type=${classification.type}(${classification.confidence}%)`);
+        } catch {
+          // 分类器失败时回退到原有逻辑
+          const isWritingTask = this.detectWritingTask(subTask.prompt, subTask.summary);
+          if (isWritingTask) {
+            subTask.metadata = {
+              ...subTask.metadata,
+              requiresFileOutput: true,
+              expectedFileTypes: ["txt", "md", "doc", "docx", "pdf"]
+            };
+            subTask.taskType = "writing";
+          }
         }
 
         // 🆕 V3: chapterOutline 提取确认（LLM 返回的 metadata.chapterOutline 已通过 item.metadata 透传）

@@ -126,7 +126,12 @@ export interface TaskDecompositionPromptsL10n {
   blueprintTypeHints: {
     writing: string;
     coding: string;
+    research: string;
+    data: string;
+    design: string;
+    analysis: string;
     generic: string;
+    [key: string]: string;
   };
 
   /** 总纲领生成 — 原始任务标签 */

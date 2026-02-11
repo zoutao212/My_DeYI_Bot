@@ -27,6 +27,7 @@ import type {
   ReviewDecision,
   TaskTreeChange
 } from "./types.js";
+import { classifyTaskType, isWordCountCritical } from "./task-type-classifier.js";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -528,8 +529,15 @@ ${prompts.jsonOnlyReminder}`;
     // 🔧 BUG5 修复：优先使用轮次根任务描述，避免跨轮次误判
     const effectiveRootTask = rootTaskOverride || taskTree.rootTask;
 
+    // 🆕 V6: 任务类型感知的审查重点
+    const taskType = subTask.taskType ?? classifyTaskType(subTask.prompt).type;
+    const taskTypeReviewHint = this.buildTaskTypeReviewHint(taskType);
+
     // 🔧 P0 修复：提取子任务 prompt 中的字数要求，注入硬性校验规则
-    const wordCountHint = this.extractWordCountRequirement(subTask.prompt);
+    // 🆕 V6: 仅对写作类任务注入字数硬性规则
+    const wordCountHint = isWordCountCritical(taskType)
+      ? this.extractWordCountRequirement(subTask.prompt)
+      : undefined;
     const wordCountRule = wordCountHint
       ? `\n\n⚠️ 字数硬性校验规则：\n该子任务要求产出约 ${wordCountHint} 字。请估算实际输出的字数（中文按字符计数）。\n- 实际字数 >= 要求的 80%（即 >= ${Math.floor(wordCountHint * 0.8)} 字）→ 可以 continue\n- 实际字数 < 要求的 80%（即 < ${Math.floor(wordCountHint * 0.8)} 字）→ 必须 restart，并在 findings 中注明"字数不达标：预期 ${wordCountHint} 字，实际约 X 字"\n- 注意：系统已在前置检查中拦截了 < 60% 的极端情况，你只需关注 60%-80% 区间的判断\n`
       : "";
@@ -580,10 +588,10 @@ ${blueprintReviewCtx}${chapterOutlineCtx}
 ${prompts.completionReview.aspectsTitle}
 
 ${aspectsStr}
-${wordCountRule}${retryContext}
+${taskTypeReviewHint}${wordCountRule}${retryContext}
 ⚠️ 决策指引（overthrow vs restart）：
 - "overthrow"（推翻）仅用于任务本身不可能完成的结构性错误（如需求矛盾、技术上不可行）。
-- 如果输出存在风格偏差（如出现不合时代/世界观的元素、语气不当、角色人格泄露导致的不当内容），应使用 "restart"（重新执行），因为这类问题在重试时通常可以修正。
+- 如果输出存在风格偏差、逻辑错误、格式问题等，应使用 "restart"（重新执行），因为这类问题在重试时通常可以修正。
 - 如果输出字数/篇幅严重不足（低于要求的 70%），必须使用 "restart"。
 - 只评估子任务自身的输出质量，不要因为输出风格与你的偏好不同就判定 overthrow。
 
@@ -593,7 +601,7 @@ ${prompts.jsonFormatInstruction}
 {
   "status": "passed" | "needs_adjustment" | "needs_restart" | "needs_overthrow",
   "decision": "continue" | "adjust" | "restart" | "overthrow",
-  "failureType": "word_count" | "content_confusion" | "quality" | "style" | "repetition" | "off_topic" | "other",
+  "failureType": "word_count" | "content_confusion" | "quality" | "style" | "repetition" | "off_topic" | "incomplete" | "wrong_format" | "tool_misuse" | "logic_error" | "other",
   "criteria": ["${prompts.labels.evaluationCriteria}1", "${prompts.labels.evaluationCriteria}2"],
   "findings": ["${prompts.labels.findings}1", "${prompts.labels.findings}2"],
   "suggestions": ["${prompts.labels.suggestions}1", "${prompts.labels.suggestions}2"]
@@ -601,15 +609,55 @@ ${prompts.jsonFormatInstruction}
 \`\`\`
 
 failureType 字段说明（decision 为 restart 或 overthrow 时必填，continue 时可省略）：
-- "word_count": 字数/篇幅严重不足
+- "word_count": 字数/篇幅严重不足（主要用于写作类任务）
 - "content_confusion": 输出中混入了其他任务/章节的内容，或内容归属错乱
 - "quality": 内容质量差、逻辑不通、情节断裂
-- "style": 风格偏差、语气不当、不符合要求的写作风格
+- "style": 风格偏差、语气不当、不符合要求的风格
 - "repetition": 大量重复前文已有的内容
 - "off_topic": 跑题、偏离任务要求
+- "incomplete": 任务未完全完成，存在遗漏的子项或步骤
+- "wrong_format": 输出格式不符合要求（如要求 JSON 却输出了纯文本）
+- "tool_misuse": 工具使用不当或未按要求调用工具
+- "logic_error": 逻辑错误、推理不正确、数据计算有误
 - "other": 其他无法归类的问题
 
 ${prompts.jsonOnlyReminder}`;
+  }
+
+  /**
+   * 🆕 V6: 根据任务类型生成专属的审查重点提示
+   *
+   * 不同任务类型有不同的质量关注点：
+   * - 写作类：字数、风格、连贯性
+   * - 编码类：正确性、完整性、代码质量
+   * - 分析/研究类：结构化、深度、覆盖度
+   * - 设计类：可行性、完整性、一致性
+   * - 数据类：准确性、格式正确性
+   * - 自动化类：工具调用完整性、操作结果验证
+   */
+  private buildTaskTypeReviewHint(taskType: string): string {
+    switch (taskType) {
+      case "writing":
+        return `\n\n🎯 **任务类型：写作/创作**\n审查重点：字数达标、风格一致、情节连贯、无内容混淆、结构完整（有开头有结尾）。\n`;
+      case "coding":
+        return `\n\n🎯 **任务类型：编码/开发**\n审查重点：代码逻辑正确性、是否覆盖所有需求点、接口/函数签名是否完整、是否有明显的 bug 或遗漏、代码风格一致性。\n注意：不要因为代码风格偏好差异而判定失败。关注功能正确性和完整性。\n`;
+      case "analysis":
+        return `\n\n🎯 **任务类型：分析**\n审查重点：分析是否有深度（不是泛泛而谈）、结论是否有数据/证据支撑、是否覆盖了所有要求的分析维度、输出是否有清晰的结构（标题/列表/表格）。\n`;
+      case "research":
+        return `\n\n🎯 **任务类型：研究/调研**\n审查重点：信息来源是否可靠、覆盖面是否全面、对比分析是否公允、结论是否有依据、是否有遗漏的关键维度。\n`;
+      case "data":
+        return `\n\n🎯 **任务类型：数据处理**\n审查重点：数据转换逻辑是否正确、输出格式是否符合要求、是否有数据丢失或异常值未处理、计算结果是否准确。\n`;
+      case "design":
+        return `\n\n🎯 **任务类型：设计/架构**\n审查重点：方案是否可行、是否覆盖了所有需求和约束、组件边界是否清晰、接口定义是否完整、是否考虑了扩展性和容错。\n`;
+      case "automation":
+        return `\n\n🎯 **任务类型：自动化/操作流**\n审查重点：是否实际执行了所需的操作（而非只生成描述）、操作步骤是否完整、是否有错误处理、执行结果是否符合预期。\n`;
+      case "planning":
+        return `\n\n🎯 **任务类型：规划/计划**\n审查重点：计划是否完整覆盖目标、步骤是否可执行、是否有明确的验收标准、优先级和依赖关系是否合理。\n`;
+      case "review":
+        return `\n\n🎯 **任务类型：审校/修改**\n审查重点：修改是否全面、是否引入了新问题、修改后的内容是否保持一致性。\n`;
+      default:
+        return `\n\n🎯 **任务类型：通用**\n审查重点：完成度（是否覆盖了所有要求）、正确性（逻辑是否自洽）、输出质量。\n`;
+    }
   }
 
   /**

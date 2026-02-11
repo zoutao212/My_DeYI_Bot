@@ -127,6 +127,33 @@ Therefore, the blueprint must be detailed enough so that each executor, even wit
 2. **Detailed Module Specifications**: Input/output, dependencies, key function signatures
 3. **Implementation Order**: Which modules can be developed in parallel, which have sequential dependencies
 4. **Quality Standards**: Acceptance criteria and test points for each module`,
+    research: `This is a research/investigation task. Please generate a complete research blueprint including:
+1. **Research Objectives**: Core questions, expected deliverables
+2. **Research Dimensions**: Angles/layers to investigate from
+3. **Information Sources**: Data acquisition methods and priorities per dimension
+4. **Analysis Framework**: How to organize and compare collected information
+5. **Delivery Standards**: Depth requirements, word count/length suggestions per section
+6. **Consistency Requirements**: Terminology definitions, evaluation criteria, format conventions`,
+    data: `This is a data processing task. Please generate a complete data processing blueprint including:
+1. **Data Source Description**: Input data format, scale, quality status
+2. **Processing Pipeline**: Input/output for each processing step, transformation rules
+3. **Intermediate Artifacts**: Expected outputs and format requirements per stage
+4. **Quality Checks**: Methods for validating data consistency, completeness, and accuracy
+5. **Final Deliverable**: Format, content requirements, and acceptance criteria`,
+    design: `This is a design/architecture task. Please generate a complete design blueprint including:
+1. **Requirements Analysis**: Core requirements, constraints, non-functional requirements
+2. **System Boundaries**: What's in scope, what's out of scope
+3. **Architecture Plan**: Overall architecture diagram, core component responsibilities, interface definitions
+4. **Technology Choices**: Key technical decisions and their rationale
+5. **Option Comparison**: If multiple options exist, list pros/cons and recommendation with reasoning
+6. **Acceptance Criteria**: Review points for each design deliverable`,
+    analysis: `This is an analysis task. Please generate a complete analysis blueprint including:
+1. **Analysis Objectives**: Core questions, expected conclusion types
+2. **Analysis Dimensions**: Angles to analyze from
+3. **Methodology**: Analysis methods per dimension (quantitative/qualitative)
+4. **Data/Material Requirements**: Input materials needed per dimension
+5. **Output Format**: Output structure and depth requirements per section
+6. **Synthesis**: How to distill final conclusions from dimensional analyses`,
     generic: `Based on the task content, please generate a complete execution blueprint including:
 1. **Overall Goals** and success criteria
 2. **Step-by-step Plan**: Detailed description and acceptance criteria for each subtask
