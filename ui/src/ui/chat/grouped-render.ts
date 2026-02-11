@@ -13,7 +13,14 @@ import {
 } from "./message-extract";
 import { extractToolCards, renderToolCardSidebar } from "./tool-cards";
 
-export function renderReadingIndicatorGroup(assistant?: AssistantIdentity) {
+export function renderReadingIndicatorGroup(assistant?: AssistantIdentity, waitElapsedSeconds?: number) {
+  const elapsed = waitElapsedSeconds ?? 0;
+  const timerText = elapsed > 0
+    ? elapsed >= 60
+      ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s`
+      : `${elapsed}s`
+    : "";
+
   return html`
     <div class="chat-group assistant">
       ${renderAvatar("assistant", assistant)}
@@ -22,6 +29,7 @@ export function renderReadingIndicatorGroup(assistant?: AssistantIdentity) {
           <span class="chat-reading-indicator__dots">
             <span></span><span></span><span></span>
           </span>
+          ${elapsed > 2 ? html`<span class="chat-reading-indicator__timer">等待 AI 回复中... ${timerText}</span>` : nothing}
         </div>
       </div>
     </div>
@@ -33,12 +41,18 @@ export function renderStreamingGroup(
   startedAt: number,
   onOpenSidebar?: (content: string) => void,
   assistant?: AssistantIdentity,
+  waitElapsedSeconds?: number,
 ) {
   const timestamp = new Date(startedAt).toLocaleTimeString([], {
     hour: "numeric",
     minute: "2-digit",
   });
   const name = assistant?.name ?? "Assistant";
+  const charCount = text.length;
+  const elapsed = waitElapsedSeconds ?? 0;
+  const elapsedText = elapsed >= 60
+    ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s`
+    : `${elapsed}s`;
 
   return html`
     <div class="chat-group assistant">
@@ -56,6 +70,7 @@ export function renderStreamingGroup(
         <div class="chat-group-footer">
           <span class="chat-sender-name">${name}</span>
           <span class="chat-group-timestamp">${timestamp}</span>
+          <span class="chat-stream-stats">⚡ ${charCount} 字 · ${elapsedText}</span>
         </div>
       </div>
     </div>

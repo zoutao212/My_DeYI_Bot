@@ -26,6 +26,9 @@ type LifecycleHost = {
   chatMessages: unknown[];
   chatToolMessages: unknown[];
   chatStream: string;
+  chatRunId: string | null;
+  chatWaitTick: number;
+  chatWaitTickTimer: number | null;
   logsAutoFollow: boolean;
   logsAtBottom: boolean;
   logsEntries: unknown[];
@@ -73,12 +76,31 @@ export function handleDisconnected(host: LifecycleHost) {
   );
   host.topbarObserver?.disconnect();
   host.topbarObserver = null;
+  // 🆕 清理等待计时器
+  if (host.chatWaitTickTimer) {
+    window.clearInterval(host.chatWaitTickTimer);
+    host.chatWaitTickTimer = null;
+  }
 }
 
 export function handleUpdated(
   host: LifecycleHost,
   changed: Map<PropertyKey, unknown>,
 ) {
+  // 🆕 等待计时器：chatRunId 激活时启动 1 秒定时器，驱动 UI 计时显示
+  if (changed.has("chatRunId")) {
+    if (host.chatRunId && !host.chatWaitTickTimer) {
+      host.chatWaitTick = 0;
+      host.chatWaitTickTimer = window.setInterval(() => {
+        host.chatWaitTick++;
+      }, 1000);
+    } else if (!host.chatRunId && host.chatWaitTickTimer) {
+      window.clearInterval(host.chatWaitTickTimer);
+      host.chatWaitTickTimer = null;
+      host.chatWaitTick = 0;
+    }
+  }
+
   if (
     host.tab === "chat" &&
     (changed.has("chatMessages") ||

@@ -300,60 +300,79 @@ export async function runEmbeddedPiAgent(
           const prompt =
             provider === "anthropic" ? scrubAnthropicRefusalMagic(params.prompt) : params.prompt;
 
-          const attempt = await runEmbeddedAttempt({
-            sessionId: params.sessionId,
-            sessionKey: params.sessionKey,
-            messageChannel: params.messageChannel,
-            messageProvider: params.messageProvider,
-            agentAccountId: params.agentAccountId,
-            messageTo: params.messageTo,
-            messageThreadId: params.messageThreadId,
-            groupId: params.groupId,
-            groupChannel: params.groupChannel,
-            groupSpace: params.groupSpace,
-            spawnedBy: params.spawnedBy,
-            currentChannelId: params.currentChannelId,
-            currentThreadTs: params.currentThreadTs,
-            replyToMode: params.replyToMode,
-            hasRepliedRef: params.hasRepliedRef,
-            sessionFile: params.sessionFile,
-            workspaceDir: params.workspaceDir,
-            agentDir,
-            config: params.config,
-            skillsSnapshot: params.skillsSnapshot,
-            prompt,
-            images: params.images,
-            disableTools: params.disableTools,
-            provider,
-            modelId,
-            model,
-            authStorage,
-            modelRegistry,
-            thinkLevel,
-            verboseLevel: params.verboseLevel,
-            reasoningLevel: params.reasoningLevel,
-            toolResultFormat: resolvedToolResultFormat,
-            execOverrides: params.execOverrides,
-            bashElevated: params.bashElevated,
-            timeoutMs: params.timeoutMs,
-            runId: params.runId,
-            abortSignal: params.abortSignal,
-            shouldEmitToolResult: params.shouldEmitToolResult,
-            shouldEmitToolOutput: params.shouldEmitToolOutput,
-            onPartialReply: params.onPartialReply,
-            onAssistantMessageStart: params.onAssistantMessageStart,
-            onBlockReply: params.onBlockReply,
-            onBlockReplyFlush: params.onBlockReplyFlush,
-            blockReplyBreak: params.blockReplyBreak,
-            blockReplyChunking: params.blockReplyChunking,
-            onReasoningStream: params.onReasoningStream,
-            onToolResult: params.onToolResult,
-            onAgentEvent: params.onAgentEvent,
-            extraSystemPrompt: params.extraSystemPrompt,
-            streamParams: params.streamParams,
-            ownerNumbers: params.ownerNumbers,
-            enforceFinalTag: params.enforceFinalTag,
-          });
+          // 🆕 LLM 调用进度日志：每 10 秒输出一次，避免控制台长时间静默
+          const _llmCallStart = Date.now();
+          const _llmWaitTimer = setInterval(() => {
+            const elapsed = Math.round((Date.now() - _llmCallStart) / 1000);
+            console.log(
+              `[agent/embedded] ⏳ LLM 处理中... (${elapsed}s) ` +
+              `model=${provider}/${modelId} runId=${params.runId ?? "?"}`,
+            );
+          }, 10_000);
+
+          let attempt;
+          try {
+            attempt = await runEmbeddedAttempt({
+              sessionId: params.sessionId,
+              sessionKey: params.sessionKey,
+              messageChannel: params.messageChannel,
+              messageProvider: params.messageProvider,
+              agentAccountId: params.agentAccountId,
+              messageTo: params.messageTo,
+              messageThreadId: params.messageThreadId,
+              groupId: params.groupId,
+              groupChannel: params.groupChannel,
+              groupSpace: params.groupSpace,
+              spawnedBy: params.spawnedBy,
+              currentChannelId: params.currentChannelId,
+              currentThreadTs: params.currentThreadTs,
+              replyToMode: params.replyToMode,
+              hasRepliedRef: params.hasRepliedRef,
+              sessionFile: params.sessionFile,
+              workspaceDir: params.workspaceDir,
+              agentDir,
+              config: params.config,
+              skillsSnapshot: params.skillsSnapshot,
+              prompt,
+              images: params.images,
+              disableTools: params.disableTools,
+              provider,
+              modelId,
+              model,
+              authStorage,
+              modelRegistry,
+              thinkLevel,
+              verboseLevel: params.verboseLevel,
+              reasoningLevel: params.reasoningLevel,
+              toolResultFormat: resolvedToolResultFormat,
+              execOverrides: params.execOverrides,
+              bashElevated: params.bashElevated,
+              timeoutMs: params.timeoutMs,
+              runId: params.runId,
+              abortSignal: params.abortSignal,
+              shouldEmitToolResult: params.shouldEmitToolResult,
+              shouldEmitToolOutput: params.shouldEmitToolOutput,
+              onPartialReply: params.onPartialReply,
+              onAssistantMessageStart: params.onAssistantMessageStart,
+              onBlockReply: params.onBlockReply,
+              onBlockReplyFlush: params.onBlockReplyFlush,
+              blockReplyBreak: params.blockReplyBreak,
+              blockReplyChunking: params.blockReplyChunking,
+              onReasoningStream: params.onReasoningStream,
+              onToolResult: params.onToolResult,
+              onAgentEvent: params.onAgentEvent,
+              extraSystemPrompt: params.extraSystemPrompt,
+              streamParams: params.streamParams,
+              ownerNumbers: params.ownerNumbers,
+              enforceFinalTag: params.enforceFinalTag,
+            });
+          } finally {
+            clearInterval(_llmWaitTimer);
+            const _llmDuration = Math.round((Date.now() - _llmCallStart) / 1000);
+            if (_llmDuration >= 5) {
+              console.log(`[agent/embedded] ✅ LLM 调用完成，耗时 ${_llmDuration}s`);
+            }
+          }
 
           const { aborted, promptError, timedOut, sessionIdUsed, lastAssistant } = attempt;
 

@@ -65,9 +65,11 @@ export type AppViewState = {
   chatStream: string | null;
   chatStreamStartedAt: number | null;
   chatRunId: string | null;
+  chatWaitTick: number;
   chatAvatarUrl: string | null;
   chatThinkingLevel: string | null;
   chatQueue: ChatQueueItem[];
+  chatAttachments: Array<{ fileName: string; size: number; content: string; mimeType: string }>;
   chatSendApprovalRequest: {
     message: string;
     sessionKey: string;

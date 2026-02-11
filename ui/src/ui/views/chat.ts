@@ -38,6 +38,7 @@ export type ChatProps = {
   toolMessages: unknown[];
   stream: string | null;
   streamStartedAt: number | null;
+  waitElapsedSeconds: number;
   assistantAvatarUrl?: string | null;
   draft: string;
   queue: ChatQueueItem[];
@@ -183,7 +184,7 @@ export function renderChat(props: ChatProps) {
       ${props.loading ? html`<div class="muted">Loading chat…</div>` : nothing}
       ${repeat(buildChatItems(props), (item) => item.key, (item) => {
         if (item.kind === "reading-indicator") {
-          return renderReadingIndicatorGroup(assistantIdentity);
+          return renderReadingIndicatorGroup(assistantIdentity, props.waitElapsedSeconds);
         }
 
         if (item.kind === "stream") {
@@ -192,6 +193,7 @@ export function renderChat(props: ChatProps) {
             item.startedAt,
             props.onOpenSidebar,
             assistantIdentity,
+            props.waitElapsedSeconds,
           );
         }
 

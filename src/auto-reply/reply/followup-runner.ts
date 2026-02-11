@@ -569,9 +569,19 @@ export function createFollowupRunner(params: {
           run: (provider, model) => {
             const authProfileId =
               provider === queued.run.provider ? queued.run.authProfileId : undefined;
+            // 🔧 并行子任务 session lane 隔离：
+            // 根因：runEmbeddedPiAgent 内部用 sessionKey 作为 session lane 的 key，
+            // maxConcurrent=1，导致同一 session 下的所有子任务被串行化。
+            // drain 的 Promise.allSettled 并行只是让多个 runner 同时进入队列等待，
+            // 但实际 LLM 调用是一个接一个的。
+            // 修复：给子任务的 sessionKey 加上 subTaskId 后缀，让每个子任务有独立的
+            // session lane，从而实现真正的并行 LLM 调用。
+            const effectiveSessionKey = (queued.isQueueTask && queued.subTaskId)
+              ? `${queued.run.sessionKey}:task:${queued.subTaskId}`
+              : queued.run.sessionKey;
             return runEmbeddedPiAgent({
               sessionId: queued.run.sessionId,
-              sessionKey: queued.run.sessionKey,
+              sessionKey: effectiveSessionKey,
               messageProvider: queued.run.messageProvider,
               agentAccountId: queued.run.agentAccountId,
               messageTo: queued.originatingTo,

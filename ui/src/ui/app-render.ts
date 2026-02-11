@@ -488,6 +488,7 @@ export function renderApp(state: AppViewState) {
               toolMessages: state.chatToolMessages,
               stream: state.chatStream,
               streamStartedAt: state.chatStreamStartedAt,
+              waitElapsedSeconds: state.chatWaitTick ?? 0,
               draft: state.chatMessage,
               queue: state.chatQueue,
               connected: state.connected,

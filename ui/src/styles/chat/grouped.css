@@ -237,6 +237,25 @@ img.chat-avatar {
   background: rgba(255, 77, 77, 0.15);
 }
 
+/* 🆕 等待计时器文字 */
+.chat-reading-indicator__timer {
+  display: inline-block;
+  margin-left: 10px;
+  font-size: 12px;
+  color: var(--muted);
+  opacity: 0.85;
+  animation: fade-in 300ms ease-out;
+}
+
+/* 🆕 流式统计（字数 + 耗时） */
+.chat-stream-stats {
+  font-size: 11px;
+  color: var(--accent);
+  opacity: 0.85;
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Streaming animation */
 .chat-bubble.streaming {
   animation: pulsing-border 1.5s ease-out infinite;
