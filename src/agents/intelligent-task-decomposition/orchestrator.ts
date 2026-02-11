@@ -447,12 +447,13 @@ export class Orchestrator {
           if (actualLength < threshold) {
             const currentRetry = subTask.retryCount ?? 0;
 
-            // 🆕 分治策略：已重试过至少 1 次且仍不达标 → 结构性失败，转 decompose
-            // 保留已有输出作为第一部分，创建续写子任务逐步积累
-            if (currentRetry >= 1) {
+            // 🔧 P25 修复：word_count 不达标时优先 decompose（保留已有内容+补写差额），而非全量 restart
+            // 根因：全量 restart 浪费已写内容和 token，且 LLM 重写很可能再次产出类似字数
+            // 条件：actualLength >= 500 才值得保留，太短的产出没有保留价值
+            if (actualLength >= 500) {
               console.log(
-                `[Orchestrator] 🔧 字数前置检查：已重试 ${currentRetry} 次仍不达标（${actualLength}/${wordCountReq}），` +
-                `转为 decompose 增量分解策略`,
+                `[Orchestrator] 🔧 P25 字数前置检查：不达标（${actualLength}/${wordCountReq}，重试${currentRetry}次），` +
+                `优先尝试 decompose 增量分解（保留已有 ${actualLength} 字+补写差额）`,
               );
               try {
                 const newSubTasks = await this.decomposeFailedTask(taskTree, subTask);
@@ -461,7 +462,7 @@ export class Orchestrator {
                   result.decomposedTaskIds = newSubTasks.map(t => t.id);
                   result.findings = [
                     `字数结构性不达标（${actualLength}/${wordCountReq}，${Math.round(actualLength / wordCountReq * 100)}%），` +
-                    `已重试 ${currentRetry} 次无改善，转为增量分解：保留已有 ${actualLength} 字 + 创建 ${newSubTasks.length} 个续写子任务`,
+                    `转为增量分解：保留已有 ${actualLength} 字 + 创建 ${newSubTasks.length} 个续写子任务（重试${currentRetry}次）`,
                   ];
                   await this.taskTreeManager.save(taskTree);
                   return result;
@@ -471,7 +472,7 @@ export class Orchestrator {
               }
             }
 
-            // 首次不达标或 decompose 失败 → 正常 restart
+            // decompose 失败或产出太短(< 500字) → 回退到 restart
             console.warn(
               `[Orchestrator] ⚠️ P5 精确字数前置检查：要求 ${wordCountReq} 字，实际 ${actualLength} 字（< 60% 底线 ${threshold}），restart`,
             );
@@ -483,10 +484,32 @@ export class Orchestrator {
               if (currentRetry < maxRetries) {
                 // 🆕 A1: 迭代优化 — 保存上次输出和失败原因
                 if (!subTask.metadata) subTask.metadata = {};
-                if (subTask.output && subTask.output.length > 0) {
-                  subTask.metadata.previousOutput = subTask.output.length > 3000
-                    ? subTask.output.substring(0, 3000)
-                    : subTask.output;
+                // 🔧 P23 修复：优先读取 producedFilePaths 中的实际文件内容作为 previousOutput
+                // 根因：subTask.output 通常是 LLM 的确认消息（如"已创作完成"），不是文件内容。
+                // 重试 LLM 如果只看到确认消息，无法改进上次产出，只能从零重写。
+                let bestPreviousOutput = subTask.output ?? "";
+                if (subTask.metadata.producedFilePaths && subTask.metadata.producedFilePaths.length > 0) {
+                  try {
+                    const fsP23 = await import("node:fs/promises");
+                    const fileContents: string[] = [];
+                    for (const rawFp of subTask.metadata.producedFilePaths) {
+                      try {
+                        let fp = rawFp;
+                        if (!path.isAbsolute(fp)) fp = path.join(os.homedir(), "clawd", fp);
+                        const content = await fsP23.readFile(fp, "utf-8");
+                        if (content.length > 0) fileContents.push(content);
+                      } catch { /* 文件不存在，跳过 */ }
+                    }
+                    if (fileContents.length > 0) {
+                      bestPreviousOutput = fileContents.join("\n\n");
+                      console.log(`[Orchestrator] 📄 P23: previousOutput 使用文件内容 (${bestPreviousOutput.length} 字符) 而非确认消息 (${(subTask.output ?? "").length} 字符)`);
+                    }
+                  } catch { /* import 失败，回退到 output */ }
+                }
+                if (bestPreviousOutput.length > 0) {
+                  subTask.metadata.previousOutput = bestPreviousOutput.length > 5000
+                    ? bestPreviousOutput.substring(0, 5000)
+                    : bestPreviousOutput;
                 }
                 subTask.metadata.lastFailureFindings = [`字数不达标：要求 ${wordCountReq} 字，实际 ${actualLength} 字（${Math.round(actualLength / wordCountReq * 100)}%）`];
                 // 🔧 问题 M 修复：restart 时清空旧的文件追踪数据
@@ -623,8 +646,8 @@ export class Orchestrator {
               break;
             }
 
-            // word_count：字数不达标，重试 1 次后转 decompose
-            if (failureType === "word_count" && currentRetry >= 1) {
+            // 🔧 P25 修复：word_count 不达标时优先 decompose，而非等重试 1 次后再 decompose
+            if (failureType === "word_count" && currentRetry >= 0) {
               console.log(
                 `[Orchestrator] 🔧 failureType=word_count，已重试 ${currentRetry} 次，转 decompose`,
               );
@@ -680,10 +703,32 @@ export class Orchestrator {
             } else {
               console.log(`[Orchestrator] 🔄 质量不满意 (failureType=${failureType})，重新执行 (${currentRetry + 1}/${maxQualityRestarts})`);
               if (!subTask.metadata) subTask.metadata = {};
-              if (subTask.output && subTask.output.length > 0) {
-                subTask.metadata.previousOutput = subTask.output.length > 3000
-                  ? subTask.output.substring(0, 3000)
-                  : subTask.output;
+              // 🔧 P23 修复：优先读取 producedFilePaths 中的实际文件内容作为 previousOutput
+              {
+                let bestPrev = subTask.output ?? "";
+                if (subTask.metadata.producedFilePaths && subTask.metadata.producedFilePaths.length > 0) {
+                  try {
+                    const fsP23b = await import("node:fs/promises");
+                    const parts: string[] = [];
+                    for (const rawFp of subTask.metadata.producedFilePaths) {
+                      try {
+                        let fp = rawFp;
+                        if (!path.isAbsolute(fp)) fp = path.join(os.homedir(), "clawd", fp);
+                        const content = await fsP23b.readFile(fp, "utf-8");
+                        if (content.length > 0) parts.push(content);
+                      } catch { /* skip */ }
+                    }
+                    if (parts.length > 0) {
+                      bestPrev = parts.join("\n\n");
+                      console.log(`[Orchestrator] 📄 P23: previousOutput 使用文件内容 (${bestPrev.length} 字符)`);
+                    }
+                  } catch { /* fallback */ }
+                }
+                if (bestPrev.length > 0) {
+                  subTask.metadata.previousOutput = bestPrev.length > 5000
+                    ? bestPrev.substring(0, 5000)
+                    : bestPrev;
+                }
               }
               if (review.findings && review.findings.length > 0) {
                 subTask.metadata.lastFailureFindings = review.findings;

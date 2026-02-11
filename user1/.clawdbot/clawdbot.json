@@ -1,4 +1,4 @@
-{
+﻿{
   "meta": {
     "lastTouchedVersion": "2026.1.25",
     "lastTouchedAt": "2026-02-02T07:27:58.621Z"
@@ -7,17 +7,17 @@
     "activeProviderId": "vectorengine",
     "activeModelId": "gemini-3-flash-preview",
     "providers": {
-      "xiaoxinapi": {
-        "baseUrl": "https://ai.xiaoxinapi.com/v1beta",
-        "apiKey": "sk-qfn4FkAfS39LNHrJwrENoryk56noJIO8JU73a3udXrIw0QGF",
+      "aifuwu": {
+        "baseUrl": "https://api.aifuwu.icu/v1beta",
+        "apiKey": "sk-i9Q5gZqkVwN8Dqq0PlytxINnhIkJwjdpqVIm1WfkBKNGjani",
         "auth": "api-key",
         "api": "google-generative-ai",
         "models": [
           {
-            "id": "[business]gemini-3-pro-preview",
-            "name": "[business]gemini-3-pro-preview",
+            "id": "gemini-3-flash-preview",
+            "name": "gemini-3-flash-preview",
             "api": "google-generative-ai",
-            "reasoning": false,
+            "reasoning": true,
             "input": [
               "text"
             ],
@@ -28,7 +28,60 @@
               "cacheWrite": 0
             },
             "contextWindow": 2000000,
-            "maxTokens": 8192
+            "maxTokens": 4096,
+            "toolCalling": false
+          }
+        ]
+      },
+      "redbox": {
+        "baseUrl": "https://www.redbox.ink/v1beta",
+        "apiKey": "sk-TgjKKPckqBYd9SgORh6tW73TM1bhUeHU5m0vTdRSF49GX3Hb",
+        "auth": "api-key",
+        "api": "google-generative-ai",
+        "models": [
+          {
+            "id": "gemini-3-flash-preview",
+            "name": "gemini-3-flash-preview",
+            "api": "google-generative-ai",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 2000000,
+            "maxTokens": 4096,
+            "toolCalling": false
+          }
+        ]
+      },
+      "hone.vvvv.ee": {
+        "baseUrl": "https://hone.vvvv.ee/v1",
+        "apiKey": "sk-uctmulb8vgKt9Y9chMBgfGpk9OLUVaFWzikrSXrIwEaXnnBV",
+        "auth": "api-key",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "claude-haiku-4-5-20251001",
+            "name": "claude-haiku-4-5-20251001",
+            "api": "openai-completions",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 2000000,
+            "maxTokens": 4096,
+            "toolCalling": false
           }
         ]
       },
@@ -53,7 +106,33 @@
               "cacheWrite": 0
             },
             "contextWindow": 2000000,
-            "maxTokens": 8192
+            "maxTokens": 4096
+          }
+        ]
+      },
+	  "xiaoxinapi": {
+        "baseUrl": "https://ai.xiaoxinapi.com/v1",
+        "apiKey": "sk-qfn4FkAfS39LNHrJwrENoryk56noJIO8JU73a3udXrIw0QGF",
+        "auth": "api-key",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "gemini-3-flash-preview",
+            "name": "gemini-3-flash-preview",
+            "api": "openai-completions",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 2000000,
+            "maxTokens": 4096,
+            "toolCalling": false
           }
         ]
       },
@@ -78,7 +157,8 @@
               "cacheWrite": 0
             },
             "contextWindow": 2000000,
-            "maxTokens": 8192
+            "maxTokens": 4096,
+            "toolCalling": false
           }
         ]
       },
@@ -103,7 +183,8 @@
               "cacheWrite": 0
             },
             "contextWindow": 2000000,
-            "maxTokens": 8192
+            "maxTokens": 4096,
+            "toolCalling": false
           }
         ]
       },
@@ -128,7 +209,8 @@
               "cacheWrite": 0
             },
             "contextWindow": 2000000,
-            "maxTokens": 8192
+            "maxTokens": 4096,
+            "toolCalling": false
           }
         ]
       }

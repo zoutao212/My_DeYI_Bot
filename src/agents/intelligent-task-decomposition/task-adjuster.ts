@@ -371,6 +371,17 @@ export class TaskAdjuster {
       console.warn(`[TaskAdjuster] ⚠️ applyAddTask: invalid change.after type (${typeof change.after}), skipping`);
       return;
     }
+    // 🔧 P24 修复：继承活跃轮次的 rootTaskId/roundId，防止孤儿任务不被 drain 拾取
+    // 根因：TaskAdjuster 从字符串构造 SubTask 时不继承轮次上下文，
+    // 导致新任务缺少 rootTaskId/roundId，drain 按 roundId 过滤时会跳过它。
+    if (!newTask.rootTaskId && taskTree.rounds && taskTree.rounds.length > 0) {
+      const activeRound = taskTree.rounds.find(r => r.status === "active") ?? taskTree.rounds[taskTree.rounds.length - 1];
+      if (activeRound) {
+        newTask.rootTaskId = activeRound.id;
+        (newTask as any).roundId = activeRound.id;
+        console.log(`[TaskAdjuster] 🔧 P24: 新任务 ${newTask.id} 继承轮次 rootTaskId=${activeRound.id}`);
+      }
+    }
     await this.taskTreeManager.addSubTask(taskTree, newTask.parentId || null, newTask);
   }
 

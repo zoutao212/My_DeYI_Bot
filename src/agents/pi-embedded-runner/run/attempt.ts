@@ -530,6 +530,28 @@ export async function runEmbeddedAttempt(
         }
       }
 
+      // Step 3.9: 文本工具回退 — 配置预标记 + 降级 provider 检测 + 文本工具描述注入
+      const {
+        isDegradedProvider: _isDegraded,
+        buildTextToolPrompt: _buildTextToolPrompt,
+        initDegradedFromConfig: _initDegradedFromConfig,
+      } = await import("../../text-tool-fallback.js");
+      // 从 config 中读取 toolCalling=false 的 provider+model，预标记为降级（幂等）
+      if (params.config) {
+        _initDegradedFromConfig(params.config);
+      }
+      const _isTextToolMode = !params.disableTools && _isDegraded(params.provider, params.modelId);
+      if (_isTextToolMode) {
+        const textToolPrompt = _buildTextToolPrompt(tools);
+        enhancedExtraSystemPrompt = enhancedExtraSystemPrompt
+          ? `${enhancedExtraSystemPrompt}\n\n${textToolPrompt}`
+          : textToolPrompt;
+        log.info(
+          `[attempt] 🔧 文本工具模式已激活 (provider=${params.provider}/${params.modelId})，` +
+          `注入 ${textToolPrompt.length} 字符工具描述到 system prompt`,
+        );
+      }
+
       // Step 4: 生成 system prompt
       const appendPrompt = await buildEmbeddedSystemPrompt({
         workspaceDir: effectiveWorkspace,
@@ -1110,7 +1132,174 @@ export async function runEmbeddedAttempt(
           activeSession.agent.replaceMessages(activeSession.messages);
           log.info(`[attempt] Re-saved ${fixedAfterPrompt} fixed messages to session`);
         }
-        
+
+        // ═══════════════════════════════════════════════════════════════
+        // Step 5.5: 文本工具回退循环（ReAct 模式）
+        // 当 API 代理不支持 function calling 时，从 LLM 文本响应中解析
+        // ```tool 代码块，执行工具调用，将结果注入下一轮对话。
+        // ═══════════════════════════════════════════════════════════════
+        if (!promptError && !aborted && !params.disableTools && tools.length > 0) {
+          const {
+            isDegradedProvider: _ttfIsDegraded,
+            markDegradedProvider: _ttfMarkDegraded,
+            clearDegradedProvider: _ttfClearDegraded,
+            shouldDetectDegraded: _ttfShouldDetect,
+            parseTextToolCalls: _ttfParse,
+            executeTextToolCalls: _ttfExecute,
+            formatToolResultsPrompt: _ttfFormatResults,
+            buildTextToolPrompt: _ttfBuildPrompt,
+            MAX_TEXT_TOOL_ITERATIONS: _ttfMaxIter,
+          } = await import("../../text-tool-fallback.js");
+
+          const _ttfResponseText = assistantTexts.join("\n");
+          const _ttfHasNativeToolCalls = toolMetas.length > 0;
+
+          // 如果有原生 function call → 说明 provider 正常，清除降级标记
+          if (_ttfHasNativeToolCalls) {
+            _ttfClearDegraded(params.provider, params.modelId);
+          }
+
+          // 检测是否应标记为降级
+          const _ttfWasDegraded = _ttfIsDegraded(params.provider, params.modelId);
+          const _ttfNewlyDetected =
+            !_ttfWasDegraded &&
+            _ttfShouldDetect({
+              toolsRegistered: true,
+              hasToolCalls: _ttfHasNativeToolCalls,
+              hasTextResponse: _ttfResponseText.length > 0,
+              textLength: _ttfResponseText.length,
+            });
+
+          // 首次降级时引导 prompt 前的文本基线（用于循环中定位新文本）
+          let _ttfPreGuideBaseline = 0;
+
+          if (_ttfNewlyDetected) {
+            _ttfMarkDegraded(params.provider, params.modelId);
+            log.warn(
+              `[attempt] ⚠️ 检测到 provider ${params.provider}/${params.modelId} 不支持 function calling，` +
+                `首次降级：将注入文本工具格式并重新请求 LLM`,
+            );
+
+            // 首次降级：需要重新 prompt，因为 LLM 之前不知道文本工具格式
+            // 更新 system prompt 加入文本工具格式说明
+            const _ttfTextToolPrompt = _ttfBuildPrompt(tools);
+            const _ttfUpdatedExtra = enhancedExtraSystemPrompt
+              ? `${enhancedExtraSystemPrompt}\n\n${_ttfTextToolPrompt}`
+              : _ttfTextToolPrompt;
+
+            const _ttfUpdatedSystemPrompt = await buildEmbeddedSystemPrompt({
+              workspaceDir: effectiveWorkspace,
+              defaultThinkLevel: params.thinkLevel,
+              reasoningLevel: params.reasoningLevel ?? "off",
+              extraSystemPrompt: _ttfUpdatedExtra,
+              ownerNumbers: params.ownerNumbers,
+              reasoningTagHint,
+              heartbeatPrompt: isDefaultAgent
+                ? resolveHeartbeatPrompt(params.config?.agents?.defaults?.heartbeat?.prompt)
+                : undefined,
+              skillsPrompt,
+              docsPath: docsPath ?? undefined,
+              ttsHint,
+              workspaceNotes,
+              reactionGuidance,
+              promptMode,
+              promptLanguage,
+              runtimeInfo,
+              messageToolHints,
+              sandboxInfo,
+              tools,
+              modelAliasLines: buildModelAliasLines(params.config),
+              userTimezone,
+              userTime,
+              userTimeFormat,
+              contextFiles: filteredContextFiles,
+              characterName: hookCharacterName,
+              characterBasePath: process.cwd(),
+            });
+            activeSession.agent.setSystemPrompt(_ttfUpdatedSystemPrompt);
+
+            // 记录引导 prompt 前的基线（用于后续循环定位新文本）
+            _ttfPreGuideBaseline = assistantTexts.length;
+
+            // 用引导消息重新触发 LLM
+            const _ttfGuidePrompt =
+              "[系统提示] 当前 API 不支持原生函数调用(function calling)。" +
+              "请使用 system prompt 中描述的 ```tool 文本格式来调用工具。" +
+              "请重新审视任务并使用文本工具格式执行所需操作。";
+            try {
+              await abortable(activeSession.prompt(_ttfGuidePrompt));
+            } catch (err) {
+              promptError = err;
+            }
+            // 更新快照
+            messagesSnapshot = activeSession.messages.slice();
+          }
+
+          // 文本工具调用循环（降级模式下执行）
+          if (
+            !promptError &&
+            !aborted &&
+            (_ttfWasDegraded || _ttfNewlyDetected)
+          ) {
+            let _ttfIteration = 0;
+            // 追踪 assistantTexts 基线，确保只解析当前轮次的文本
+            // - 首次降级：从引导 prompt 前的位置开始（捕获引导响应中的工具调用）
+            // - 已知降级：从第一轮开始（Step 3.9 已注入文本工具提示）
+            let _ttfTextBaseline = _ttfNewlyDetected
+              ? _ttfPreGuideBaseline
+              : 0;
+            while (_ttfIteration < _ttfMaxIter && !aborted && !promptError) {
+              // 取本轮 LLM 响应的完整文本（从基线到最新）
+              const _ttfLatestText = assistantTexts
+                .slice(_ttfTextBaseline)
+                .join("\n");
+              const _ttfCalls = _ttfParse(_ttfLatestText);
+              if (_ttfCalls.length === 0) break;
+
+              log.info(
+                `[attempt] 🔧 文本工具回退 #${_ttfIteration + 1}: ` +
+                  `解析到 ${_ttfCalls.length} 个工具调用: ` +
+                  `${_ttfCalls.map((c) => c.tool).join(", ")}`,
+              );
+
+              // 执行工具调用
+              const _ttfResults = await _ttfExecute(_ttfCalls, tools);
+
+              // 记录工具元数据（与原生 tool call 统一追踪）
+              for (const r of _ttfResults) {
+                toolMetas.push({
+                  toolName: r.tool,
+                  meta: r.success
+                    ? r.result.slice(0, 500)
+                    : `ERROR: ${r.error}`,
+                });
+              }
+
+              // 构建结果提示并重新调用 LLM
+              const _ttfResultPrompt = _ttfFormatResults(_ttfResults);
+              try {
+                await abortable(activeSession.prompt(_ttfResultPrompt));
+              } catch (err) {
+                promptError = err;
+                break;
+              }
+
+              // 更新快照和基线
+              messagesSnapshot = activeSession.messages.slice();
+              _ttfTextBaseline = assistantTexts.length;
+              _ttfIteration++;
+            }
+
+            if (_ttfIteration > 0) {
+              log.info(
+                `[attempt] ✅ 文本工具回退完成: ${_ttfIteration} 轮工具调用，` +
+                  `共 ${toolMetas.length} 个工具执行`,
+              );
+            }
+          }
+        }
+        // ═══════════════════════════════════════════════════════════════
+
         sessionIdUsed = activeSession.sessionId;
         cacheTrace?.recordStage("session:after", {
           messages: messagesSnapshot,

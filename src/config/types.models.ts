@@ -31,6 +31,9 @@ export type ModelDefinitionConfig = {
   maxTokens: number;
   headers?: Record<string, string>;
   compat?: ModelCompatConfig;
+  /** 是否支持原生 function calling（tool use）。默认 true。
+   *  设为 false 时系统自动启用文本工具回退模式（ReAct）。 */
+  toolCalling?: boolean;
 };
 
 export type ModelProviderConfig = {
