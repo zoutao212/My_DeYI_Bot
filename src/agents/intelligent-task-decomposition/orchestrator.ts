@@ -26,6 +26,7 @@ import { findParallelGroups } from "./dependency-analyzer.js";
 import { createSystemLLMCaller, type SystemLLMCallerConfig } from "./system-llm-caller.js";
 import { classifyTaskIntent, type TaskIntentResult } from "./task-intent-classifier.js";
 import { deriveExecutionRole, createExecutionContext } from "./execution-context.js";
+import { getPrompts } from "./prompts-loader.js";
 import type { ClawdbotConfig } from "../../config/config.js";
 
 /**
@@ -234,6 +235,30 @@ export class Orchestrator {
       needsRequeue: false,
       markedFailed: false,
     };
+
+    // ── 0. V4: 分段子任务完成后触发合并 ──
+    if (subTask.metadata?.isSegment) {
+      try {
+        const mergedPath = await this.mergeSegmentsIfComplete(taskTree, subTask);
+        if (mergedPath) {
+          console.log(`[Orchestrator] 🔗 V4: 分段合并已触发，章节文件: ${mergedPath}`);
+        }
+      } catch (mergeErr) {
+        console.warn(`[Orchestrator] ⚠️ V4: 分段合并失败: ${mergeErr}`);
+      }
+    }
+
+    // ── 0b. V5: chunk 子任务完成后检查 Map-Reduce 进度 ──
+    if (subTask.metadata?.isChunkTask) {
+      try {
+        const completedPath = await this.checkChunkProgress(taskTree, subTask);
+        if (completedPath) {
+          console.log(`[Orchestrator] 🗺️ V5: Map-Reduce 最终产出: ${completedPath}`);
+        }
+      } catch (chunkErr) {
+        console.warn(`[Orchestrator] ⚠️ V5: chunk 进度检查失败: ${chunkErr}`);
+      }
+    }
 
     // ── 1. 质量评估及决策 ──
     if (taskTree.qualityReviewEnabled !== false) {
@@ -1251,6 +1276,12 @@ export class Orchestrator {
     if (subTask.decomposed) return false;
     const maxDepth = taskTree.maxDepth ?? 3;
     if ((subTask.depth ?? 0) >= maxDepth) return false;
+
+    // 🆕 V4: 分段子任务本身不再分解（防止递归分段）
+    if (subTask.metadata?.isSegment) return false;
+
+    // 🆕 V5: chunk 子任务不再分解（Map/Reduce/Finalize 子任务直接执行）
+    if (subTask.metadata?.isChunkTask) return false;
     
     // 🔧 多维度启发式判断（替代单一的 prompt 长度阈值）
     const prompt = subTask.prompt;
@@ -1262,6 +1293,15 @@ export class Orchestrator {
     // 维度 2：量化指标检测（字数要求 > 5000 字的任务值得分解）
     const wordCountMatch = prompt.match(/(\d{4,})\s*[字个]/);
     const hasLargeWordCount = wordCountMatch ? parseInt(wordCountMatch[1], 10) >= 5000 : false;
+
+    // 🆕 V4 维度：写作类字数分段候选（字数要求 >= 1500 字即可分段，不依赖 LLM）
+    // 常量 SEGMENT_TARGET_CHARS 范围 800-1600，超过此范围的写作任务都值得拆分
+    const extractedWordCount = this.qualityReviewer.extractWordCountRequirement(prompt);
+    const isWritingSegmentCandidate = !!(
+      extractedWordCount &&
+      extractedWordCount >= 1500 &&
+      this.isWritingPrompt(prompt)
+    );
     
     // 维度 3：多步骤信号（包含列表、编号、"步骤"等关键词）
     const multiStepSignals = [
@@ -1272,18 +1312,42 @@ export class Orchestrator {
     ];
     const hasMultiStepSignals = multiStepSignals.filter(p => p.test(prompt)).length >= 2;
     
-    // 综合判断：至少满足 2 个维度
+    // 🆕 V5 维度：大输入文件分析候选（prompt 含文件路径 + 分析关键词）
+    // 同步检测仅判断"prompt 里是否有疑似文件路径 + 分析意图"，
+    // 实际文件大小探测在 decomposeSubTask() 中异步完成
+    const detectedFilePath = this.detectInputFilePath(prompt);
+    const isLargeInputCandidate = !!(detectedFilePath && this.isAnalysisPrompt(prompt));
+
+    // 综合判断：写作分段候选/大输入候选直接通过，其他任务保持原有逻辑
     const score = (isLongPrompt ? 1 : 0) + (hasLargeWordCount ? 1 : 0) + (hasMultiStepSignals ? 1 : 0);
-    const shouldDecompose = score >= 1 && (isLongPrompt || hasLargeWordCount);
+    const shouldDecompose = isWritingSegmentCandidate || isLargeInputCandidate || (score >= 1 && (isLongPrompt || hasLargeWordCount));
     
     if (shouldDecompose) {
       console.log(
         `[Orchestrator] 📊 P2: 子任务 ${subTask.id} prompt=${promptLen} 字符, ` +
         `depth=${subTask.depth ?? 0}/${maxDepth}, ` +
-        `signals=[long=${isLongPrompt}, wordCount=${hasLargeWordCount}, multiStep=${hasMultiStepSignals}] → 推荐自动分解`,
+        `signals=[long=${isLongPrompt}, wordCount=${hasLargeWordCount}, multiStep=${hasMultiStepSignals}` +
+        `, writingSegment=${isWritingSegmentCandidate}(${extractedWordCount ?? 0}字)` +
+        `, largeInput=${isLargeInputCandidate}(${detectedFilePath ?? "none"})] → 推荐自动分解`,
       );
     }
     return shouldDecompose;
+  }
+
+  /**
+   * 🆕 V4: 检测 prompt 是否为写作类任务
+   * 
+   * 轻量关键词匹配，零 LLM 调用。
+   */
+  private isWritingPrompt(prompt: string): boolean {
+    const lower = prompt.toLowerCase();
+    const writingKeywords = [
+      "写", "创作", "撰写", "编写", "续写", "起草",
+      "小说", "文章", "故事", "章", "节", "段",
+      "文档", "报告", "论文", "剧本", "散文", "诗",
+      "write", "chapter", "novel", "story", "essay", "article",
+    ];
+    return writingKeywords.some(k => lower.includes(k));
   }
 
   /**
@@ -1763,6 +1827,50 @@ export class Orchestrator {
       }
     }
 
+    // 🆕 V5: 大文件 Map-Reduce 快捷路径 — 跳过 LLM 分解，直接按行范围拆分
+    // 条件：prompt 含文件路径 + 分析关键词 + 文件存在且足够大
+    if (!subTask.metadata?.isChunkTask) {
+      const detectedPath = this.detectInputFilePath(subTask.prompt);
+      if (detectedPath && this.isAnalysisPrompt(subTask.prompt)) {
+        // 解析为绝对路径
+        let absPath = detectedPath;
+        if (!path.isAbsolute(absPath)) {
+          absPath = path.join(os.homedir(), "clawd", absPath);
+        }
+        const fileInfo = await this.probeFileSize(absPath);
+        if (fileInfo && fileInfo.chars >= Orchestrator.CHUNK_MIN_FILE_CHARS) {
+          console.log(
+            `[Orchestrator] 🗺️ V5: 大文件分析检测 — ${absPath} (${fileInfo.lines} 行, ${fileInfo.chars} 字符)，走 Map-Reduce 路径`,
+          );
+          const chunks = await this.decomposeIntoMapReduce(taskTree, subTask, absPath, fileInfo);
+          if (chunks.length > 0) {
+            return chunks;
+          }
+          console.log(`[Orchestrator] ℹ️ V5: Map-Reduce 未生成，回退到 LLM 分解`);
+        } else if (fileInfo) {
+          console.log(
+            `[Orchestrator] ℹ️ V5: 文件 ${absPath} 太小 (${fileInfo.chars} < ${Orchestrator.CHUNK_MIN_FILE_CHARS})，不触发 Map-Reduce`,
+          );
+        }
+      }
+    }
+
+    // 🆕 V4: 写作分段快捷路径 — 跳过 LLM 分解，直接按字数拆分
+    // 条件：写作类 prompt + 字数要求 >= 1500 + 非分段子任务
+    if (this.isWritingPrompt(subTask.prompt) && !subTask.metadata?.isSegment) {
+      const extractedWC = this.qualityReviewer.extractWordCountRequirement(subTask.prompt);
+      if (extractedWC && extractedWC >= 1500) {
+        console.log(
+          `[Orchestrator] 🔪 V4: 写作任务检测到字数要求 ${extractedWC}字，走分段快捷路径`,
+        );
+        const segments = await this.decomposeWritingTaskIntoSegments(taskTree, subTask);
+        if (segments.length > 0) {
+          return segments;
+        }
+        console.log(`[Orchestrator] ℹ️ V4: 分段未生成，回退到 LLM 分解`);
+      }
+    }
+
     // 3. 调用 LLM 进行分解
     const decomposedTasks = await this.llmDecomposer.decomposeRecursively(
       taskTree,
@@ -1886,6 +1994,801 @@ export class Orchestrator {
 
     console.log(`[Orchestrator] ✅ 子任务 ${subTaskId} 分解完成，生成 ${decomposedTasks.length} 个子任务`);
     return decomposedTasks;
+  }
+
+  // ========================================
+  // 🆕 V4: 章节智能分段（Writing Task Segmentation）
+  // ========================================
+
+  /**
+   * 每个分段子任务的目标字数范围
+   * 
+   * 根据 maxTokens=4096 的限制，单次 LLM 输出约 800-1600 中文字符。
+   * 取中间值 1200 作为分段目标，确保单次 LLM 调用可以稳定产出。
+   */
+  static readonly SEGMENT_TARGET_CHARS = 1200;
+  /** 分段目标下限（低于此值的任务不值得拆分） */
+  static readonly SEGMENT_MIN_CHARS = 800;
+  /** 分段目标上限（单次 LLM 输出的安全上限） */
+  static readonly SEGMENT_MAX_CHARS = 1600;
+  /** 章节默认字数（用户未指定时使用） */
+  static readonly DEFAULT_CHAPTER_CHARS = 6000;
+
+  // ========================================
+  // 🆕 V5: 大文本 Map-Reduce 分析
+  // ========================================
+
+  /** 每个 chunk 目标字符数（约 50K tokens，适配 1M 上下文窗口） */
+  static readonly CHUNK_TARGET_CHARS = 80_000;
+  /** chunk 间重叠字符数（保证上下文连贯） */
+  static readonly CHUNK_OVERLAP_CHARS = 2_000;
+  /** 文件至少达到此字符数才触发分 chunk */
+  static readonly CHUNK_MIN_FILE_CHARS = 50_000;
+  /** 每个 reduce 任务合并多少个 map 输出 */
+  static readonly REDUCE_BATCH_SIZE = 10;
+
+  /**
+   * 🆕 V5: 检测 prompt 是否为分析/学习类任务
+   * 
+   * 轻量关键词匹配，零 LLM 调用。
+   */
+  private isAnalysisPrompt(prompt: string): boolean {
+    const lower = prompt.toLowerCase();
+    const analysisKeywords = [
+      "分析", "学习", "研究", "提取", "总结", "摘要", "归纳",
+      "模仿", "风格", "角色", "人物", "剧情", "梳理", "整理",
+      "翻译", "审查", "审阅", "评估", "统计", "对比",
+      "analyze", "extract", "summarize", "review", "translate",
+      "study", "learn", "character", "style", "plot",
+    ];
+    return analysisKeywords.some(k => lower.includes(k));
+  }
+
+  /**
+   * 🆕 V5: 从 prompt 中提取输入文件路径
+   * 
+   * 支持常见格式：
+   * - 绝对路径：C:\Users\xxx\novel.txt, /home/xxx/novel.txt
+   * - 相对路径：workspace/novel.txt, ./novel.txt
+   * - 引号包裹："path/to/file.txt", 'path/to/file.txt'
+   * 
+   * @returns 提取到的文件路径（未解析），或 undefined
+   */
+  private detectInputFilePath(prompt: string): string | undefined {
+    // 匹配常见文本文件扩展名的路径
+    const patterns = [
+      // Windows 绝对路径：C:\xxx\file.txt 或 C:/xxx/file.txt
+      /([A-Za-z]:[\\\/][^\s"'`<>|*?]+\.(?:txt|md|text|csv|json|xml|html))/i,
+      // Unix 绝对路径：/home/xxx/file.txt
+      /(\/[^\s"'`<>|*?]+\.(?:txt|md|text|csv|json|xml|html))/i,
+      // 引号包裹的路径
+      /["'`]([^"'`\n]+\.(?:txt|md|text|csv|json|xml|html))["'`]/i,
+      // 相对路径：workspace/xxx.txt, ./xxx.txt
+      /(?:^|\s)((?:\.\/|\.\.\/|workspace\/)[^\s"'`<>|*?]+\.(?:txt|md|text|csv|json|xml|html))/i,
+    ];
+    for (const pattern of patterns) {
+      const match = prompt.match(pattern);
+      if (match?.[1]) {
+        return match[1].trim();
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * 🆕 V5: 探测文件大小（行数 + 字符数）
+   * 
+   * 使用流式逐行读取，不一次性加载全部内容到内存。
+   * 
+   * @param filePath 文件绝对路径
+   * @returns { lines, chars } 或 null（文件不存在/不可读）
+   */
+  private async probeFileSize(filePath: string): Promise<{ lines: number; chars: number } | null> {
+    try {
+      const fs = await import("node:fs");
+      const readline = await import("node:readline");
+      
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile()) return null;
+
+      let lineCount = 0;
+      let charCount = 0;
+
+      const rl = readline.createInterface({
+        input: fs.createReadStream(filePath, { encoding: "utf-8" }),
+        crlfDelay: Infinity,
+      });
+
+      for await (const line of rl) {
+        lineCount++;
+        charCount += line.length;
+      }
+
+      return { lines: lineCount, chars: charCount };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 🆕 V5: 将大文件分析任务分解为 Map-Reduce 子任务
+   * 
+   * 三阶段流水线：
+   * 1. Map 阶段：N 个 chunk 子任务，各读取文件的一个行范围并分析
+   * 2. Reduce 阶段：每 REDUCE_BATCH_SIZE 个 map 输出合并为一个汇总
+   * 3. Finalize 阶段：汇总所有 reduce 输出，生成最终交付物
+   * 
+   * @param taskTree 任务树
+   * @param subTask 要分解的分析子任务
+   * @param filePath 源文件绝对路径
+   * @param fileInfo 文件大小信息
+   * @returns 创建的子任务列表
+   */
+  async decomposeIntoMapReduce(
+    taskTree: TaskTree,
+    subTask: SubTask,
+    filePath: string,
+    fileInfo: { lines: number; chars: number },
+  ): Promise<SubTask[]> {
+    const chunkTarget = Orchestrator.CHUNK_TARGET_CHARS;
+    const overlap = Orchestrator.CHUNK_OVERLAP_CHARS;
+    const batchSize = Orchestrator.REDUCE_BATCH_SIZE;
+
+    // 估算每行平均字符数
+    const avgCharsPerLine = fileInfo.chars / Math.max(fileInfo.lines, 1);
+    // 每个 chunk 的目标行数
+    const targetLinesPerChunk = Math.max(10, Math.round(chunkTarget / avgCharsPerLine));
+    // 重叠行数
+    const overlapLines = Math.max(2, Math.round(overlap / avgCharsPerLine));
+
+    // 计算 chunk 数量和行范围
+    const chunkRanges: Array<[number, number]> = [];
+    let startLine = 1;
+    while (startLine <= fileInfo.lines) {
+      const endLine = Math.min(startLine + targetLinesPerChunk - 1, fileInfo.lines);
+      chunkRanges.push([startLine, endLine]);
+      // 下一个 chunk 的起始行 = 当前结束行 - 重叠行 + 1
+      startLine = endLine - overlapLines + 1;
+      // 防止无限循环：如果没有前进
+      if (startLine <= chunkRanges[chunkRanges.length - 1][0]) {
+        break;
+      }
+    }
+
+    const totalChunks = chunkRanges.length;
+
+    console.log(
+      `[Orchestrator] 🗺️ V5: Map-Reduce 分解开始 — ${subTask.id}\n` +
+      `  文件: ${filePath} (${fileInfo.lines} 行, ${fileInfo.chars} 字符)\n` +
+      `  chunk 数: ${totalChunks} (每 chunk ~${targetLinesPerChunk} 行 ≈ ${chunkTarget} 字符, 重叠 ${overlapLines} 行)`,
+    );
+
+    // 标记父任务为已分解
+    subTask.decomposed = true;
+    subTask.status = "active";
+    if (!subTask.metadata) subTask.metadata = {};
+    subTask.metadata.isRootTask = false;
+    subTask.waitForChildren = true;
+
+    // 从原始 prompt 中提取分析目标（去掉文件路径部分，保留用户意图）
+    const analysisGoal = subTask.prompt;
+
+    const allSubTasks: SubTask[] = [];
+    const taskOutputDir = path.join(
+      os.homedir(), ".clawdbot", "tasks", taskTree.id,
+    );
+
+    // ── Phase 1: Map 子任务 ──
+    for (let i = 0; i < totalChunks; i++) {
+      const chunkIndex = i + 1;
+      const [startLn, endLn] = chunkRanges[i];
+
+      const p = getPrompts().mapReduce;
+      const chunkFileName = `chunk_${String(chunkIndex).padStart(3, "0")}_analysis.md`;
+      const mapPrompt = [
+        p.mapTitle(chunkIndex, totalChunks),
+        ``,
+        `${p.mapReadFileInstruction}${filePath}`,
+        `${p.mapLineRangeInstruction}offset=${startLn}, limit=${endLn - startLn + 1}`,
+        ``,
+        p.mapAnalysisGoalIntro,
+        analysisGoal,
+        ``,
+        p.mapImportantTitle,
+        `- ${p.mapMustReadFirst}`,
+        `- ${p.mapWriteToFile}，${p.reduceSaveTo} ${taskOutputDir}/ `,
+        `- ${p.mapFileNameFormat}${chunkFileName}`,
+        `- ${p.mapResultContents}`,
+        `- ${p.mapDeepReadHint}`,
+        overlapLines > 0 ? `- ${p.mapOverlapNote(overlapLines)}` : ``,
+      ].filter(Boolean).join("\n");
+
+      const mapSubTask: SubTask = {
+        id: `${subTask.id}-chunk-${chunkIndex}`,
+        prompt: mapPrompt,
+        summary: `分段阅读分析（${chunkIndex}/${totalChunks}）行 ${startLn}-${endLn}`,
+        status: "pending",
+        retryCount: 0,
+        createdAt: Date.now(),
+        parentId: subTask.id,
+        depth: (subTask.depth ?? 0) + 1,
+        children: [],
+        dependencies: [], // Map 阶段可并行
+        canDecompose: false,
+        decomposed: false,
+        rootTaskId: subTask.rootTaskId,
+        roundId: subTask.roundId,
+        metadata: {
+          complexity: "medium" as const,
+          priority: "medium" as const,
+          isChunkTask: true,
+          chunkOf: subTask.id,
+          chunkIndex,
+          totalChunks,
+          chunkLineRange: [startLn, endLn],
+          sourceFilePath: filePath,
+          chunkPhase: "map" as const,
+          parallelSafe: true, // Map 任务可并行（受 drain 并发限制）
+          requiresFileOutput: true,
+        },
+      };
+
+      await this.taskTreeManager.addSubTask(taskTree, subTask.id, mapSubTask);
+
+      // 加入 Round.subTaskIds
+      if (mapSubTask.rootTaskId) {
+        const round = this.findRound(taskTree, mapSubTask.rootTaskId);
+        if (round && !round.subTaskIds.includes(mapSubTask.id)) {
+          round.subTaskIds.push(mapSubTask.id);
+        }
+      }
+
+      allSubTasks.push(mapSubTask);
+    }
+
+    // ── Phase 2: Reduce 子任务 ──
+    // 将 map 输出分批合并
+    const mapTaskIds = allSubTasks.map(t => t.id);
+    const reduceBatches: string[][] = [];
+    for (let i = 0; i < mapTaskIds.length; i += batchSize) {
+      reduceBatches.push(mapTaskIds.slice(i, i + batchSize));
+    }
+
+    // 如果只有 1 个 batch，跳过 reduce 直接 finalize
+    const needsReducePhase = reduceBatches.length > 1;
+    const reduceTaskIds: string[] = [];
+
+    if (needsReducePhase) {
+      for (let b = 0; b < reduceBatches.length; b++) {
+        const batchIndex = b + 1;
+        const batchDeps = reduceBatches[b]; // 依赖的 map 子任务 ID
+
+        const rp = getPrompts().mapReduce;
+        const reducePrompt = [
+          rp.reduceTitle(batchIndex, reduceBatches.length),
+          ``,
+          rp.reduceReadIntro,
+          ...batchDeps.map((depId, idx) => {
+            const chunkIdx = mapTaskIds.indexOf(depId) + 1;
+            return `${idx + 1}. ${taskOutputDir}/chunk_${String(chunkIdx).padStart(3, "0")}_analysis.md`;
+          }),
+          ``,
+          rp.reduceGoalIntro,
+          analysisGoal,
+          ``,
+          rp.reduceRequirementsTitle,
+          `- ${rp.reduceReadFiles}`,
+          `- ${rp.reduceDedup}`,
+          `- ${rp.reduceSaveTo} ${taskOutputDir}/reduce_batch_${String(batchIndex).padStart(2, "0")}.md`,
+          `- ${rp.reduceKeepFindings}`,
+        ].join("\n");
+
+        const reduceSubTask: SubTask = {
+          id: `${subTask.id}-reduce-${batchIndex}`,
+          prompt: reducePrompt,
+          summary: `整合分析（批次 ${batchIndex}/${reduceBatches.length}）`,
+          status: "pending",
+          retryCount: 0,
+          createdAt: Date.now(),
+          parentId: subTask.id,
+          depth: (subTask.depth ?? 0) + 1,
+          children: [],
+          dependencies: batchDeps, // 依赖对应 batch 的所有 map 子任务
+          canDecompose: false,
+          decomposed: false,
+          rootTaskId: subTask.rootTaskId,
+          roundId: subTask.roundId,
+          metadata: {
+            complexity: "medium" as const,
+            priority: "medium" as const,
+            isChunkTask: true,
+            chunkOf: subTask.id,
+            chunkPhase: "reduce" as const,
+            reduceBatchIndex: batchIndex,
+            totalChunks,
+            requiresFileOutput: true,
+          },
+        };
+
+        await this.taskTreeManager.addSubTask(taskTree, subTask.id, reduceSubTask);
+
+        if (reduceSubTask.rootTaskId) {
+          const round = this.findRound(taskTree, reduceSubTask.rootTaskId);
+          if (round && !round.subTaskIds.includes(reduceSubTask.id)) {
+            round.subTaskIds.push(reduceSubTask.id);
+          }
+        }
+
+        reduceTaskIds.push(reduceSubTask.id);
+        allSubTasks.push(reduceSubTask);
+      }
+    }
+
+    // ── Phase 3: Finalize 子任务 ──
+    const finalizeDeps = needsReducePhase ? reduceTaskIds : mapTaskIds;
+    const inputFiles = needsReducePhase
+      ? reduceBatches.map((_, b) => `${taskOutputDir}/reduce_batch_${String(b + 1).padStart(2, "0")}.md`)
+      : mapTaskIds.map((_, i) => `${taskOutputDir}/chunk_${String(i + 1).padStart(3, "0")}_analysis.md`);
+
+    const fp = getPrompts().mapReduce;
+    const finalizePrompt = [
+      fp.finalizeTitle,
+      ``,
+      needsReducePhase ? fp.finalizeReadIntroFromReduce : fp.finalizeReadIntroFromMap,
+      ...inputFiles.map((f, i) => `${i + 1}. ${f}`),
+      ``,
+      fp.finalizeGoalIntro,
+      analysisGoal,
+      ``,
+      fp.finalizeRequirementsTitle,
+      `- ${fp.finalizeReadFiles}`,
+      `- ${fp.finalizeSynthesize}`,
+      `- ${fp.finalizeWriteOutput}`,
+      `- ${fp.finalizeSaveTo} ${taskOutputDir}/final_output.md`,
+      `- ${fp.finalizeEnsureComplete}`,
+    ].join("\n");
+
+    const finalizeSubTask: SubTask = {
+      id: `${subTask.id}-finalize`,
+      prompt: finalizePrompt,
+      summary: `最终产出生成`,
+      status: "pending",
+      retryCount: 0,
+      createdAt: Date.now(),
+      parentId: subTask.id,
+      depth: (subTask.depth ?? 0) + 1,
+      children: [],
+      dependencies: finalizeDeps,
+      canDecompose: false,
+      decomposed: false,
+      rootTaskId: subTask.rootTaskId,
+      roundId: subTask.roundId,
+      metadata: {
+        complexity: "medium" as const,
+        priority: "medium" as const,
+        isChunkTask: true,
+        chunkOf: subTask.id,
+        chunkPhase: "finalize" as const,
+        totalChunks,
+        chunkInputFiles: inputFiles,
+        requiresFileOutput: true,
+      },
+    };
+
+    await this.taskTreeManager.addSubTask(taskTree, subTask.id, finalizeSubTask);
+
+    if (finalizeSubTask.rootTaskId) {
+      const round = this.findRound(taskTree, finalizeSubTask.rootTaskId);
+      if (round && !round.subTaskIds.includes(finalizeSubTask.id)) {
+        round.subTaskIds.push(finalizeSubTask.id);
+      }
+    }
+
+    allSubTasks.push(finalizeSubTask);
+
+    // ── 保存 ──
+    if (taskTree.metadata) {
+      taskTree.metadata.totalTasks = taskTree.subTasks.length;
+    }
+    await this.taskTreeManager.save(taskTree);
+
+    console.log(
+      `[Orchestrator] ✅ V5: Map-Reduce 分解完成 — ${subTask.id}\n` +
+      `  Map: ${totalChunks} 个 chunk 子任务 (可并行)\n` +
+      `  Reduce: ${reduceTaskIds.length} 个整合子任务\n` +
+      `  Finalize: 1 个最终产出子任务\n` +
+      `  总计: ${allSubTasks.length} 个子任务`,
+    );
+
+    return allSubTasks;
+  }
+
+  /**
+   * 🆕 V4: 将写作子任务智能拆分为多个分段子任务
+   * 
+   * 适用场景：用户请求写一章 3000-12000 字的内容，但 maxTokens 限制了单次 LLM 输出。
+   * 系统自动将大章节拆成多个 800-1600 字的小分段，串行执行后自动合并。
+   * 
+   * 流程：
+   * 1. 从 prompt 中提取章节字数目标（如 "3000字"），未找到时使用默认值 6000
+   * 2. 计算分段数 = ceil(目标字数 / SEGMENT_TARGET_CHARS)
+   * 3. 为每个分段创建子任务（含前文衔接上下文 + 字数约束）
+   * 4. 分段间串行依赖（后一段依赖前一段完成）
+   * 5. 父任务标记为已分解，不直接执行
+   * 
+   * @param taskTree 任务树
+   * @param subTask 要拆分的写作子任务
+   * @returns 创建的分段子任务列表（空数组表示不适用分段）
+   */
+  async decomposeWritingTaskIntoSegments(
+    taskTree: TaskTree,
+    subTask: SubTask,
+  ): Promise<SubTask[]> {
+    // 1. 提取字数目标
+    const wordCountReq = this.qualityReviewer.extractWordCountRequirement(subTask.prompt);
+    const targetChars = wordCountReq ?? Orchestrator.DEFAULT_CHAPTER_CHARS;
+
+    // 不够分段的直接返回（让标准 LLM 分解或直接执行处理）
+    if (targetChars < 1500) {
+      console.log(
+        `[Orchestrator] ℹ️ V4: 字数目标 ${targetChars} < 1500，不进行分段`,
+      );
+      return [];
+    }
+
+    // 2. 计算分段数
+    const segmentTarget = Orchestrator.SEGMENT_TARGET_CHARS;
+    const segmentCount = Math.max(2, Math.ceil(targetChars / segmentTarget));
+    const charsPerSegment = Math.ceil(targetChars / segmentCount);
+
+    // 3. 从 prompt 中提取章节文件名（如 "九天星辰录_第01章.txt"）
+    const fileNameMatch = subTask.prompt.match(
+      /(?:写入|保存|输出|文件[名：:])\s*[`"']*([^\s`"']+\.(?:txt|md))[`"']*/,
+    );
+    const chapterFileName = fileNameMatch?.[1] ?? `${subTask.summary}.txt`;
+
+    console.log(
+      `[Orchestrator] 🔪 V4: 写作分段开始 — ${subTask.id} (${subTask.summary})`,
+      `\n  目标字数=${targetChars}, 分段数=${segmentCount}, 每段≈${charsPerSegment}字`,
+      `\n  章节文件=${chapterFileName}`,
+    );
+
+    // 4. 将父任务标记为已分解（不再直接执行）
+    subTask.decomposed = true;
+    subTask.status = "active";
+    if (!subTask.metadata) subTask.metadata = {};
+    subTask.metadata.isRootTask = false;
+    subTask.waitForChildren = true;
+
+    // 5. 创建分段子任务
+    const segments: SubTask[] = [];
+    for (let i = 0; i < segmentCount; i++) {
+      const segIndex = i + 1;
+      const isFirst = i === 0;
+      const isLast = i === segmentCount - 1;
+
+      // 构建分段 prompt
+      const segmentPromptParts: string[] = [
+        `【分段写作 — 第 ${segIndex}/${segmentCount} 段】`,
+        ``,
+        `原始任务：${subTask.summary}`,
+      ];
+
+      // 注入章节大纲（如果有）
+      if (subTask.metadata?.chapterOutline) {
+        segmentPromptParts.push(
+          ``,
+          `📖 章节完整大纲（请严格遵守，本段只写大纲中对应的部分）：`,
+          subTask.metadata.chapterOutline,
+        );
+      }
+
+      // 分段内容指引
+      if (isFirst) {
+        segmentPromptParts.push(
+          ``,
+          `你负责本章的**开头部分**。请从章节开头开始写作。`,
+          `本部分要求：约 ${charsPerSegment} 字。`,
+          `在适当的段落处结束，为下一个分段留出衔接点。`,
+        );
+      } else if (isLast) {
+        segmentPromptParts.push(
+          ``,
+          `你负责本章的**结尾部分**。系统会自动注入前一个分段的输出作为上下文。`,
+          `本部分要求：约 ${charsPerSegment} 字。`,
+          `请写出完整的章节结尾，做好收束。`,
+          `从前一段的结尾处自然续写，保持风格和情节连贯。不要重复前文内容。`,
+        );
+      } else {
+        segmentPromptParts.push(
+          ``,
+          `你负责本章的**第 ${segIndex} 部分**。系统会自动注入前一个分段的输出作为上下文。`,
+          `本部分要求：约 ${charsPerSegment} 字。`,
+          `在适当的段落处结束，为下一个分段留出衔接点。`,
+          `从前一段的结尾处自然续写，保持风格和情节连贯。不要重复前文内容。`,
+        );
+      }
+
+      // 通用指令
+      segmentPromptParts.push(
+        ``,
+        `⚠️ 重要：`,
+        `- 必须使用 write 工具将内容写入文件`,
+        `- 保持与原始任务一致的风格、语气、人称`,
+        `- 只写本段负责的内容，不要尝试写完整章`,
+      );
+
+      // 如果原始 prompt 有额外的写作要求（风格、角色等），注入到每个分段
+      const originalPromptTruncated = subTask.prompt.length > 2000
+        ? subTask.prompt.substring(0, 2000) + "\n...[原始prompt已截断]"
+        : subTask.prompt;
+      segmentPromptParts.push(
+        ``,
+        `📋 原始任务完整要求（参考）：`,
+        originalPromptTruncated,
+      );
+
+      const segmentPrompt = segmentPromptParts.join("\n");
+
+      const segmentSubTask: SubTask = {
+        id: `${subTask.id}-seg-${segIndex}`,
+        prompt: segmentPrompt,
+        summary: `${subTask.summary}（分段 ${segIndex}/${segmentCount}）`,
+        status: "pending",
+        retryCount: 0,
+        createdAt: Date.now(),
+        parentId: subTask.id,
+        depth: (subTask.depth ?? 0) + 1,
+        children: [],
+        // 串行依赖：每段依赖前一段
+        dependencies: isFirst ? [] : [`${subTask.id}-seg-${segIndex - 1}`],
+        canDecompose: false, // 分段子任务不再分解
+        decomposed: false,
+        rootTaskId: subTask.rootTaskId,
+        roundId: subTask.roundId,
+        metadata: {
+          complexity: "medium" as const,
+          priority: "medium" as const,
+          isSegment: true,
+          segmentOf: subTask.id,
+          segmentIndex: segIndex,
+          totalSegments: segmentCount,
+          segmentTargetChars: charsPerSegment,
+          chapterFileName,
+          requiresFileOutput: true,
+          // 透传章节大纲到分段
+          chapterOutline: subTask.metadata?.chapterOutline,
+        },
+      };
+
+      // 添加到任务树
+      await this.taskTreeManager.addSubTask(taskTree, subTask.id, segmentSubTask);
+
+      // 加入 Round.subTaskIds
+      if (segmentSubTask.rootTaskId) {
+        const round = this.findRound(taskTree, segmentSubTask.rootTaskId);
+        if (round && !round.subTaskIds.includes(segmentSubTask.id)) {
+          round.subTaskIds.push(segmentSubTask.id);
+        }
+      }
+
+      segments.push(segmentSubTask);
+    }
+
+    // 6. 保存任务树
+    if (taskTree.metadata) {
+      taskTree.metadata.totalTasks = taskTree.subTasks.length;
+    }
+    await this.taskTreeManager.save(taskTree);
+
+    console.log(
+      `[Orchestrator] ✅ V4: 写作分段完成 — ${subTask.id} → ${segments.length} 个分段子任务` +
+      ` (每段≈${charsPerSegment}字, 目标共${targetChars}字)`,
+    );
+
+    return segments;
+  }
+
+  /**
+   * 🆕 V4: 合并分段子任务的输出为完整章节文件
+   * 
+   * 当某个分段子任务完成时检查：如果同一章节的所有分段都已完成，
+   * 按顺序合并文件内容，写入最终章节文件。
+   * 
+   * @param taskTree 任务树
+   * @param completedSegment 刚完成的分段子任务
+   * @returns 合并后的文件路径（如果本次触发了合并），否则 undefined
+   */
+  async mergeSegmentsIfComplete(
+    taskTree: TaskTree,
+    completedSegment: SubTask,
+  ): Promise<string | undefined> {
+    const meta = completedSegment.metadata;
+    if (!meta?.isSegment || !meta.segmentOf) return undefined;
+
+    const parentId = meta.segmentOf;
+    const totalSegments = meta.totalSegments ?? 0;
+
+    // 查找同一章节的所有分段
+    const siblings = taskTree.subTasks.filter(
+      t => t.metadata?.isSegment && t.metadata.segmentOf === parentId,
+    );
+
+    // 检查是否全部完成
+    const allCompleted = siblings.length >= totalSegments &&
+      siblings.every(t => t.status === "completed");
+
+    if (!allCompleted) {
+      const completedCount = siblings.filter(t => t.status === "completed").length;
+      console.log(
+        `[Orchestrator] 📊 V4: 分段进度 ${completedCount}/${totalSegments} (${parentId})`,
+      );
+      return undefined;
+    }
+
+    console.log(
+      `[Orchestrator] 🔗 V4: 所有 ${totalSegments} 个分段已完成，开始合并 (${parentId})`,
+    );
+
+    // 按 segmentIndex 排序
+    const sortedSegments = [...siblings].sort(
+      (a, b) => (a.metadata?.segmentIndex ?? 0) - (b.metadata?.segmentIndex ?? 0),
+    );
+
+    // 读取每个分段的文件内容
+    const fsModule = await import("node:fs/promises");
+    const mergedParts: string[] = [];
+
+    for (const seg of sortedSegments) {
+      let segContent = "";
+
+      // 优先读取 producedFilePaths
+      const filePaths = seg.metadata?.producedFilePaths ?? [];
+      for (const rawPath of filePaths) {
+        try {
+          let filePath = rawPath;
+          if (!path.isAbsolute(filePath)) {
+            filePath = path.join(os.homedir(), "clawd", filePath);
+          }
+          const content = await fsModule.readFile(filePath, "utf-8");
+          segContent += content;
+        } catch {
+          // 文件读取失败
+        }
+      }
+
+      // 回退到 fallbackFilePath
+      if (!segContent && seg.metadata?.fallbackFilePath) {
+        try {
+          segContent = await fsModule.readFile(seg.metadata.fallbackFilePath, "utf-8");
+        } catch {
+          // 兜底文件读取失败
+        }
+      }
+
+      // 最后回退到 output
+      if (!segContent && seg.output) {
+        segContent = seg.output;
+      }
+
+      if (segContent) {
+        mergedParts.push(segContent.trim());
+      } else {
+        console.warn(
+          `[Orchestrator] ⚠️ V4: 分段 ${seg.id} 无可用内容`,
+        );
+      }
+    }
+
+    // 合并写入章节文件
+    const mergedContent = mergedParts.join("\n\n");
+    const chapterFileName = meta.chapterFileName ?? `${parentId}_merged.txt`;
+
+    // 写入到 workspace 目录
+    const parentTask = taskTree.subTasks.find(t => t.id === parentId);
+    const workspaceDir = path.join(
+      os.homedir(), ".clawdbot", "tasks", taskTree.id,
+    );
+    // 同时写到用户的 clawd workspace
+    const clawdWorkspaceDir = path.join(os.homedir(), "clawd", "workspace", taskTree.id);
+    await fsModule.mkdir(clawdWorkspaceDir, { recursive: true });
+    const mergedFilePath = path.join(clawdWorkspaceDir, chapterFileName);
+
+    await fsModule.writeFile(mergedFilePath, mergedContent, "utf-8");
+
+    console.log(
+      `[Orchestrator] ✅ V4: 章节合并完成 — ${chapterFileName}` +
+      ` (${mergedParts.length} 段, ${mergedContent.length} 字)` +
+      ` → ${mergedFilePath}`,
+    );
+
+    // 更新父任务状态
+    if (parentTask) {
+      parentTask.status = "completed";
+      parentTask.completedAt = Date.now();
+      parentTask.output = `章节合并完成：${chapterFileName}（${mergedContent.length} 字，${mergedParts.length} 段）`;
+      if (!parentTask.metadata) parentTask.metadata = {};
+      parentTask.metadata.producedFilePaths = [mergedFilePath];
+      parentTask.metadata.producedFiles = [chapterFileName];
+    }
+
+    await this.taskTreeManager.save(taskTree);
+
+    return mergedFilePath;
+  }
+
+  /**
+   * 🆕 V5: 检查 chunk 子任务完成进度并更新父任务状态
+   * 
+   * 当 finalize 子任务完成时，将父任务标记为完成。
+   * 对于 map/reduce 子任务完成，仅打印进度日志。
+   * 
+   * @param taskTree 任务树
+   * @param completedChunk 刚完成的 chunk 子任务
+   * @returns finalize 产出的文件路径（如果触发），否则 undefined
+   */
+  async checkChunkProgress(
+    taskTree: TaskTree,
+    completedChunk: SubTask,
+  ): Promise<string | undefined> {
+    const meta = completedChunk.metadata;
+    if (!meta?.isChunkTask || !meta.chunkOf) return undefined;
+
+    const parentId = meta.chunkOf;
+    const phase = meta.chunkPhase;
+
+    // 查找同一父任务下的所有 chunk 子任务
+    const siblings = taskTree.subTasks.filter(
+      t => t.metadata?.isChunkTask && t.metadata.chunkOf === parentId,
+    );
+
+    const mapTasks = siblings.filter(t => t.metadata?.chunkPhase === "map");
+    const reduceTasks = siblings.filter(t => t.metadata?.chunkPhase === "reduce");
+    const finalizeTask = siblings.find(t => t.metadata?.chunkPhase === "finalize");
+
+    const mapCompleted = mapTasks.filter(t => t.status === "completed").length;
+    const reduceCompleted = reduceTasks.filter(t => t.status === "completed").length;
+
+    // 打印进度
+    if (phase === "map") {
+      console.log(
+        `[Orchestrator] 📊 V5: Map 进度 ${mapCompleted}/${mapTasks.length} (${parentId})`,
+      );
+    } else if (phase === "reduce") {
+      console.log(
+        `[Orchestrator] 📊 V5: Reduce 进度 ${reduceCompleted}/${reduceTasks.length}, Map ${mapCompleted}/${mapTasks.length} (${parentId})`,
+      );
+    }
+
+    // finalize 完成 → 更新父任务
+    if (phase === "finalize" && completedChunk.status === "completed") {
+      const parentTask = taskTree.subTasks.find(t => t.id === parentId);
+      if (parentTask) {
+        // 读取 finalize 产出文件路径
+        const producedPaths = completedChunk.metadata?.producedFilePaths ?? [];
+        const finalOutputPath = producedPaths[0] ?? completedChunk.metadata?.fallbackFilePath;
+
+        parentTask.status = "completed";
+        parentTask.completedAt = Date.now();
+        parentTask.output = `Map-Reduce 分析完成：${mapTasks.length} 个 chunk → ${reduceTasks.length} 个整合 → 最终产出`;
+        if (!parentTask.metadata) parentTask.metadata = {};
+        if (finalOutputPath) {
+          parentTask.metadata.producedFilePaths = [finalOutputPath];
+        }
+
+        await this.taskTreeManager.save(taskTree);
+
+        console.log(
+          `[Orchestrator] ✅ V5: Map-Reduce 全部完成 — ${parentId}\n` +
+          `  Map: ${mapCompleted}/${mapTasks.length}, Reduce: ${reduceCompleted}/${reduceTasks.length}\n` +
+          `  最终产出: ${finalOutputPath ?? "(无文件)"}`,
+        );
+
+        return finalOutputPath;
+      }
+    }
+
+    return undefined;
   }
 
   /**

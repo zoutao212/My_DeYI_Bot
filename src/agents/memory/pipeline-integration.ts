@@ -103,16 +103,23 @@ export function buildSiblingContext(
   const currentTask = currentTaskId
     ? completedSiblings.find(t => t.id === currentTaskId)
     : undefined;
-  const isContinuationTask = (currentTask as any)?.metadata?.isContinuation
-    ?? currentTask?.summary?.includes("续写")
-    ?? false;
+  // 🆕 V5: chunk 子任务不注入兄弟上下文（prompt 已指定精确的文件读取指令）
+  const isChunkTask = (currentTask as any)?.metadata?.isChunkTask ?? false;
+  if (isChunkTask) return "";
+
+  // 🆕 V4: 分段子任务与续写子任务共享相同的上下文策略
+  const isSegmentTask = (currentTask as any)?.metadata?.isSegment ?? false;
+  const isContinuationTask = isSegmentTask
+    || (currentTask as any)?.metadata?.isContinuation
+    || currentTask?.summary?.includes("续写")
+    || false;
 
   if (isContinuationTask && currentTask?.dependencies && currentTask.dependencies.length > 0) {
-    // 续写子任务：只注入直接依赖的任务（前一个续写子任务或原始子任务）
+    // 续写/分段子任务：只注入直接依赖的任务（前一个分段/续写子任务）
     const depIds = new Set(currentTask.dependencies);
     relevantSiblings = completed.filter(t => t.id && depIds.has(t.id));
     if (relevantSiblings.length === 0) {
-      const continuationSiblings = completed.filter(t => t.summary?.includes("续写"));
+      const continuationSiblings = completed.filter(t => t.summary?.includes("续写") || (t as any)?.metadata?.isSegment);
       if (continuationSiblings.length > 0) {
         relevantSiblings = [continuationSiblings[continuationSiblings.length - 1]];
       }
@@ -138,7 +145,7 @@ export function buildSiblingContext(
   const lines = relevantSiblings.map((t) => {
     // 🆕 A3: 续写子任务需要更多上下文
     // 🔧 问题 Q 修复：优先用 metadata.isContinuation 检测，回退到字符串匹配
-    const isContinuation = (t as any)?.metadata?.isContinuation ?? t.summary?.includes("续写") ?? false;
+    const isContinuation = (t as any)?.metadata?.isContinuation || (t as any)?.metadata?.isSegment || t.summary?.includes("续写") || false;
     // 🔧 修复：续写场景大幅增加上下文到 2000 字符
     const effectiveMaxLen = isContinuation ? 2000 : maxSnippetLen;
 

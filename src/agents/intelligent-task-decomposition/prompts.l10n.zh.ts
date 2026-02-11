@@ -362,6 +362,49 @@ export const TASK_DECOMPOSITION_PROMPTS_ZH: TaskDecompositionPromptsL10n = {
   },
   
   // ========================================
+  // 🆕 V5: 大文本 Map-Reduce 分析提示词
+  // ========================================
+  mapReduce: {
+    mapTitle: (chunkIndex: number, totalChunks: number) =>
+      `【分段阅读分析 — 第 ${chunkIndex}/${totalChunks} 段】`,
+    mapReadFileInstruction: "请使用 read 工具读取文件：",
+    mapLineRangeInstruction: "行范围：",
+    mapAnalysisGoalIntro: "阅读后，按以下目标进行分析：",
+    mapImportantTitle: "⚠️ 重要：",
+    mapMustReadFirst: "必须先用 read 工具读取上述文件的指定行范围",
+    mapWriteToFile: "将分析结果写入文件（使用 write 工具）",
+    mapFileNameFormat: "文件名格式：",
+    mapResultContents: "分析结果应包含：关键发现、摘要、与分析目标相关的具体内容摘录",
+    mapDeepReadHint: `如果本段中有需要更细致分析的重要段落，请在输出末尾标注"[需要精读]"并注明行号范围`,
+    mapOverlapNote: (overlapLines: number) =>
+      `注意：本段开头 ${overlapLines} 行与上一段重叠，避免重复分析`,
+
+    reduceTitle: (batchIndex: number, totalBatches: number) =>
+      `【整合分析 — 批次 ${batchIndex}/${totalBatches}】`,
+    reduceReadIntro: "请读取以下分段分析结果并进行整合：",
+    reduceGoalIntro: "整合目标（与原始任务一致）：",
+    reduceRequirementsTitle: "⚠️ 要求：",
+    reduceReadFiles: "使用 read 工具读取上述分析文件",
+    reduceDedup: "去重、合并、提炼，写入整合报告",
+    reduceSaveTo: "保存到",
+    reduceKeepFindings: "保留关键发现和具体摘录，去除重复内容",
+
+    finalizeTitle: "【最终产出】",
+    finalizeReadIntroFromReduce: "请读取以下整合分析报告并生成最终交付物：",
+    finalizeReadIntroFromMap: "请读取以下分段分析结果并生成最终交付物：",
+    finalizeGoalIntro: "最终产出目标（与原始任务一致）：",
+    finalizeRequirementsTitle: "⚠️ 要求：",
+    finalizeReadFiles: "使用 read 工具读取上述文件",
+    finalizeSynthesize: "综合所有分析结果，生成完整、结构化的最终交付物",
+    finalizeWriteOutput: "使用 write 工具保存最终产出",
+    finalizeSaveTo: "保存到",
+    finalizeEnsureComplete: "确保最终产出完整、无遗漏、结构清晰",
+
+    chunkFileTypeHint: "文件",
+    defaultFileTypeHint: ".txt 文件",
+  },
+
+  // ========================================
   // 质量评审器提示词
   // ========================================
   qualityReviewer: {

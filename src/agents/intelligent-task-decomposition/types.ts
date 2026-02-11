@@ -641,6 +641,55 @@ export interface SubTaskMetadata {
   /** 上一次执行产生的文件路径（restart 时保存，供参考） */
   previousProducedFilePaths?: string[];
 
+  // 🆕 V4: 章节分段子任务标识字段（智能分段：大章节 → 多个小分段 → 合并）
+
+  /** 是否是分段子任务（由 decomposeWritingTaskIntoSegments 创建） */
+  isSegment?: boolean;
+
+  /** 分段所属的父章节子任务 ID */
+  segmentOf?: string;
+
+  /** 分段序号（从 1 开始） */
+  segmentIndex?: number;
+
+  /** 总分段数 */
+  totalSegments?: number;
+
+  /** 每个分段的目标字数 */
+  segmentTargetChars?: number;
+
+  /** 最终合并后的章节文件名（如 "九天星辰录_第01章.txt"） */
+  chapterFileName?: string;
+
+  // 🆕 V5: 大文本 Map-Reduce 分析（大文件 → 分 chunk 阅读 → 逐级汇总 → 最终产出）
+
+  /** 是否是 chunk 处理子任务（由 decomposeIntoMapReduce 创建） */
+  isChunkTask?: boolean;
+
+  /** chunk 所属的父任务 ID */
+  chunkOf?: string;
+
+  /** chunk 序号（从 1 开始） */
+  chunkIndex?: number;
+
+  /** 总 chunk 数 */
+  totalChunks?: number;
+
+  /** 要读取的行范围 [startLine, endLine]（1-indexed，包含两端） */
+  chunkLineRange?: [number, number];
+
+  /** 源文件绝对路径 */
+  sourceFilePath?: string;
+
+  /** 所处的 Map-Reduce 阶段 */
+  chunkPhase?: "map" | "reduce" | "finalize";
+
+  /** reduce 任务的批次号（从 1 开始） */
+  reduceBatchIndex?: number;
+
+  /** reduce/finalize 任务依赖的 chunk 输出文件路径列表 */
+  chunkInputFiles?: string[];
+
   // 🆕 V3: 子任务级大纲与并行标记
 
   /**

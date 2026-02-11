@@ -1,0 +1,43 @@
+Clawdbot Skills 系统架构
+调用图谱：
+
+用户消息 → Agent Runner → System Prompt 构建
+                              ↓
+                    buildWorkspaceSkillsPrompt()
+                              ↓
+                    loadSkillEntries() 从多个目录加载
+                              ↓
+                    ┌─────────────────────────────────────┐
+                    │ 优先级（低→高）：                    │
+                    │ 1. extraDirs (config.skills.load)   │
+                    │ 2. bundledSkillsDir (skills/)       │
+                    │ 3. managedSkillsDir (~/.clawdbot/)  │
+                    │ 4. workspaceSkillsDir (项目/skills/)│
+                    └─────────────────────────────────────┘
+                              ↓
+                    formatSkillsForPrompt() → 注入 System Prompt
+                              ↓
+                    LLM 看到 <available_skills> 列表
+                              ↓
+                    LLM 判断任务匹配 → 用 read 工具读取 SKILL.md
+                              ↓
+                    LLM 按 SKILL.md 指引执行（CLI/Python API）
+关键发现：
+
+Skills 是纯文档驱动的，不依赖 tool call / function call
+LLM 通过 read 工具读取 SKILL.md，然后按文档指引执行 shell 命令
+这正好解决了你说的"中转模型不支持 tool call"的问题
+
+/**
+ * 文本模式工具回退（ReAct 模式）
+ *
+ * 当 API 代理不支持 function calling 时，自动降级到文本模式：
+ * - 将工具参数定义注入 system prompt（文本描述 + 调用格式说明）
+ * - LLM 使用 ```tool 代码块输出工具调用意图
+ * - 系统解析并执行工具调用，将结果注入下一轮对话
+ *
+ * 调用链：
+ *   attempt.ts → isDegradedProvider() → 如果是 → buildTextToolPrompt() 注入 system prompt
+ *   attempt.ts → prompt() 返回后 → parseTextToolCalls() → executeTextToolCalls()
+ *             → formatToolResultsPrompt() → 再次 prompt() → 循环直到无工具调用
+ */

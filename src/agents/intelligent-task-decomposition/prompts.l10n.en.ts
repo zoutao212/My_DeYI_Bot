@@ -362,6 +362,49 @@ This outline will serve as the executor's dedicated guide, ensuring content cons
   },
   
   // ========================================
+  // 🆕 V5: Large Text Map-Reduce Analysis Prompts
+  // ========================================
+  mapReduce: {
+    mapTitle: (chunkIndex: number, totalChunks: number) =>
+      `[Chunk Analysis — Part ${chunkIndex}/${totalChunks}]`,
+    mapReadFileInstruction: "Please use the read tool to read file:",
+    mapLineRangeInstruction: "Line range:",
+    mapAnalysisGoalIntro: "After reading, analyze according to the following goal:",
+    mapImportantTitle: "⚠️ Important:",
+    mapMustReadFirst: "You must first use the read tool to read the specified line range of the file above",
+    mapWriteToFile: "Write analysis results to a file (using the write tool)",
+    mapFileNameFormat: "File name format:",
+    mapResultContents: "Analysis results should include: key findings, summary, and specific content excerpts related to the analysis goal",
+    mapDeepReadHint: `If there are important passages in this section that need more detailed analysis, mark "[needs deep read]" at the end of output with the line number range`,
+    mapOverlapNote: (overlapLines: number) =>
+      `Note: The first ${overlapLines} lines of this section overlap with the previous section, avoid duplicate analysis`,
+
+    reduceTitle: (batchIndex: number, totalBatches: number) =>
+      `[Integration Analysis — Batch ${batchIndex}/${totalBatches}]`,
+    reduceReadIntro: "Please read the following chunk analysis results and integrate them:",
+    reduceGoalIntro: "Integration goal (same as original task):",
+    reduceRequirementsTitle: "⚠️ Requirements:",
+    reduceReadFiles: "Use the read tool to read the analysis files above",
+    reduceDedup: "Deduplicate, merge, and refine into an integration report",
+    reduceSaveTo: "Save to",
+    reduceKeepFindings: "Keep key findings and specific excerpts, remove duplicate content",
+
+    finalizeTitle: "[Final Output]",
+    finalizeReadIntroFromReduce: "Please read the following integration reports and generate the final deliverable:",
+    finalizeReadIntroFromMap: "Please read the following chunk analysis results and generate the final deliverable:",
+    finalizeGoalIntro: "Final output goal (same as original task):",
+    finalizeRequirementsTitle: "⚠️ Requirements:",
+    finalizeReadFiles: "Use the read tool to read the files above",
+    finalizeSynthesize: "Synthesize all analysis results into a complete, structured final deliverable",
+    finalizeWriteOutput: "Use the write tool to save the final output",
+    finalizeSaveTo: "Save to",
+    finalizeEnsureComplete: "Ensure the final output is complete, without omissions, and clearly structured",
+
+    chunkFileTypeHint: "file",
+    defaultFileTypeHint: ".txt file",
+  },
+
+  // ========================================
   // Quality Reviewer Prompts
   // ========================================
   qualityReviewer: {

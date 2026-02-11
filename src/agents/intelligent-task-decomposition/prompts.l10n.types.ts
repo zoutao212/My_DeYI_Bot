@@ -361,6 +361,77 @@ export interface TaskDecompositionPromptsL10n {
   };
   
   // ========================================
+  // 🆕 V5: 大文本 Map-Reduce 分析提示词
+  // ========================================
+  mapReduce: {
+    /** Map 子任务标题模板 */
+    mapTitle: (chunkIndex: number, totalChunks: number) => string;
+    /** 读取文件指令 */
+    mapReadFileInstruction: string;
+    /** 行范围指令 */
+    mapLineRangeInstruction: string;
+    /** 分析目标引导语 */
+    mapAnalysisGoalIntro: string;
+    /** Map 重要提示标题 */
+    mapImportantTitle: string;
+    /** 必须先用 read 工具读取 */
+    mapMustReadFirst: string;
+    /** 将分析结果写入文件 */
+    mapWriteToFile: string;
+    /** 文件名格式说明 */
+    mapFileNameFormat: string;
+    /** 分析结果应包含 */
+    mapResultContents: string;
+    /** 需要精读提示 */
+    mapDeepReadHint: string;
+    /** 重叠行提示 */
+    mapOverlapNote: (overlapLines: number) => string;
+
+    /** Reduce 子任务标题模板 */
+    reduceTitle: (batchIndex: number, totalBatches: number) => string;
+    /** Reduce 读取引导语 */
+    reduceReadIntro: string;
+    /** Reduce 整合目标引导语 */
+    reduceGoalIntro: string;
+    /** Reduce 要求标题 */
+    reduceRequirementsTitle: string;
+    /** 使用 read 工具读取 */
+    reduceReadFiles: string;
+    /** 去重合并提炼 */
+    reduceDedup: string;
+    /** 保存到文件 */
+    reduceSaveTo: string;
+    /** 保留关键发现 */
+    reduceKeepFindings: string;
+
+    /** Finalize 子任务标题 */
+    finalizeTitle: string;
+    /** Finalize 读取引导语（reduce 来源） */
+    finalizeReadIntroFromReduce: string;
+    /** Finalize 读取引导语（map 直出） */
+    finalizeReadIntroFromMap: string;
+    /** Finalize 目标引导语 */
+    finalizeGoalIntro: string;
+    /** Finalize 要求标题 */
+    finalizeRequirementsTitle: string;
+    /** 使用 read 工具读取 */
+    finalizeReadFiles: string;
+    /** 综合分析生成交付物 */
+    finalizeSynthesize: string;
+    /** 使用 write 工具保存 */
+    finalizeWriteOutput: string;
+    /** 保存到目标文件 */
+    finalizeSaveTo: string;
+    /** 确保完整无遗漏 */
+    finalizeEnsureComplete: string;
+
+    /** chunk 子任务的文件类型提示（followup-runner 注入） */
+    chunkFileTypeHint: string;
+    /** 普通子任务的文件类型提示 */
+    defaultFileTypeHint: string;
+  };
+
+  // ========================================
   // 质量评审器提示词
   // ========================================
   qualityReviewer: {

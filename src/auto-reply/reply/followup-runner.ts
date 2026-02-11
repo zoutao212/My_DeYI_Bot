@@ -38,6 +38,7 @@ import { createMemoryService } from "../../agents/memory/factory.js";
 import { sendFallbackFile } from "./send-fallback-file.js";
 import { collectTrackedFiles, clearTracking } from "../../agents/intelligent-task-decomposition/file-tracker.js";
 import { deriveExecutionRole, createExecutionContext } from "../../agents/intelligent-task-decomposition/execution-context.js";
+import { getPrompts } from "../../agents/intelligent-task-decomposition/prompts-loader.js";
 import type { SubTask, TaskTree, ExecutionContext } from "../../agents/intelligent-task-decomposition/types.js";
 import type { Orchestrator } from "../../agents/intelligent-task-decomposition/orchestrator.js";
 import { TaskProgressReporter, getTaskProgressFromTree } from "../../agents/intelligent-task-decomposition/task-progress-reporter.js";
@@ -631,7 +632,11 @@ export function createFollowupRunner(params: {
                     console.log(`[followup-runner] 🔄 注入迭代优化指令 (previousOutput=${subTask.metadata.previousOutput?.length ?? 0} chars, findings=${subTask.metadata.lastFailureFindings?.length ?? 0})`);
                   }
                   
-                  return `[⚠️ 强制规则] 你必须亲自使用 write 工具将生成内容写入 .txt 文件，保存到 ${taskOutputDir}/ 目录下（文件名含任务摘要）。然后在聊天中仅回复简短确认。禁止将完整内容直接输出到聊天。\n[🚫 禁止委派] 严禁调用 enqueue_task、sessions_spawn、batch_enqueue_tasks。你必须自己直接完成创作，不能把任务交给任何人。${iterationHint}\n\n${queued.prompt}`;
+                  // 🆕 V5: chunk 子任务的落盘指令不指定 .txt 扩展名（chunk prompt 已指定 .md 格式）
+                  const isChunkTask = subTask?.metadata?.isChunkTask ?? false;
+                  const mrPrompts = getPrompts().mapReduce;
+                  const fileTypeHint = isChunkTask ? mrPrompts.chunkFileTypeHint : mrPrompts.defaultFileTypeHint;
+                  return `[⚠️ 强制规则] 你必须亲自使用 write 工具将生成内容写入${fileTypeHint}，保存到 ${taskOutputDir}/ 目录下（文件名含任务摘要）。然后在聊天中仅回复简短确认。禁止将完整内容直接输出到聊天。\n[🚫 禁止委派] 严禁调用 enqueue_task、sessions_spawn、batch_enqueue_tasks。你必须自己直接完成任务，不能把任务交给任何人。${iterationHint}\n\n${queued.prompt}`;
                 }
                 return queued.prompt;
               })(),
