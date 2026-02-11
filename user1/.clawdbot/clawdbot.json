@@ -1,212 +1,213 @@
-﻿{
-    "meta":  {
-                 "lastTouchedVersion":  "2026.1.25",
-                 "lastTouchedAt":  "2026-01-29T11:55:36.820Z"
-             },
-    "wizard":  {
-                   "lastRunAt":  "2026-01-26T01:33:56.196Z",
-                   "lastRunVersion":  "2026.1.25",
-                   "lastRunCommand":  "onboard",
-                   "lastRunMode":  "local"
-               },
-    "models":  {
-                   "activeProviderId":  "yinli",
-                   "activeModelId":  "gemini-3-flash-preview",
-                   "providers":  {
-                                     "xiaoxinapi":  {
-                                                        "baseUrl":  "https://ai.xiaoxinapi.com/v1beta",
-                                                        "apiKey":  "sk-qfn4FkAfS39LNHrJwrENoryk56noJIO8JU73a3udXrIw0QGF",
-                                                        "auth":  "api-key",
-                                                        "api":  "google-generative-ai",
-                                                        "models":  [
-                                                                       {
-                                                                           "id":  "[business]gemini-3-pro-preview",
-                                                                           "name":  "[business]gemini-3-pro-preview",
-                                                                           "api":  "google-generative-ai",
-                                                                           "reasoning":  true,
-                                                                           "input":  [
-                                                                                         "text"
-                                                                                     ],
-                                                                           "cost":  {
-                                                                                        "input":  0,
-                                                                                        "output":  0,
-                                                                                        "cacheRead":  0,
-                                                                                        "cacheWrite":  0
-                                                                                    },
-                                                                           "contextWindow":  2000000,
-                                                                           "maxTokens":  8192
-                                                                       }
-                                                                   ]
-                                                    },
-                                     "vectorengine":  {
-                                                          "baseUrl":  "https://api.vectorengine.ai/v1beta",
-                                                          "apiKey":  "sk-tXQ16QQ2vWLuWa2bFHOdmbI6YE7yNAQxqFmsC52AgvmBQ0KW",
-                                                          "auth":  "api-key",
-                                                          "api":  "google-generative-ai",
-                                                          "models":  [
-                                                                         {
-                                                                             "id":  "gemini-3-flash-preview",
-                                                                             "name":  "gemini-3-flash-preview",
-                                                                             "api":  "google-generative-ai",
-                                                                             "reasoning":  true,
-                                                                             "input":  [
-                                                                                           "text"
-                                                                                       ],
-                                                                             "cost":  {
-                                                                                          "input":  0,
-                                                                                          "output":  0,
-                                                                                          "cacheRead":  0,
-                                                                                          "cacheWrite":  0
-                                                                                      },
-                                                                             "contextWindow":  2000000,
-                                                                             "maxTokens":  8192
-                                                                         }
-                                                                     ]
-                                                      },
-									                  "yinli":  {
-                                                          "baseUrl":  "https://yinli.one/v1beta",
-                                                          "apiKey":  "sk-wuIGi2admr3nrsajUJkWFRsvpgw2DJKNNh32oEgQosQrlVMW",
-                                                          "auth":  "api-key",
-                                                          "api":  "google-generative-ai",
-                                                          "models":  [
-                                                                         {
-                                                                             "id":  "gemini-3-flash-preview",
-                                                                             "name":  "gemini-3-flash-preview",
-                                                                             "api":  "google-generative-ai",
-                                                                             "reasoning":  true,
-                                                                             "input":  [
-                                                                                           "text"
-                                                                                       ],
-                                                                             "cost":  {
-                                                                                          "input":  0,
-                                                                                          "output":  0,
-                                                                                          "cacheRead":  0,
-                                                                                          "cacheWrite":  0
-                                                                                      },
-                                                                             "contextWindow":  2000000,
-                                                                             "maxTokens":  8192
-                                                                         }
-                                                                     ]
-                                                      },
-                                     "arpaneticu":  {
-                                                        "baseUrl":  "http://arpanet.icu:3000/v1beta",
-                                                        "apiKey":  "sk-KldJUXPSYY7Wd6fKSNH8Ttz2PmasxzfvLjJhxO5FgmD63LUI",
-                                                        "auth":  "api-key",
-                                                        "api":  "google-generative-ai",
-                                                        "models":  [
-                                                                       {
-                                                                           "id":  "gemini-3-flash-preview",
-                                                                           "name":  "gemini-3-flash-preview",
-                                                                           "api":  "google-generative-ai",
-                                                                           "reasoning":  true,
-                                                                           "input":  [
-                                                                                         "text"
-                                                                                     ],
-                                                                           "cost":  {
-                                                                                        "input":  0,
-                                                                                        "output":  0,
-                                                                                        "cacheRead":  0,
-                                                                                        "cacheWrite":  0
-                                                                                    },
-                                                                           "contextWindow":  2000000,
-                                                                           "maxTokens":  8192
-                                                                       }
-                                                                   ]
-                                                    }
-                                 }
-               },
-    "agents":  {
-                   "defaults":  {
-                                    "model":  {
-                                                  "primary":  "yinli/gemini-3-flash-preview"
-                                              },
-                                    "models":  {
-                                                   "yinli/gemini-3-flash-preview":  {
-
-                                                                                           }
-                                               },
-                                    "workspace":  "C:\\Users\\zouta\\clawd",
-                                    "compaction":  {
-                                                       "mode":  "safeguard"
-                                                   },
-                                    "maxConcurrent":  4,
-                                    "subagents":  {
-                                                      "maxConcurrent":  8
-                                                  },
-                                    "memorySearch":  {
-                                                         "provider":  "openai",
-                                                         "model":  "text-embedding-jina-embeddings-v3",
-                                                         "remote":  {
-                                                                        "baseUrl":  "http://127.0.0.1:12345/v1",
-                                                                        "batch":  {
-                                                                                      "enabled":  false
-                                                                                  },
-                                                                        "apiKey":  ""
-                                                                    },
-                                                         "enabled":  true
-                                                     }
-                                }
-               },
-    "messages":  {
-                     "ackReactionScope":  "group-mentions"
-                 },
-    "commands":  {
-                     "native":  "auto",
-                     "nativeSkills":  "auto"
-                 },
-    "approvals":  {
-                      "llm":  {
-                                  "enabled":  false
-                              }
-                  },
-    "channels":  {
-                     "telegram":  {
-                                      "enabled":  true,
-                                      "dmPolicy":  "pairing",
-                                      "botToken":  "8571339967:AAFlTRagfRu7JIVukScg2wvrJQoGWylxUjs",
-                                      "groups":  {
-                                                     "*":  {
-                                                               "requireMention":  true
-                                                           }
-                                                 },
-                                      "groupPolicy":  "allowlist",
-                                      "streamMode":  "partial",
-                                      "mediaMaxMb":  20,
-                                      "actions":  {
-                                                      "reactions":  true
-                                                  },
-                                      "allowFrom":  [
-                                                        611659968,
-                                                        7333025707
-                                                    ],
-                                      "dmHistoryLimit":  0
-                                  }
-                 },
-    "gateway":  {
-                    "port":  18789,
-                    "mode":  "local",
-                    "bind":  "loopback",
-                    "auth":  {
-
-                             },
-                    "tailscale":  {
-                                      "mode":  "off",
-                                      "resetOnExit":  false
-                                  }
-                },
-    "skills":  {
-                   "install":  {
-                                   "nodeManager":  "npm"
-                               }
-               },
-    "plugins":  {
-                    "entries":  {
-                                    "google-antigravity-auth":  {
-                                                                    "enabled":  true
-                                                                },
-                                    "telegram":  {
-                                                     "enabled":  true
-                                                 }
-                                }
-                }
+{
+  "meta": {
+    "lastTouchedVersion": "2026.1.25",
+    "lastTouchedAt": "2026-02-02T07:27:58.621Z"
+  },
+  "models": {
+    "activeProviderId": "vectorengine",
+    "activeModelId": "gemini-3-flash-preview",
+    "providers": {
+      "xiaoxinapi": {
+        "baseUrl": "https://ai.xiaoxinapi.com/v1beta",
+        "apiKey": "sk-qfn4FkAfS39LNHrJwrENoryk56noJIO8JU73a3udXrIw0QGF",
+        "auth": "api-key",
+        "api": "google-generative-ai",
+        "models": [
+          {
+            "id": "[business]gemini-3-pro-preview",
+            "name": "[business]gemini-3-pro-preview",
+            "api": "google-generative-ai",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 2000000,
+            "maxTokens": 8192
+          }
+        ]
+      },
+      "vectorengine": {
+        "baseUrl": "https://api.vectorengine.ai/v1beta",
+        "apiKey": "sk-tXQ16QQ2vWLuWa2bFHOdmbI6YE7yNAQxqFmsC52AgvmBQ0KW",
+        "auth": "api-key",
+        "api": "google-generative-ai",
+        "models": [
+          {
+            "id": "gemini-3-flash-preview",
+            "name": "gemini-3-flash-preview",
+            "api": "google-generative-ai",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 2000000,
+            "maxTokens": 8192
+          }
+        ]
+      },
+      "openrouter": {
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "apiKey": "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",
+        "auth": "api-key",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "openrouter/pony-alpha",
+            "name": "openrouter/pony-alpha",
+            "api": "openai-completions",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 2000000,
+            "maxTokens": 8192
+          }
+        ]
+      },
+      "yinli": {
+        "baseUrl": "https://yinli.one/v1beta",
+        "apiKey": "sk-wuIGi2admr3nrsajUJkWFRsvpgw2DJKNNh32oEgQosQrlVMW",
+        "auth": "api-key",
+        "api": "google-generative-ai",
+        "models": [
+          {
+            "id": "gemini-3-flash-preview",
+            "name": "gemini-3-flash-preview",
+            "api": "google-generative-ai",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 2000000,
+            "maxTokens": 8192
+          }
+        ]
+      },
+      "arpaneticu": {
+        "baseUrl": "http://arpanet.icu:3000/v1beta",
+        "apiKey": "sk-KldJUXPSYY7Wd6fKSNH8Ttz2PmasxzfvLjJhxO5FgmD63LUI",
+        "auth": "api-key",
+        "api": "google-generative-ai",
+        "models": [
+          {
+            "id": "gemini-3-flash-preview",
+            "name": "gemini-3-flash-preview",
+            "api": "google-generative-ai",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 2000000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primaryProviderId": "vectorengine",
+        "primaryModelId": "gemini-3-flash-preview"
+      },
+      "workspace": "C:\\Users\\zouta\\clawd",
+      "memorySearch": {
+        "enabled": true,
+        "provider": "openai",
+        "remote": {
+          "baseUrl": "http://127.0.0.1:12345/v1",
+          "apiKey": ""
+        },
+        "model": "text-embedding-jina-embeddings-v3"
+      },
+      "maxConcurrent": 4,
+      "showLlmProgress": false,
+      "subagents": {
+        "maxConcurrent": 8
+      },
+      "taskDecomposition": {
+        "llmCallBudget": 500,
+        "maxRetries": 5,
+        "qualityReviewEnabled": true
+      }
+    },
+    "dynamicPipeline": {
+      "charactersDir": "clawd/characters",
+      "defaultCharacter": "lina",
+      "systemPersona": "lina",
+      "enabled": true
+    }
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto"
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "dmPolicy": "pairing",
+      "botToken": "8571339967:AAFlTRagfRu7JIVukScg2wvrJQoGWylxUjs",
+      "allowFrom": [
+        611659968,
+        7333025707
+      ],
+      "groupPolicy": "allowlist",
+      "streamMode": "partial"
+    }
+  },
+  "gateway": {
+    "port": 18789,
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {
+      "mode": "token",
+      "token": "07f14e7c946cd9b4cd521eca7dc602e8560dcfbeb92c0013"
+    }
+  },
+  "messages": {
+    "ackReactionScope": "group-mentions"
+  },
+  "plugins": {
+    "entries": {
+      "telegram": {
+        "enabled": true
+      }
+    }
+  },
+  "wizard": {
+    "lastRunAt": "2026-02-02T07:27:58.615Z",
+    "lastRunVersion": "2026.1.25",
+    "lastRunCommand": "doctor",
+    "lastRunMode": "local"
+  }
 }

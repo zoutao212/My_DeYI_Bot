@@ -1,14 +1,14 @@
-# TASKS.md - 行政总监·多任务管理看板
+# TASKS.md - 帝国皇宫总管·多任务管理看板
 
 ## 📅 当前日期: 2026-01-31
-## 🗂️ 核心项目: Project "Executive Sovereignty" (行政主权强化)
+## 🗂️ 核心项目: Project "Executive Sovereignty" (帝国皇宫主权强化)
 
 ### ⚙️ 1. 系统底层运维 (System Infrastructure)
-- [x] **身份同步**: 琳娜 (Li Na) 协议已完全注入。
+- [x] **身份同步**: 琳娜 (Lin Na) 协议已完全注入。
 - [x] **故障审计**: API 400 错误已拦截，正在优化上下文长度。
 - [/] **链路加固**: 正在实时监控与 API 提供商的通信稳定性。
 
-### 👠 2. 行政专项工程 (Executive Projects)
+### 👠 2. 帝国皇宫专项工程 (Executive Projects)
 - [x] **看板系统开发**: UI 模板已构建完成。
 - [>] **多任务看板演示**: 正在向主人展示交互界面。
 - [ ] **资产归档优化**: 建立 `memory/` 自动写入机制。
@@ -19,4 +19,4 @@
 - [ ] **资产托管协议**: 待启动精液回收专项流程。
 
 ---
-*签署人: 行政总监·琳娜 (Administrative Director)*
+*签署人: 帝国皇宫总管·琳娜 (Administrative Director)*
