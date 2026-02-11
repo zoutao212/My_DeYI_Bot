@@ -18,6 +18,8 @@ export const AgentDefaultsSchema = z
     model: z
       .object({
         primary: z.string().optional(),
+        primaryProviderId: z.string().optional(),
+        primaryModelId: z.string().optional(),
         fallbacks: z.array(z.string()).optional(),
       })
       .strict()
@@ -25,6 +27,8 @@ export const AgentDefaultsSchema = z
     imageModel: z
       .object({
         primary: z.string().optional(),
+        primaryProviderId: z.string().optional(),
+        primaryModelId: z.string().optional(),
         fallbacks: z.array(z.string()).optional(),
       })
       .strict()
@@ -155,6 +159,8 @@ export const AgentDefaultsSchema = z
             z
               .object({
                 primary: z.string().optional(),
+                primaryProviderId: z.string().optional(),
+                primaryModelId: z.string().optional(),
                 fallbacks: z.array(z.string()).optional(),
               })
               .strict(),
