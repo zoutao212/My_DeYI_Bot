@@ -1,4 +1,4 @@
-import { html } from "lit";
+import { html, nothing } from "lit";
 
 import type { GatewayHelloOk } from "../gateway";
 import { formatAgo, formatDurationMs } from "../format";
@@ -17,11 +17,18 @@ export type OverviewProps = {
   cronEnabled: boolean | null;
   cronNext: number | null;
   lastChannelsRefresh: number | null;
+  activityLog: Array<{
+    ts: number;
+    kind: "reply" | "error" | "llm" | "tool";
+    sessionKey?: string;
+    summary: string;
+  }>;
   onSettingsChange: (next: UiSettings) => void;
   onPasswordChange: (next: string) => void;
   onSessionKeyChange: (next: string) => void;
   onConnect: () => void;
   onRefresh: () => void;
+  onClearActivityLog: () => void;
 };
 
 export function renderOverview(props: OverviewProps) {
@@ -290,6 +297,76 @@ export function renderOverview(props: OverviewProps) {
           <div class="note-title">${l10n.overview.notesCronTitle}</div>
           <div class="muted">${l10n.overview.notesCronBody}</div>
         </div>
+      </div>
+    </section>
+
+    ${renderActivityLog(props)}
+  `;
+}
+
+const ACTIVITY_KIND_LABELS: Record<string, string> = {
+  reply: "回复",
+  error: "错误",
+  llm: "LLM",
+  tool: "工具",
+};
+
+const ACTIVITY_KIND_CLASSES: Record<string, string> = {
+  reply: "ok",
+  error: "danger",
+  llm: "",
+  tool: "",
+};
+
+function formatActivityTime(ts: number): string {
+  try {
+    return new Date(ts).toLocaleTimeString();
+  } catch {
+    return String(ts);
+  }
+}
+
+function renderActivityLog(props: OverviewProps) {
+  const entries = props.activityLog;
+  if (!entries || entries.length === 0) return nothing;
+
+  const isZh = props.settings.uiLanguage === "zh";
+  const title = isZh ? "AI 活动日志" : "AI Activity Log";
+  const sub = isZh ? "实时显示 AI 回复、LLM 调用、工具执行等关键事件" : "Real-time AI replies, LLM calls, and tool executions";
+  const clearLabel = isZh ? "清空" : "Clear";
+
+  // 只显示最近 30 条
+  const visible = entries.slice(0, 30);
+
+  return html`
+    <section class="card" style="margin-top: 18px;">
+      <div class="card-header">
+        <div>
+          <div class="card-title">${title}</div>
+          <div class="card-sub">${sub}</div>
+        </div>
+        <div class="card-actions">
+          <button class="button" @click=${() => props.onClearActivityLog()}>
+            ${clearLabel}
+          </button>
+        </div>
+      </div>
+      <div class="card-body" style="max-height: 320px; overflow-y: auto;">
+        ${visible.map(
+          (entry) => html`
+            <div class="row" style="padding: 4px 0; border-bottom: 1px solid var(--border); gap: 8px; align-items: center;">
+              <span class="pill ${ACTIVITY_KIND_CLASSES[entry.kind] ?? ""}" style="min-width: 40px; text-align: center; font-size: 11px;">
+                ${ACTIVITY_KIND_LABELS[entry.kind] ?? entry.kind}
+              </span>
+              <span class="muted" style="font-size: 12px; min-width: 70px;">
+                ${formatActivityTime(entry.ts)}
+              </span>
+              <span style="font-size: 13px; flex: 1;">
+                ${entry.summary}
+              </span>
+            </div>
+          `,
+        )}
       </div>
     </section>
   `;

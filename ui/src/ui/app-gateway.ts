@@ -62,6 +62,12 @@ type GatewayHost = {
     kind: string;
     payload?: unknown;
   }>;
+  activityLog: Array<{
+    ts: number;
+    kind: "reply" | "error" | "llm" | "tool";
+    sessionKey?: string;
+    summary: string;
+  }>;
   chatRunId: string | null;
   execApprovalQueue: ExecApprovalRequest[];
   execApprovalError: string | null;
@@ -215,6 +221,34 @@ function handleGatewayEventUnsafe(host: GatewayHost, evt: GatewayEventFrame) {
       payload: payload?.payload,
     };
     host.runEvents = [entry, ...(host.runEvents ?? [])].slice(0, 800);
+
+    // 推送关键 run 事件到活动日志
+    const kind = entry.kind;
+    if (kind === "llm.done" || kind === "tool.start" || kind === "tool.end") {
+      const inner = entry.payload as Record<string, unknown> | undefined;
+      let summary: string;
+      if (kind === "llm.done") {
+        const model = typeof inner?.model === "string" ? inner.model : "";
+        const tokens = typeof inner?.totalTokens === "number" ? inner.totalTokens : null;
+        summary = `LLM 调用完成${model ? ` [${model}]` : ""}${tokens != null ? ` (${tokens} tokens)` : ""}`;
+      } else if (kind === "tool.start") {
+        const toolName = typeof inner?.toolName === "string" ? inner.toolName : "?";
+        summary = `工具调用开始: ${toolName}`;
+      } else {
+        const toolName = typeof inner?.toolName === "string" ? inner.toolName : "?";
+        const ok = inner?.error ? "失败" : "完成";
+        summary = `工具调用${ok}: ${toolName}`;
+      }
+      host.activityLog = [
+        {
+          ts: entry.ts,
+          kind: kind === "llm.done" ? "llm" as const : "tool" as const,
+          sessionKey,
+          summary,
+        },
+        ...host.activityLog,
+      ].slice(0, 100);
+    }
     return;
   }
 
@@ -227,6 +261,30 @@ function handleGatewayEventUnsafe(host: GatewayHost, evt: GatewayEventFrame) {
       );
     }
     const state = handleChatEvent(host as unknown as ClawdbotApp, payload);
+
+    // 推送活动日志：AI 回复完成或出错
+    if (state === "final") {
+      host.activityLog = [
+        {
+          ts: Date.now(),
+          kind: "reply" as const,
+          sessionKey: payload?.sessionKey,
+          summary: `AI 回复完成 [${payload?.sessionKey ?? "?"}]`,
+        },
+        ...host.activityLog,
+      ].slice(0, 100);
+    } else if (state === "error") {
+      host.activityLog = [
+        {
+          ts: Date.now(),
+          kind: "error" as const,
+          sessionKey: payload?.sessionKey,
+          summary: `AI 回复出错 [${payload?.sessionKey ?? "?"}]: ${payload?.errorMessage ?? "unknown"}`,
+        },
+        ...host.activityLog,
+      ].slice(0, 100);
+    }
+
     if (state === "final" || state === "error" || state === "aborted") {
       resetToolStream(host as unknown as Parameters<typeof resetToolStream>[0]);
       void flushChatQueueForEvent(

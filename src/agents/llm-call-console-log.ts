@@ -242,6 +242,53 @@ export function createLlmCallConsoleLogger(params: {
             `→ LLM请求 seq=${callSeq} model=${modelTag} api=${apiTag} runId=${base.runId ?? ""} sessionKey=${base.sessionKey ?? ""} payloadBytes=${payloadBytes} payloadPreview=${truncate(payloadText, 600)}`,
           );
 
+          // 🔍 Tools 诊断日志：检查 payload 中是否包含 tools 定义
+          if (payload && typeof payload === "object") {
+            const payloadObj = payload as Record<string, unknown>;
+            // Gemini 格式：tools: [{ functionDeclarations: [...] }]
+            const geminiTools = payloadObj.tools;
+            // OpenAI 格式：tools: [{ type: "function", function: {...} }]
+            const oaiTools = payloadObj.tools;
+            // config 嵌套格式：config.tools
+            const configTools = (payloadObj.config as Record<string, unknown> | undefined)?.tools;
+            const effectiveTools = geminiTools ?? configTools;
+
+            if (Array.isArray(effectiveTools) && effectiveTools.length > 0) {
+              // 提取函数名
+              const funcNames: string[] = [];
+              for (const toolGroup of effectiveTools) {
+                if (toolGroup && typeof toolGroup === "object") {
+                  const tg = toolGroup as Record<string, unknown>;
+                  // Gemini: { functionDeclarations: [...] }
+                  if (Array.isArray(tg.functionDeclarations)) {
+                    for (const fd of tg.functionDeclarations) {
+                      if (fd && typeof fd === "object" && typeof (fd as Record<string, unknown>).name === "string") {
+                        funcNames.push((fd as Record<string, unknown>).name as string);
+                      }
+                    }
+                  }
+                  // OpenAI: { type: "function", function: { name: "..." } }
+                  if (tg.type === "function" && tg.function && typeof tg.function === "object") {
+                    const fn = tg.function as Record<string, unknown>;
+                    if (typeof fn.name === "string") funcNames.push(fn.name);
+                  }
+                }
+              }
+              log.info(
+                `🔧 Tools诊断 seq=${callSeq}: hasTools=true toolGroups=${effectiveTools.length} functionCount=${funcNames.length} functions=[${funcNames.join(", ")}]`,
+              );
+            } else {
+              log.warn(
+                `⚠️ Tools诊断 seq=${callSeq}: hasTools=false — payload 中无 tools 定义！模型无法调用任何工具`,
+              );
+              // 额外检查 payload 顶层键，帮助定位问题
+              const topKeys = Object.keys(payloadObj).join(", ");
+              log.warn(
+                `⚠️ Tools诊断 seq=${callSeq}: payload顶层键=[${topKeys}]`,
+              );
+            }
+          }
+
           void injectLlmProgress({
             sessionKey: base.sessionKey,
             message: `→ seq=${callSeq} model=${modelTag} api=${apiTag} bytes=${payloadBytes} runId=${base.runId ?? ""}`,

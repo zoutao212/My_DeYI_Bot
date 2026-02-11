@@ -109,6 +109,12 @@ export class ClawdbotApp extends LitElement {
   @state() hello: GatewayHelloOk | null = null;
   @state() lastError: string | null = null;
   @state() eventLog: EventLogEntry[] = [];
+  @state() activityLog: Array<{
+    ts: number;
+    kind: "reply" | "error" | "llm" | "tool";
+    sessionKey?: string;
+    summary: string;
+  }> = [];
   @state() runEvents: Array<{
     ts: number;
     sessionKey?: string;

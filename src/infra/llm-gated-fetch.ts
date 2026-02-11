@@ -661,6 +661,29 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
         }
       }
       
+      // 🔍 DEBUG: 打印原始 API 响应 body（排查 tool call 缺失）
+      // 仅对 Gemini 格式 API（v1beta）生效，异步读取不阻塞主流程
+      {
+        const reqUrl = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+        const isGeminiApi = reqUrl.includes("v1beta") || reqUrl.includes("generativelanguage");
+        if (isGeminiApi) {
+          try {
+            const cloned = response.clone();
+            // 异步读取，不阻塞返回
+            cloned.text().then((bodyText) => {
+              const preview = bodyText.length > 2000 ? bodyText.slice(0, 2000) + `...(${bodyText.length} chars total)` : bodyText;
+              const hasFunctionCall = bodyText.includes("functionCall");
+              const hasToolCalls = bodyText.includes("tool_calls");
+              console.warn(`[llm-gated-fetch] 🔍 RAW RESPONSE from ${reqUrl.replace(/\?.*/, "")}: status=${response.status} hasFunctionCall=${hasFunctionCall} hasToolCalls=${hasToolCalls} bodyPreview=${preview}`);
+            }).catch((err) => {
+              console.warn(`[llm-gated-fetch] 🔍 RAW RESPONSE read failed:`, err);
+            });
+          } catch {
+            // clone 失败（某些 stream 不支持），跳过
+          }
+        }
+      }
+      
       return response;
     } catch (error) {
       // 清除超时定时器

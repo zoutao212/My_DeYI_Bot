@@ -45,6 +45,12 @@ export type AppViewState = {
   hello: GatewayHelloOk | null;
   lastError: string | null;
   eventLog: EventLogEntry[];
+  activityLog: Array<{
+    ts: number;
+    kind: "reply" | "error" | "llm" | "tool";
+    sessionKey?: string;
+    summary: string;
+  }>;
   runEvents: Array<{
     ts: number;
     sessionKey?: string;

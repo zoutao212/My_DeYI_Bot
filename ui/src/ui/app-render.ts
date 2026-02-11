@@ -237,6 +237,7 @@ export function renderApp(state: AppViewState) {
               cronEnabled: state.cronStatus?.enabled ?? null,
               cronNext,
               lastChannelsRefresh: state.channelsLastSuccess,
+              activityLog: state.activityLog,
               onSettingsChange: (next) => state.applySettings(next),
               onPasswordChange: (next) => (state.password = next),
               onSessionKeyChange: (next) => {
@@ -252,6 +253,7 @@ export function renderApp(state: AppViewState) {
               },
               onConnect: () => state.connect(),
               onRefresh: () => state.loadOverview(),
+              onClearActivityLog: () => { state.activityLog = []; },
             })
           : nothing}
 

@@ -137,6 +137,16 @@ export function createAgentEventHandler({
   };
 
   const emitChatDelta = (sessionKey: string, clientRunId: string, seq: number, text: string) => {
+    // 首个 chunk 接收日志：在 deltaSentAt 中还没有记录时输出
+    const isFirstChunk = !chatRunState.deltaSentAt.has(clientRunId);
+    if (isFirstChunk) {
+      const timeStr = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+      const preview = text.length > 60 ? text.slice(0, 60) + "..." : text;
+      console.log(
+        `${timeStr} [reply] 🔵 AI 开始回复 session=${sessionKey} runId=${clientRunId} firstChunkChars=${text.length} preview="${preview}"`,
+      );
+    }
+
     chatRunState.buffers.set(clientRunId, text);
     const now = Date.now();
     const last = chatRunState.deltaSentAt.get(clientRunId) ?? 0;
@@ -184,6 +194,22 @@ export function createAgentEventHandler({
     const text = chatRunState.buffers.get(clientRunId)?.trim() ?? "";
     chatRunState.buffers.delete(clientRunId);
     chatRunState.deltaSentAt.delete(clientRunId);
+
+    // CLI 控制台通知式日志
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString("zh-CN", { hour12: false });
+    const textPreview = text.length > 80 ? text.slice(0, 80) + "..." : text;
+    if (jobState === "done") {
+      console.log(
+        `${timeStr} [reply] ✅ AI 已回复 session=${sessionKey} runId=${clientRunId} chars=${text.length}${textPreview ? ` preview="${textPreview}"` : ""}`,
+      );
+    } else {
+      const errMsg = error ? formatForLog(error) : "unknown";
+      console.log(
+        `${timeStr} [reply] ❌ AI 回复出错 session=${sessionKey} runId=${clientRunId} error=${errMsg}`,
+      );
+    }
+
     if (jobState === "done") {
       const payload = {
         runId: clientRunId,
