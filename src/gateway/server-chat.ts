@@ -115,12 +115,12 @@ export function createAgentEventHandler({
   resolveSessionKeyForRun,
   clearAgentRunContext,
 }: AgentEventHandlerOptions) {
-  const emitChatDelta = (sessionKey: string, clientRunId: string, seq: number, text: string) => {
-    chatRunState.buffers.set(clientRunId, text);
-    const now = Date.now();
-    const last = chatRunState.deltaSentAt.get(clientRunId) ?? 0;
-    if (now - last < 150) return;
-    chatRunState.deltaSentAt.set(clientRunId, now);
+  // trailing-edge timers：节流窗口结束后自动发送最新缓冲内容，
+  // 避免最后一个 delta 被吞掉导致前端文字滞后
+  const deltaTrailingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  const sendDeltaNow = (sessionKey: string, clientRunId: string, seq: number, text: string) => {
+    chatRunState.deltaSentAt.set(clientRunId, Date.now());
     const payload = {
       runId: clientRunId,
       sessionKey,
@@ -129,11 +129,48 @@ export function createAgentEventHandler({
       message: {
         role: "assistant",
         content: [{ type: "text", text }],
-        timestamp: now,
+        timestamp: Date.now(),
       },
     };
     broadcast("chat", payload, { dropIfSlow: true });
     nodeSendToSession(sessionKey, "chat", payload);
+  };
+
+  const emitChatDelta = (sessionKey: string, clientRunId: string, seq: number, text: string) => {
+    chatRunState.buffers.set(clientRunId, text);
+    const now = Date.now();
+    const last = chatRunState.deltaSentAt.get(clientRunId) ?? 0;
+    const elapsed = now - last;
+
+    // 清除旧的 trailing timer
+    const existingTimer = deltaTrailingTimers.get(clientRunId);
+    if (existingTimer) clearTimeout(existingTimer);
+
+    if (elapsed >= 150) {
+      // 超过节流窗口，立即发送
+      sendDeltaNow(sessionKey, clientRunId, seq, text);
+    } else {
+      // 在节流窗口内，设置 trailing timer 确保窗口结束后发送
+      const delay = 150 - elapsed;
+      deltaTrailingTimers.set(
+        clientRunId,
+        setTimeout(() => {
+          deltaTrailingTimers.delete(clientRunId);
+          const latestText = chatRunState.buffers.get(clientRunId);
+          if (latestText != null) {
+            sendDeltaNow(sessionKey, clientRunId, seq, latestText);
+          }
+        }, delay),
+      );
+    }
+  };
+
+  const cleanupDeltaTimer = (clientRunId: string) => {
+    const timer = deltaTrailingTimers.get(clientRunId);
+    if (timer) {
+      clearTimeout(timer);
+      deltaTrailingTimers.delete(clientRunId);
+    }
   };
 
   const emitChatFinal = (
@@ -143,6 +180,7 @@ export function createAgentEventHandler({
     jobState: "done" | "error",
     error?: unknown,
   ) => {
+    cleanupDeltaTimer(clientRunId);
     const text = chatRunState.buffers.get(clientRunId)?.trim() ?? "";
     chatRunState.buffers.delete(clientRunId);
     chatRunState.deltaSentAt.delete(clientRunId);
@@ -299,6 +337,7 @@ export function createAgentEventHandler({
         chatRunState.abortedRuns.delete(evt.runId);
         chatRunState.buffers.delete(clientRunId);
         chatRunState.deltaSentAt.delete(clientRunId);
+        cleanupDeltaTimer(clientRunId);
         if (chatLink) {
           chatRunState.registry.remove(evt.runId, clientRunId, sessionKey);
         }

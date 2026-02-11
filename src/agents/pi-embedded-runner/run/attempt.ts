@@ -191,15 +191,22 @@ export async function runEmbeddedAttempt(
       params.config?.agents?.defaults?.promptLanguage === "zh" ? "zh" : "en";
 
     const sessionLabel = params.sessionKey ?? params.sessionId;
+    // 🔧 子任务跳过 bootstrap/context 文件（AGENTS.md、SOUL.md 等），减少 prompt 体积
+    type BootstrapResult = Awaited<ReturnType<typeof resolveBootstrapContextForRun>>;
     const { bootstrapFiles: hookAdjustedBootstrapFiles, contextFiles } =
-      await resolveBootstrapContextForRun({
-        workspaceDir: effectiveWorkspace,
-        config: params.config,
-        sessionKey: params.sessionKey,
-        sessionId: params.sessionId,
-        promptLanguage,
-        warn: makeBootstrapWarn({ sessionLabel, warn: (message) => log.warn(message) }),
-      });
+      params.skipBootstrapContext
+        ? { bootstrapFiles: [] as BootstrapResult["bootstrapFiles"], contextFiles: [] as BootstrapResult["contextFiles"] }
+        : await resolveBootstrapContextForRun({
+            workspaceDir: effectiveWorkspace,
+            config: params.config,
+            sessionKey: params.sessionKey,
+            sessionId: params.sessionId,
+            promptLanguage,
+            warn: makeBootstrapWarn({ sessionLabel, warn: (message) => log.warn(message) }),
+          });
+    if (params.skipBootstrapContext) {
+      log.info(`[attempt] 🔧 skipBootstrapContext: skipped bootstrap/context file loading`);
+    }
     const workspaceNotes = hookAdjustedBootstrapFiles.some(
       (file) => file.name === DEFAULT_BOOTSTRAP_FILENAME && !file.missing,
     )
@@ -241,7 +248,17 @@ export async function runEmbeddedAttempt(
           hasRepliedRef: params.hasRepliedRef,
           modelHasVision,
         });
-    const tools = sanitizeToolsForGoogle({ tools: toolsRaw, provider: params.provider });
+    // 🔧 子任务工具白名单裁剪：大幅减少 system prompt 体积（60KB → ~15KB）
+    const toolsAllowed = params.toolAllowlist?.length
+      ? toolsRaw.filter((t) => params.toolAllowlist!.includes(t.name))
+      : toolsRaw;
+    if (params.toolAllowlist?.length) {
+      log.info(
+        `[attempt] 🔧 toolAllowlist: ${toolsRaw.length} → ${toolsAllowed.length} tools ` +
+        `(kept: ${toolsAllowed.map((t) => t.name).join(", ")})`,
+      );
+    }
+    const tools = sanitizeToolsForGoogle({ tools: toolsAllowed, provider: params.provider });
     logToolSchemasForGoogle({ tools, provider: params.provider });
 
     const machineName = await getMachineDisplayName();

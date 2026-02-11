@@ -259,6 +259,8 @@ const FIELD_LABELS: Record<string, string> = {
   "auth.cooldowns.failureWindowHours": "Failover Window (hours)",
   "agents.defaults.models": "Models",
   "agents.defaults.model.primary": "Primary Model",
+  "agents.defaults.model.primaryProviderId": "Primary Provider ID",
+  "agents.defaults.model.primaryModelId": "Primary Model ID",
   "agents.defaults.model.fallbacks": "Model Fallbacks",
   "agents.defaults.imageModel.primary": "Image Model",
   "agents.defaults.imageModel.fallbacks": "Image Model Fallbacks",
@@ -411,9 +413,9 @@ const FIELD_HELP: Record<string, string> = {
   "tools.exec.safeBins":
     "Allow stdin-only safe binaries to run without explicit allowlist entries.",
   "models.activeProviderId":
-    "仅用于 UI 的当前选择：当 agents.defaults.model.primary 未设置时，会用它作为默认模型的回退来源。",
+    "仅用于 UI 的当前选择：当 agents.defaults.model.primaryProviderId+primaryModelId（或旧的 primary）未设置时，会用它作为默认模型的回退来源。",
   "models.activeModelId":
-    "仅用于 UI 的当前选择：当 agents.defaults.model.primary 未设置时，会用它作为默认模型的回退来源。",
+    "仅用于 UI 的当前选择：当 agents.defaults.model.primaryProviderId+primaryModelId（或旧的 primary）未设置时，会用它作为默认模型的回退来源。",
   "tools.message.allowCrossContextSend":
     "Legacy override: allow cross-context sends across all providers.",
   "tools.message.crossContext.allowWithinProvider":
@@ -561,7 +563,11 @@ const FIELD_HELP: Record<string, string> = {
   "plugins.installs.*.installedAt": "ISO timestamp of last install/update.",
   "agents.list.*.identity.avatar":
     "Agent avatar (workspace-relative path, http(s) URL, or data URI).",
-  "agents.defaults.model.primary": "Primary model (provider/model).",
+  "agents.defaults.model.primary": "Primary model (provider/model). Legacy format; prefer primaryProviderId + primaryModelId.",
+  "agents.defaults.model.primaryProviderId":
+    "Provider id for the primary model (e.g. 'openrouter'). Used with primaryModelId to avoid slash ambiguity.",
+  "agents.defaults.model.primaryModelId":
+    "Model id for the primary model (e.g. 'pony-alpha'). Used with primaryProviderId.",
   "agents.defaults.model.fallbacks":
     "Ordered fallback models (provider/model). Used when the primary model fails.",
   "agents.defaults.imageModel.primary":

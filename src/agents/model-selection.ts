@@ -120,6 +120,25 @@ export function resolveConfiguredModelRef(params: {
   defaultProvider: string;
   defaultModel: string;
 }): ModelRef {
+  // Priority 1: separated primaryProviderId + primaryModelId (no slash ambiguity)
+  const separated = (() => {
+    const raw = params.cfg.agents?.defaults?.model as
+      | { primaryProviderId?: string; primaryModelId?: string; primary?: string }
+      | string
+      | undefined;
+    if (!raw || typeof raw === "string") return null;
+    const providerId = typeof raw.primaryProviderId === "string" ? raw.primaryProviderId.trim() : "";
+    const modelId = typeof raw.primaryModelId === "string" ? raw.primaryModelId.trim() : "";
+    if (!providerId || !modelId) return null;
+    return { provider: providerId, model: modelId };
+  })();
+  if (separated) {
+    const provider = normalizeProviderId(separated.provider);
+    const model = normalizeProviderModelId(provider, separated.model);
+    if (provider && model) return { provider, model };
+  }
+
+  // Priority 2: legacy "primary" string (provider/model)
   const rawModel = (() => {
     const raw = params.cfg.agents?.defaults?.model as { primary?: string } | string | undefined;
     if (typeof raw === "string") return raw.trim();
@@ -151,6 +170,7 @@ export function resolveConfiguredModelRef(params: {
     if (resolved) return resolved.ref;
   }
 
+  // Priority 3: models.activeProviderId + models.activeModelId (UI selection fallback)
   const active = (() => {
     const models = params.cfg.models as
       | { activeProviderId?: unknown; activeModelId?: unknown }

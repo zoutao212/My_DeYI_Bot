@@ -579,6 +579,12 @@ export function createFollowupRunner(params: {
             const effectiveSessionKey = (queued.isQueueTask && queued.subTaskId)
               ? `${queued.run.sessionKey}:task:${queued.subTaskId}`
               : queued.run.sessionKey;
+            // 🔧 子任务工具白名单：大幅裁剪 system prompt 体积（60KB → ~15KB）
+            // 创作/执行子任务只需 write+read+edit+exec，无需 browser/web/slack/canvas 等
+            const isSubTaskExec = Boolean(queued.subTaskId) && !queued.isRootTask && !queued.isNewRootTask;
+            const subTaskToolAllowlist = isSubTaskExec
+              ? ["write", "read", "edit", "exec", "process"]
+              : undefined;
             return runEmbeddedPiAgent({
               sessionId: queued.run.sessionId,
               sessionKey: effectiveSessionKey,
@@ -592,7 +598,11 @@ export function createFollowupRunner(params: {
               sessionFile: llmSessionFile,
               workspaceDir: queued.run.workspaceDir,
               config: queued.run.config,
-              skillsSnapshot: queued.run.skillsSnapshot,
+              // 🔧 子任务跳过 skills（省掉 skill 描述注入，减少 prompt 体积）
+              skillsSnapshot: isSubTaskExec ? undefined : queued.run.skillsSnapshot,
+              toolAllowlist: subTaskToolAllowlist,
+              // 🔧 子任务跳过 bootstrap 文件（AGENTS.md/SOUL.md），减少 prompt 体积
+              skipBootstrapContext: isSubTaskExec,
               prompt: (() => {
                 // 🔧 子任务强制落盘：在 prompt 本体注入指令（用户消息级，LLM 遵从度最高）
                 const isSubTask = Boolean(queued.subTaskId);

@@ -13,6 +13,20 @@ import {
 } from "./message-extract";
 import { extractToolCards, renderToolCardSidebar } from "./tool-cards";
 
+/**
+ * 流式渲染时使用轻量级纯文本渲染，避免每次 delta 都做完整 markdown 解析。
+ * 只做基本的 HTML 转义和换行处理，性能远优于 marked + DOMPurify。
+ */
+function streamingTextToHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/\n/g, "<br>");
+}
+
 export function renderReadingIndicatorGroup(assistant?: AssistantIdentity, waitElapsedSeconds?: number) {
   const elapsed = waitElapsedSeconds ?? 0;
   const timerText = elapsed > 0
@@ -29,7 +43,7 @@ export function renderReadingIndicatorGroup(assistant?: AssistantIdentity, waitE
           <span class="chat-reading-indicator__dots">
             <span></span><span></span><span></span>
           </span>
-          ${elapsed > 2 ? html`<span class="chat-reading-indicator__timer">等待 AI 回复中... ${timerText}</span>` : nothing}
+          ${elapsed >= 1 ? html`<span class="chat-reading-indicator__timer">等待 AI 回复中... ${timerText}</span>` : nothing}
         </div>
       </div>
     </div>
@@ -224,16 +238,23 @@ function renderGroupedMessage(
 
   if (!markdown && !hasToolCards) return nothing;
 
+  // 流式渲染时使用轻量级纯文本，避免每次 delta 都做 markdown 全量解析
+  const renderedHtml = opts.isStreaming && markdown
+    ? streamingTextToHtml(markdown)
+    : markdown
+      ? toSanitizedMarkdownHtml(markdown)
+      : null;
+
   return html`
     <div class="${bubbleClasses}">
-      ${canCopyMarkdown ? renderCopyAsMarkdownButton(markdown!) : nothing}
+      ${canCopyMarkdown && !opts.isStreaming ? renderCopyAsMarkdownButton(markdown!) : nothing}
       ${reasoningMarkdown
         ? html`<div class="chat-thinking">${unsafeHTML(
             toSanitizedMarkdownHtml(reasoningMarkdown),
           )}</div>`
         : nothing}
-      ${markdown
-        ? html`<div class="chat-text">${unsafeHTML(toSanitizedMarkdownHtml(markdown))}</div>`
+      ${renderedHtml
+        ? html`<div class="chat-text">${unsafeHTML(renderedHtml)}</div>`
         : nothing}
       ${toolCards.map((card) => renderToolCardSidebar(card, onOpenSidebar))}
     </div>

@@ -1306,10 +1306,10 @@ export const chatHandlers: GatewayRequestHandlers = {
           const text = payload.text?.trim() ?? "";
           if (!text) return;
           
-          // 🆕 处理 block 消息（例如任务看板）
-          // ⚠️ 只处理真正的 block 消息（例如任务看板），不要处理 LLM 生成的普通内容
-          // LLM 生成的内容会在 final 消息中处理
-          if (info.kind === "block" && text.includes("# 📋 任务看板")) {
+          // 🆕 处理所有 block 消息（任务看板、子任务进度、子任务结果等）
+          // block 消息来自 followup-runner 的 sendFollowupPayloads，
+          // 初始 LLM 回复使用 disableBlockStreaming=true 所以不会走这里
+          if (info.kind === "block") {
             // 将消息追加到 transcript
             const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(p.sessionKey);
             const sessionId = latestEntry?.sessionId ?? entry?.sessionId ?? clientRunId;
@@ -1321,7 +1321,7 @@ export const chatHandlers: GatewayRequestHandlers = {
               createIfMissing: true,
             });
             
-            // 广播到 Web UI
+            // 广播到 Web UI（实时推送子任务进度和结果）
             if (appended.ok && appended.message) {
               const seq = nextChatSeq({ agentRunSeq: context.agentRunSeq }, clientRunId);
               const chatPayload = {

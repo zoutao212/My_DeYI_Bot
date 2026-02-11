@@ -46,6 +46,10 @@ export type EmbeddedRunAttemptParams = {
   clientTools?: ClientToolDefinition[];
   /** Disable built-in tools for this run (LLM-only mode). */
   disableTools?: boolean;
+  /** 子任务工具白名单：只保留列表中的工具，大幅减少 system prompt 体积。 */
+  toolAllowlist?: string[];
+  /** 跳过 bootstrap/context 文件加载（AGENTS.md、SOUL.md 等），子任务不需要这些。 */
+  skipBootstrapContext?: boolean;
   provider: string;
   modelId: string;
   model: Model<Api>;

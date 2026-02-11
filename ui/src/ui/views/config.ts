@@ -912,7 +912,8 @@ export function renderConfig(props: ConfigProps) {
                           <section class="card" style="margin-bottom: 12px;">
                             <div class="card-title">当前选择（仅 UI）</div>
                             <div class="card-sub">
-                              仅用于 UI 的当前选择：当 <code>agents.defaults.model.primary</code> 未设置时，会回退到
+                              仅用于 UI 的当前选择：当 <code>agents.defaults.model.primaryProviderId</code> +
+                              <code>primaryModelId</code>（或旧的 <code>primary</code>）未设置时，会回退到
                               <code>models.activeProviderId</code> + <code>models.activeModelId</code>。
                             </div>
 

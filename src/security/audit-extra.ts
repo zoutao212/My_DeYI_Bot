@@ -248,6 +248,15 @@ function addModel(models: ModelRef[], raw: unknown, source: string) {
 
 function collectModels(cfg: ClawdbotConfig): ModelRef[] {
   const out: ModelRef[] = [];
+  // Collect separated primaryProviderId + primaryModelId if present
+  const modelCfg = cfg.agents?.defaults?.model;
+  if (modelCfg && typeof modelCfg === "object") {
+    const pid = typeof modelCfg.primaryProviderId === "string" ? modelCfg.primaryProviderId.trim() : "";
+    const mid = typeof modelCfg.primaryModelId === "string" ? modelCfg.primaryModelId.trim() : "";
+    if (pid && mid) {
+      addModel(out, `${pid}/${mid}`, "agents.defaults.model.primaryProviderId+primaryModelId");
+    }
+  }
   addModel(out, cfg.agents?.defaults?.model?.primary, "agents.defaults.model.primary");
   for (const f of cfg.agents?.defaults?.model?.fallbacks ?? [])
     addModel(out, f, "agents.defaults.model.fallbacks");

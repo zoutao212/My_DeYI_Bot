@@ -11,8 +11,12 @@ import type { AgentToolsConfig, MemorySearchConfig } from "./types.tools.js";
 export type AgentModelConfig =
   | string
   | {
-      /** Primary model (provider/model). */
+      /** Primary model (provider/model). Legacy; prefer primaryProviderId + primaryModelId. */
       primary?: string;
+      /** Separated provider id (preferred over primary for providers whose model ids contain slashes). */
+      primaryProviderId?: string;
+      /** Separated model id (used together with primaryProviderId). */
+      primaryModelId?: string;
       /** Per-agent model fallbacks (provider/model). */
       fallbacks?: string[];
     };

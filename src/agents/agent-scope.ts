@@ -118,6 +118,11 @@ export function resolveAgentModelPrimary(cfg: ClawdbotConfig, agentId: string): 
   const raw = resolveAgentConfig(cfg, agentId)?.model;
   if (!raw) return undefined;
   if (typeof raw === "string") return raw.trim() || undefined;
+  // Prefer separated primaryProviderId + primaryModelId
+  const providerId = typeof raw.primaryProviderId === "string" ? raw.primaryProviderId.trim() : "";
+  const modelId = typeof raw.primaryModelId === "string" ? raw.primaryModelId.trim() : "";
+  if (providerId && modelId) return `${providerId}/${modelId}`;
+  // Fallback to legacy primary string
   const primary = raw.primary?.trim();
   return primary || undefined;
 }

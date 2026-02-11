@@ -20,6 +20,10 @@ export type AgentModelEntryConfig = {
 
 export type AgentModelListConfig = {
   primary?: string;
+  /** Separated provider id (preferred over primary for providers whose model ids contain slashes). */
+  primaryProviderId?: string;
+  /** Separated model id (used together with primaryProviderId). */
+  primaryModelId?: string;
   fallbacks?: string[];
 };
 
