@@ -1101,8 +1101,6 @@ export function createFollowupRunner(params: {
               `[followup-runner] ⚠️ OutputValidator 拦截: ${validation.failureCode} — ${validation.failureReason}`,
             );
             subTask.output = outputText;
-            subTask.status = "failed";
-            subTask.error = `OutputValidator: ${validation.failureReason}`;
             subTask.retryCount = (subTask.retryCount ?? 0) + 1;
 
             // V8 P3: 记录质量经验（OutputValidator 拦截）
@@ -1121,10 +1119,16 @@ export function createFollowupRunner(params: {
 
             // 收集并清理文件追踪
             collectTrackedFiles(subTask.id);
-            await orchestrator.saveTaskTree(taskTree);
 
-            // 如果建议重试且重试次数未超限，重新入队
-            if (validation.suggestedAction === "retry" && subTask.retryCount < 3) {
+            // 🔧 P92 修复：先决定是否重试，再设置最终状态并只保存一次
+            // 根因：旧代码先 status="failed"+save，再 status="pending"+save。
+            // P32 merge-on-save 的 _shouldTakeLocal 比较 ordinal(pending=0 < failed=2)，
+            // 第二次 save 的 pending 被磁盘的 failed 静默覆盖。
+            // 导致重试入队后 drain 的 isRoundCompleted 看到 failed → 轮次误判完成 → 重试被丢弃。
+            // 修复：消除双保存，根据重试决策设置最终状态后只保存一次。
+            const willRetry = validation.suggestedAction === "retry" && subTask.retryCount < 3;
+
+            if (willRetry) {
               // 🔧 P35 修复：hallucinated_tool_calls 重试时主动标记 provider 降级
               // 根因：LLM 用纯文本输出 tool call，重试时同一 provider 仍然降级，
               // 但 text-tool-fallback 在 Step 5.5 才检测降级（太晚），导致重试同样失败。
@@ -1141,7 +1145,9 @@ export function createFollowupRunner(params: {
                 }
               }
 
+              // P92: 直接设置 pending 并保存（不经过 failed 中间状态）
               subTask.status = "pending";
+              subTask.error = `OutputValidator: ${validation.failureReason}`;
               await orchestrator.saveTaskTree(taskTree);
               console.log(
                 `[followup-runner] 🔄 OutputValidator 建议重试 (${subTask.retryCount}/3)`,
@@ -1160,7 +1166,11 @@ export function createFollowupRunner(params: {
               }
               return;
             }
-            // 否则标记失败，继续处理下一个任务
+
+            // 不重试：标记失败并保存
+            subTask.status = "failed";
+            subTask.error = `OutputValidator: ${validation.failureReason}`;
+            await orchestrator.saveTaskTree(taskTree);
             if (queued.run.sessionKey) {
               finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
             }
