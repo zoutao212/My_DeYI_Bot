@@ -70,6 +70,9 @@ const EN_STOPWORDS = new Set([
   "whom", "when", "where", "why", "how", "about", "up", "down",
 ]);
 
+/** 预构建的合并停用词集（避免每次 extractKeywords 调用都重建） */
+const DEFAULT_STOPWORDS = new Set<string>([...CJK_STOPWORDS, ...EN_STOPWORDS]);
+
 // ─── 分词 ───────────────────────────────────────────────────
 
 /** CJK 字符范围正则 */
@@ -192,13 +195,18 @@ export function extractKeywords(text: string, options: ExtractionOptions = {}): 
 
   if (!text || text.length < 5) return [];
 
-  // 构建停用词集合
-  const stopwords = new Set<string>();
-  if (!keepStopwords) {
-    for (const w of CJK_STOPWORDS) stopwords.add(w);
-    for (const w of EN_STOPWORDS) stopwords.add(w);
+  // 复用预构建的停用词集，仅在有额外停用词时才创建新 Set
+  let stopwords: Set<string>;
+  if (keepStopwords) {
+    stopwords = extraStopwords.length > 0
+      ? new Set(extraStopwords.map(w => w.toLowerCase()))
+      : new Set<string>();
+  } else if (extraStopwords.length > 0) {
+    stopwords = new Set(DEFAULT_STOPWORDS);
+    for (const w of extraStopwords) stopwords.add(w.toLowerCase());
+  } else {
+    stopwords = DEFAULT_STOPWORDS;
   }
-  for (const w of extraStopwords) stopwords.add(w.toLowerCase());
 
   // Step 1: 分词
   const rawTokens = tokenize(text);

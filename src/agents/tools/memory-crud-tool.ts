@@ -15,6 +15,7 @@ import type { ClawdbotConfig } from "../../config/config.js";
 import {
   deepGrepSearch,
   invalidateFileCache,
+  invalidateDirCache,
   listMemoryTree,
   getDefaultMemoryDirs,
 } from "../../memory/local-search.js";
@@ -145,8 +146,9 @@ export function createMemoryWriteTool(options: MemoryCrudToolOptions): AnyAgentT
 
         await fs.writeFile(absPath, finalContent, "utf-8");
 
-        // 刷新搜索缓存
+        // 刷新所有缓存
         invalidateFileCache(absPath);
+        invalidateDirCache();
         invalidateSearchCache();
         // M7: 即时索引 — 触发 SQLite/FTS/向量索引增量更新（fire-and-forget）
         void triggerImmediateIndex(cfg, agentId, absPath);
@@ -292,6 +294,7 @@ export function createMemoryDeleteTool(options: MemoryCrudToolOptions): AnyAgent
 
         await fs.unlink(absPath);
         invalidateFileCache(absPath);
+        invalidateDirCache();
         invalidateSearchCache();
 
         return jsonResult({

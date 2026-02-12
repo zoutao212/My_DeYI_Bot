@@ -9,7 +9,6 @@
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { createHash } from "node:crypto";
 import { extractSearchTerms } from "./keyword-extractor.js";
 
 // ─── 类型定义 ───────────────────────────────────────────────
@@ -56,13 +55,37 @@ const DEFAULT_MAX_RESULTS = 20;
 const DEFAULT_MAX_FILE_SIZE = 1024 * 1024; // 1MB
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟
 const TITLE_WEIGHT_BONUS = 0.15; // 标题行额外加权
+const DIR_CACHE_TTL_MS = 30_000; // 目录遍历缓存 30s
+
+// ─── 目录遍历缓存 ─────────────────────────────────────────
+
+interface CachedDirListing {
+  files: string[];
+  cachedAt: number;
+}
+
+const dirCache = new Map<string, CachedDirListing>();
+
+function clearExpiredDirCache(): void {
+  const now = Date.now();
+  for (const [key, entry] of dirCache) {
+    if (now - entry.cachedAt > DIR_CACHE_TTL_MS) {
+      dirCache.delete(key);
+    }
+  }
+}
+
+/** 清空目录遍历缓存（写入操作后调用） */
+export function invalidateDirCache(): void {
+  dirCache.clear();
+}
 
 // ─── 文件缓存 ─────────────────────────────────────────────
 
 interface CachedFile {
   content: string;
   lines: string[];
-  hash: string;
+  mtimeMs: number;
   cachedAt: number;
   size: number;
 }
@@ -88,7 +111,7 @@ export function clearFileCache(): void {
   fileCache.clear();
 }
 
-async function readFileWithCache(absPath: string, maxSize: number): Promise<CachedFile | null> {
+export async function readFileWithCache(absPath: string, maxSize: number): Promise<CachedFile | null> {
   // 先检查缓存
   const cached = fileCache.get(absPath);
   if (cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) {
@@ -99,20 +122,18 @@ async function readFileWithCache(absPath: string, maxSize: number): Promise<Cach
     const stat = await fs.stat(absPath);
     if (!stat.isFile() || stat.size > maxSize || stat.size === 0) return null;
 
-    const content = await fs.readFile(absPath, "utf-8");
-    const hash = createHash("md5").update(content).digest("hex");
-
-    // 如果缓存中有且 hash 没变，只更新时间戳
-    if (cached && cached.hash === hash) {
+    // 快速校验：mtime+size 未变 → 文件未修改，跳过重读（避免 MD5 计算）
+    if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
       cached.cachedAt = Date.now();
       return cached;
     }
 
+    const content = await fs.readFile(absPath, "utf-8");
     const lines = content.split("\n");
     const entry: CachedFile = {
       content,
       lines,
-      hash,
+      mtimeMs: stat.mtimeMs,
       cachedAt: Date.now(),
       size: stat.size,
     };
@@ -176,6 +197,14 @@ async function walkDirectory(
   extensions: string[],
   recursive: boolean,
 ): Promise<string[]> {
+  // 目录缓存：同一目录+扩展名组合在 30s 内不重新遍历
+  clearExpiredDirCache();
+  const cacheKey = `${dir}|${extensions.sort().join(",")}|${recursive}`;
+  const cached = dirCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < DIR_CACHE_TTL_MS) {
+    return cached.files;
+  }
+
   const results: string[] = [];
   try {
     const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -196,6 +225,8 @@ async function walkDirectory(
   } catch {
     // 目录不存在或无权限，静默跳过
   }
+
+  dirCache.set(cacheKey, { files: [...results], cachedAt: Date.now() });
   return results;
 }
 

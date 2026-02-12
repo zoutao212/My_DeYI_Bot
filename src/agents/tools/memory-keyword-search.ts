@@ -1,5 +1,5 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { tokenizeQuery, readFileWithCache } from "../../memory/local-search.js";
 
 export interface KeywordSearchResult {
   path: string;
@@ -10,73 +10,8 @@ export interface KeywordSearchResult {
 }
 
 const CONTEXT_LINES = 5;
-const SUPPORTED_EXTENSIONS = [".md", ".txt"];
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB
 const TITLE_BONUS = 0.15;
-
-/**
- * 智能分词：支持中英文混合
- */
-function tokenizeKeywords(query: string): string[] {
-  const tokens: string[] = [];
-  const seen = new Set<string>();
-
-  // 英文/数字 token
-  const alphaMatches = query.match(/[A-Za-z0-9_]+/gi) ?? [];
-  for (const t of alphaMatches) {
-    const lower = t.toLowerCase();
-    if (lower.length >= 2 && !seen.has(lower)) {
-      seen.add(lower);
-      tokens.push(lower);
-    }
-  }
-
-  // CJK 连续片段（2字及以上）+ bigram
-  const cjkMatches = query.match(/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]+/g) ?? [];
-  for (const segment of cjkMatches) {
-    if (segment.length < 2) continue;
-    if (!seen.has(segment)) {
-      seen.add(segment);
-      tokens.push(segment);
-    }
-    if (segment.length > 2) {
-      for (let i = 0; i <= segment.length - 2; i++) {
-        const bigram = segment.substring(i, i + 2);
-        if (!seen.has(bigram)) {
-          seen.add(bigram);
-          tokens.push(bigram);
-        }
-      }
-    }
-  }
-
-  return tokens;
-}
-
-/**
- * 递归收集目录中的记忆文件
- */
-async function collectFiles(dir: string): Promise<string[]> {
-  const result: string[] = [];
-  try {
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
-        result.push(...(await collectFiles(full)));
-      } else if (entry.isFile()) {
-        const ext = path.extname(entry.name).toLowerCase();
-        if (SUPPORTED_EXTENSIONS.includes(ext)) {
-          result.push(full);
-        }
-      }
-    }
-  } catch {
-    // 目录不存在或无权限
-  }
-  return result;
-}
 
 /**
  * Keyword-based search for memory files with CJK support.
@@ -88,22 +23,45 @@ export async function keywordSearch(params: {
   query: string;
   memoryDir: string;
   maxResults?: number;
+  /** 预收集的文件列表（避免重复遍历目录） */
+  files?: string[];
 }): Promise<KeywordSearchResult[]> {
-  const keywords = tokenizeKeywords(params.query);
+  const keywords = tokenizeQuery(params.query);
   if (keywords.length === 0) return [];
 
   const results: KeywordSearchResult[] = [];
 
   try {
-    const files = await collectFiles(params.memoryDir);
+    // 复用 local-search 的目录遍历缓存（如果调用方未提供文件列表）
+    const files = params.files ?? await (async () => {
+      const { default: fs } = await import("node:fs/promises");
+      const collected: string[] = [];
+      async function collect(dir: string): Promise<void> {
+        try {
+          const entries = await fs.readdir(dir, { withFileTypes: true });
+          for (const entry of entries) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+              if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+              await collect(full);
+            } else if (entry.isFile()) {
+              const ext = path.extname(entry.name).toLowerCase();
+              if (ext === ".md" || ext === ".txt") collected.push(full);
+            }
+          }
+        } catch { /* 目录不存在 */ }
+      }
+      await collect(params.memoryDir);
+      return collected;
+    })();
 
     for (const filePath of files) {
       try {
-        const stat = await fs.stat(filePath);
-        if (stat.size > MAX_FILE_SIZE || stat.size === 0) continue;
+        // 复用 local-search 的文件缓存（mtime+size 校验，避免重复磁盘 I/O）
+        const cached = await readFileWithCache(filePath, MAX_FILE_SIZE);
+        if (!cached) continue;
 
-        const content = await fs.readFile(filePath, "utf-8");
-        const lines = content.split("\n");
+        const lines = cached.lines;
         const relPath = path.relative(params.memoryDir, filePath).replace(/\\/g, "/");
 
         // 找到所有匹配行

@@ -208,7 +208,7 @@ export function createMemorySearchTool(options: {
           startLine: r.startLine,
           endLine: r.endLine,
           score: Math.round(r.score * 100) / 100,
-          snippet: r.snippet,
+          snippet: r.snippet.length > 500 ? r.snippet.substring(0, 500) + "…" : r.snippet,
           source: r.source,
           matchedTerms: r.matchedTerms,
           channels: r.channels,
