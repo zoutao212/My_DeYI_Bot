@@ -3,6 +3,7 @@ import * as path from "node:path";
 
 import type { ClawdbotConfig } from "../../config/config.js";
 import { getMemorySearchManager } from "../../memory/index.js";
+import { localGrepSearch } from "../../memory/local-search.js";
 import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "../agent-scope.js";
 import { resolveMemorySearchConfig } from "../memory-search.js";
 import type { AnyAgentTool } from "./common.js";
@@ -68,9 +69,36 @@ export function createMemorySearchTool(options: {
         }
       }
       
-      // Step 2: Fallback to keyword search
+      // Step 2: Fallback to localGrepSearch（本地快速文本搜索）
+      const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
       try {
-        const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
+        const memoryDir = path.join(workspaceDir, "memory");
+        const characterMemoryDirs = [
+          path.join(workspaceDir, "characters"),
+        ];
+        const grepResults = await localGrepSearch(query, {
+          dirs: [memoryDir, ...characterMemoryDirs],
+          extensions: [".md", ".txt"],
+          maxResults: maxResults ?? 10,
+          workspaceDir,
+        });
+
+        if (grepResults.length > 0) {
+          return jsonResult({
+            results: grepResults,
+            provider: "local-grep",
+            fallback: true,
+            warning: error
+              ? `Embedding search unavailable (${error}), using local grep search`
+              : "Using local grep search as fallback",
+          });
+        }
+      } catch {
+        // localGrep 失败，继续 fallback
+      }
+
+      // Step 3: 最终兜底 — 简单关键词搜索
+      try {
         const memoryDir = path.join(workspaceDir, "memory");
         const keywordResults = await keywordSearch({
           query,
@@ -84,14 +112,14 @@ export function createMemorySearchTool(options: {
           fallback: true,
           warning: error 
             ? `Embedding search unavailable (${error}), using keyword search`
-            : "Using keyword search as fallback",
+            : "Using keyword search as final fallback",
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return jsonResult({ 
           results: [], 
           disabled: true, 
-          error: `Both embedding and keyword search failed: ${message}` 
+          error: `All search methods failed: ${message}` 
         });
       }
     },

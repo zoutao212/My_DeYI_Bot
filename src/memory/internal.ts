@@ -46,30 +46,76 @@ async function exists(filePath: string): Promise<boolean> {
   }
 }
 
-async function walkDir(dir: string, files: string[]) {
-  const entries = await fs.readdir(dir, { withFileTypes: true });
+const DEFAULT_MEMORY_EXTENSIONS = [".md", ".txt"];
+
+async function walkDir(
+  dir: string,
+  files: string[],
+  extensions: string[] = DEFAULT_MEMORY_EXTENSIONS,
+) {
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return; // 目录不存在或无权限
+  }
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      await walkDir(full, files);
+      // 跳过隐藏目录和 node_modules
+      if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+      await walkDir(full, files, extensions);
       continue;
     }
     if (!entry.isFile()) continue;
-    if (!entry.name.endsWith(".md")) continue;
+    const ext = path.extname(entry.name).toLowerCase();
+    if (!extensions.includes(ext)) continue;
     files.push(full);
   }
 }
 
-export async function listMemoryFiles(workspaceDir: string): Promise<string[]> {
+export async function listMemoryFiles(
+  workspaceDir: string,
+  options?: { extraDirs?: string[] },
+): Promise<string[]> {
   const result: string[] = [];
+
+  // 顶层记忆文件
   const memoryFile = path.join(workspaceDir, "MEMORY.md");
   const altMemoryFile = path.join(workspaceDir, "memory.md");
   if (await exists(memoryFile)) result.push(memoryFile);
   if (await exists(altMemoryFile)) result.push(altMemoryFile);
+
+  // 核心记忆目录
   const memoryDir = path.join(workspaceDir, "memory");
   if (await exists(memoryDir)) {
     await walkDir(memoryDir, result);
   }
+
+  // 角色记忆目录 characters/*/memory/
+  const charactersDir = path.join(workspaceDir, "characters");
+  if (await exists(charactersDir)) {
+    try {
+      const charEntries = await fs.readdir(charactersDir, { withFileTypes: true });
+      for (const charEntry of charEntries) {
+        if (!charEntry.isDirectory() || charEntry.name.startsWith(".")) continue;
+        const charMemDir = path.join(charactersDir, charEntry.name, "memory");
+        if (await exists(charMemDir)) {
+          await walkDir(charMemDir, result);
+        }
+      }
+    } catch {}
+  }
+
+  // 额外扫描目录（可配置）
+  if (options?.extraDirs) {
+    for (const extraDir of options.extraDirs) {
+      if (await exists(extraDir)) {
+        await walkDir(extraDir, result);
+      }
+    }
+  }
+
   if (result.length <= 1) return result;
   const seen = new Set<string>();
   const deduped: string[] = [];
