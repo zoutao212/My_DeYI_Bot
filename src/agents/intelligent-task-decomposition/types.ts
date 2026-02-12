@@ -544,6 +544,25 @@ export interface TaskTreeMetadata {
 
   /** masterBlueprint 生成时间 */
   blueprintGeneratedAt?: number;
+
+  // 🆕 V7: 结构化纲领（写作任务多轮次生成）
+  // 将原本单次生成的 masterBlueprint 拆分为结构化组件，
+  // 每个组件可以精准注入到对应的章节子任务中，避免截断丢失关键信息。
+
+  /** 人物卡片集合（每个主要角色的完整档案：性格/动机/成长弧线/关系网络/外貌标签） */
+  blueprintCharacterCards?: string;
+
+  /** 世界观设定（核心设定/背景规则/重要地点/时间线/力量体系等） */
+  blueprintWorldBuilding?: string;
+
+  /** 各章节剧情纲要（按章节号索引，每章包含：核心情节/出场角色/场景/衔接钩子） */
+  blueprintChapterSynopses?: Record<string, string>;
+
+  /** 风格指南（叙事视角/语言风格/氛围基调/禁忌事项） */
+  blueprintStyleGuide?: string;
+
+  /** 纲领版本号（每次迭代优化 +1，用于追踪精炼次数） */
+  blueprintVersion?: number;
 }
 
 /**
@@ -664,6 +683,12 @@ export interface SubTaskMetadata {
 
   /** 最终合并后的章节文件名（如 "九天星辰录_第01章.txt"） */
   chapterFileName?: string;
+
+  /** 🔧 P37: 标准化分段文件名（如 "九天星辰录_第01章_第1节.txt"） */
+  segmentFileName?: string;
+
+  /** 🔧 P51: 章节编号（从 1 开始，用于精准匹配 V7 blueprintChapterSynopses） */
+  chapterNumber?: number;
 
   // 🆕 V5: 大文本 Map-Reduce 分析（大文件 → 分 chunk 阅读 → 逐级汇总 → 最终产出）
 

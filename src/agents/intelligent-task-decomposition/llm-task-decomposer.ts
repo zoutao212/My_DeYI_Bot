@@ -279,6 +279,290 @@ ${prompts.blueprintOutputFormatHint}`;
   }
 
   // ========================================
+  // 🆕 V7: 结构化写作纲领（多轮次生成）
+  // ========================================
+
+  /**
+   * 🆕 V7: 多轮次生成结构化写作纲领
+   *
+   * 将原本单次 LLM 调用的纲领生成拆分为多个聚焦轮次：
+   * - Pass 1: 世界观 + 风格指南 + 人物卡（创作基石）
+   * - Pass 2: 基于 Pass 1 生成各章节详细剧情纲要
+   * - Pass 3（可选）：一致性审查 + 迭代优化
+   *
+   * 结果存入 TaskTreeMetadata 的结构化字段，
+   * 每个章节子任务执行时精准注入"人物卡 + 该章纲要"，
+   * 替代原来的"大段截断纲领"，信息损失为零。
+   *
+   * @param rootTask 用户原始创作需求
+   * @param enablePass3 是否启用第三轮一致性审查（默认 true，额外消耗 1 次 LLM）
+   * @returns 结构化纲领组件，LLM 不可用时返回 null
+   */
+  async generateStructuredWritingBlueprint(
+    rootTask: string,
+    enablePass3: boolean = true,
+  ): Promise<{
+    masterBlueprint: string;
+    characterCards: string;
+    worldBuilding: string;
+    styleGuide: string;
+    chapterSynopses: Record<string, string>;
+    version: number;
+    llmCallCount: number;
+  } | null> {
+    const prompts = getPrompts();
+    let llmCallCount = 0;
+
+    // ── Pass 1: 世界观 + 风格指南 + 人物卡 ──
+    console.log(`[LLMTaskDecomposer] 🎼 V7 Pass 1/3: 生成世界观+人物卡...`);
+    const pass1Prompt = `${prompts.structuredBlueprintPass1Prompt}
+
+---
+**原始创作需求：**
+${rootTask}
+---
+
+${prompts.structuredBlueprintOutputHint}`;
+
+    let pass1Result: string;
+    try {
+      pass1Result = await this.callLLM(pass1Prompt);
+      llmCallCount++;
+      if (pass1Result.trim().startsWith("{")) {
+        console.warn("[LLMTaskDecomposer] ⚠️ V7 Pass 1 降级到规则驱动，跳过结构化纲领");
+        return null;
+      }
+      console.log(`[LLMTaskDecomposer] ✅ V7 Pass 1 完成 (${pass1Result.length} chars)`);
+    } catch (err) {
+      console.warn("[LLMTaskDecomposer] ⚠️ V7 Pass 1 失败:", err);
+      return null;
+    }
+
+    // 从 Pass 1 结果中提取结构化组件
+    const { worldBuilding, styleGuide, characterCards } = this.parsePass1Result(pass1Result);
+
+    // ── Pass 2: 章节剧情纲要（基于 Pass 1 的世界观和人物卡） ──
+    console.log(`[LLMTaskDecomposer] 🎼 V7 Pass 2/3: 生成章节剧情纲要...`);
+    const pass2Prompt = `${prompts.structuredBlueprintPass2Prompt}
+
+---
+**已确定的核心设定：**
+${pass1Result}
+
+**原始创作需求：**
+${rootTask}
+---
+
+${prompts.structuredBlueprintOutputHint}`;
+
+    let pass2Result: string;
+    try {
+      pass2Result = await this.callLLM(pass2Prompt);
+      llmCallCount++;
+      if (pass2Result.trim().startsWith("{")) {
+        console.warn("[LLMTaskDecomposer] ⚠️ V7 Pass 2 降级，使用 Pass 1 作为完整纲领");
+        return {
+          masterBlueprint: pass1Result,
+          characterCards,
+          worldBuilding,
+          styleGuide,
+          chapterSynopses: {},
+          version: 1,
+          llmCallCount,
+        };
+      }
+      console.log(`[LLMTaskDecomposer] ✅ V7 Pass 2 完成 (${pass2Result.length} chars)`);
+    } catch (err) {
+      console.warn("[LLMTaskDecomposer] ⚠️ V7 Pass 2 失败，使用 Pass 1 作为完整纲领:", err);
+      return {
+        masterBlueprint: pass1Result,
+        characterCards,
+        worldBuilding,
+        styleGuide,
+        chapterSynopses: {},
+        version: 1,
+        llmCallCount,
+      };
+    }
+
+    // 从 Pass 2 结果中提取各章节纲要
+    const chapterSynopses = this.parseChapterSynopses(pass2Result);
+
+    // ── Pass 3（可选）: 一致性审查 + 迭代优化 ──
+    let finalPass1 = pass1Result;
+    let finalPass2 = pass2Result;
+    let version = 1;
+
+    if (enablePass3) {
+      console.log(`[LLMTaskDecomposer] 🎼 V7 Pass 3/3: 一致性审查+迭代优化...`);
+      const combinedBlueprint = `${pass1Result}\n\n---\n\n${pass2Result}`;
+      const pass3Prompt = `${prompts.structuredBlueprintPass3Prompt}
+
+---
+**待审查的创作纲领：**
+${combinedBlueprint}
+---
+
+如果需要修正，请输出修正后的完整纲领（保持原有结构）。
+如果审查通过，请输出"[审查通过]"后附上改进建议。`;
+
+      try {
+        const pass3Result = await this.callLLM(pass3Prompt);
+        llmCallCount++;
+
+        if (!pass3Result.includes("[审查通过]") && pass3Result.length > 500) {
+          // Pass 3 返回了修正版纲领，使用修正版
+          console.log(`[LLMTaskDecomposer] ✅ V7 Pass 3: 纲领已迭代优化 (${pass3Result.length} chars)`);
+          // 🔧 P55: 放宽守卫——任一组件有效即采纳修正版
+          // 旧守卫要求 characterCards > 100 字才采纳，如果编辑只修正了纲要而未重新输出人物卡，
+          // 有效修正会被丢弃。新策略：分别检查每个组件，有效的采纳，无效的保留原版。
+          const revised = this.parsePass1Result(pass3Result);
+          const revisedSynopses = this.parseChapterSynopses(pass3Result);
+          let anyRevised = false;
+
+          // 组件级采纳：每个组件独立判断是否使用修正版
+          if (revised.characterCards.length > 100) {
+            // 人物卡修正有效
+            anyRevised = true;
+          }
+          if (revised.worldBuilding.length > 50) {
+            anyRevised = true;
+          }
+          if (revised.styleGuide.length > 30) {
+            anyRevised = true;
+          }
+          if (Object.keys(revisedSynopses).length > 0) {
+            Object.assign(chapterSynopses, revisedSynopses);
+            finalPass2 = pass3Result;
+            anyRevised = true;
+          }
+
+          if (anyRevised) {
+            finalPass1 = pass3Result;
+            console.log(
+              `[LLMTaskDecomposer] 🔧 P55: Pass 3 修正版已采纳 ` +
+              `(chars=${revised.characterCards.length}, world=${revised.worldBuilding.length}, ` +
+              `style=${revised.styleGuide.length}, chapters=${Object.keys(revisedSynopses).length})`,
+            );
+          } else {
+            console.log(`[LLMTaskDecomposer] ⚠️ P55: Pass 3 修正版所有组件均无效，保留原版`);
+          }
+          version = 2;
+        } else {
+          console.log(`[LLMTaskDecomposer] ✅ V7 Pass 3: 审查通过，纲领质量良好`);
+        }
+      } catch (err) {
+        console.warn("[LLMTaskDecomposer] ⚠️ V7 Pass 3 失败（不影响已有纲领）:", err);
+      }
+    }
+
+    // 组合完整纲领（向后兼容 masterBlueprint 字符串）
+    const masterBlueprint = `${finalPass1}\n\n---\n\n${finalPass2 !== finalPass1 ? finalPass2 : ""}`.trim();
+    const finalCharCards = this.parsePass1Result(finalPass1).characterCards || characterCards;
+    const finalWorldBuilding = this.parsePass1Result(finalPass1).worldBuilding || worldBuilding;
+    const finalStyleGuide = this.parsePass1Result(finalPass1).styleGuide || styleGuide;
+
+    console.log(
+      `[LLMTaskDecomposer] ✅ V7 结构化纲领生成完成: ` +
+      `masterBlueprint=${masterBlueprint.length} chars, ` +
+      `characterCards=${finalCharCards.length} chars, ` +
+      `worldBuilding=${finalWorldBuilding.length} chars, ` +
+      `chapters=${Object.keys(chapterSynopses).length}, ` +
+      `version=${version}, llmCalls=${llmCallCount}`,
+    );
+
+    return {
+      masterBlueprint,
+      characterCards: finalCharCards,
+      worldBuilding: finalWorldBuilding,
+      styleGuide: finalStyleGuide,
+      chapterSynopses,
+      version,
+      llmCallCount,
+    };
+  }
+
+  /**
+   * 🆕 V7: 从 Pass 1 结果中提取结构化组件
+   */
+  private parsePass1Result(text: string): {
+    worldBuilding: string;
+    styleGuide: string;
+    characterCards: string;
+  } {
+    // 按大标题分段：世界观设定 / 风格指南 / 人物卡
+    const sections = {
+      worldBuilding: "",
+      styleGuide: "",
+      characterCards: "",
+    };
+
+    // 匹配标题分段（支持"## 一、"、"# 世界观"、"**世界观**"等格式）
+    const worldPattern = /(?:^|\n)(?:#{1,3}\s*)?(?:\*{0,2})(?:一[、.]?\s*)?(?:世界观|背景|设定|World)/im;
+    const stylePattern = /(?:^|\n)(?:#{1,3}\s*)?(?:\*{0,2})(?:二[、.]?\s*)?(?:风格|Style|叙事)/im;
+    const charPattern = /(?:^|\n)(?:#{1,3}\s*)?(?:\*{0,2})(?:三[、.]?\s*)?(?:人物|角色|Character)/im;
+
+    const worldMatch = text.match(worldPattern);
+    const styleMatch = text.match(stylePattern);
+    const charMatch = text.match(charPattern);
+
+    // 按匹配位置排序并提取段落
+    const markers = [
+      { key: "worldBuilding" as const, pos: worldMatch?.index ?? -1 },
+      { key: "styleGuide" as const, pos: styleMatch?.index ?? -1 },
+      { key: "characterCards" as const, pos: charMatch?.index ?? -1 },
+    ].filter(m => m.pos >= 0).sort((a, b) => a.pos - b.pos);
+
+    for (let i = 0; i < markers.length; i++) {
+      const start = markers[i].pos;
+      const end = i + 1 < markers.length ? markers[i + 1].pos : text.length;
+      sections[markers[i].key] = text.substring(start, end).trim();
+    }
+
+    // 如果没有匹配到任何标题，整段作为 characterCards（最重要的组件）
+    if (markers.length === 0) {
+      sections.characterCards = text;
+    }
+
+    return sections;
+  }
+
+  /**
+   * 🆕 V7: 从 Pass 2 结果中提取各章节剧情纲要
+   */
+  private parseChapterSynopses(text: string): Record<string, string> {
+    const synopses: Record<string, string> = {};
+
+    // 匹配章节标题：### 第N章、## 第N章、**第N章** 等
+    const chapterPattern = /(?:^|\n)(?:#{1,3}\s*)?(?:\*{0,2})(?:第\s*([一二三四五六七八九十百千\d]+)\s*[章节篇幕])/gim;
+    const matches = [...text.matchAll(chapterPattern)];
+
+    if (matches.length === 0) return synopses;
+
+    const cnMap: Record<string, number> = {
+      "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+      "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+    };
+
+    for (let i = 0; i < matches.length; i++) {
+      const numStr = matches[i][1];
+      const num = cnMap[numStr] ?? parseInt(numStr, 10);
+      if (isNaN(num)) continue;
+
+      const start = matches[i].index!;
+      const end = i + 1 < matches.length ? matches[i + 1].index! : text.length;
+      const content = text.substring(start, end).trim();
+
+      // 截断单章纲要到 2000 字符
+      synopses[String(num)] = content.length > 2000
+        ? content.substring(0, 2000) + "\n...[纲要已截断]"
+        : content;
+    }
+
+    return synopses;
+  }
+
+  // ========================================
   // 私有辅助方法
   // ========================================
 
@@ -636,22 +920,85 @@ ${prompts.jsonOnlyReminder}`;
    *
    * LLM 分解时可能不返回 metadata.chapterOutline，导致子任务执行时
    * 只能看到完整纲领（6000 字）而非精准的章节大纲。
-   * 本方法从 masterBlueprint 中按子任务序号/summary 关键词自动提取对应段落。
+   *
+   * 🔧 P52: 优先从 V7 blueprintChapterSynopses 精准匹配，
+   * 回退到 masterBlueprint 正则提取。
    */
   private fillMissingChapterOutlines(subTasks: SubTask[], taskTree: TaskTree): void {
     const blueprint = taskTree.metadata?.masterBlueprint;
-    if (!blueprint) return;
+    const v7Synopses = taskTree.metadata?.blueprintChapterSynopses;
+    if (!blueprint && !v7Synopses) return;
 
     // 统计缺失数
     const missing = subTasks.filter(t => !t.metadata?.chapterOutline);
     if (missing.length === 0) return;
+
+    const cnMap: Record<string, number> = { "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10 };
+
+    // 🔧 P52: 优先使用 V7 结构化纲要（精准、无需正则）
+    let filledFromV7 = 0;
+    if (v7Synopses && Object.keys(v7Synopses).length > 0) {
+      const stillMissing: SubTask[] = [];
+      for (const subTask of missing) {
+        if (!subTask.metadata) subTask.metadata = {};
+
+        // 从 summary 提取章节号
+        const chMatch = (subTask.summary ?? "").match(/第\s*([一二三四五六七八九十\d]+)\s*[章节篇幕]/);
+        let chNum = 0;
+        if (chMatch) {
+          chNum = cnMap[chMatch[1]] ?? parseInt(chMatch[1], 10);
+        }
+        // 回退到位置索引（第 1 个子任务 → 第 1 章）
+        if (!chNum || isNaN(chNum)) {
+          const taskIndex = subTasks.indexOf(subTask) + 1; // 1-based
+          if (v7Synopses[String(taskIndex)]) chNum = taskIndex;
+        }
+
+        const synopsis = chNum > 0 ? v7Synopses[String(chNum)] : undefined;
+        if (synopsis) {
+          subTask.metadata.chapterOutline = synopsis.length > 2000
+            ? synopsis.substring(0, 2000) + "\n...[纲要已截断]"
+            : synopsis;
+          // 同时设置 chapterNumber 以便下游精准匹配
+          subTask.metadata.chapterNumber = chNum;
+          filledFromV7++;
+        } else {
+          stillMissing.push(subTask);
+        }
+      }
+
+      if (filledFromV7 > 0) {
+        console.log(
+          `[LLMTaskDecomposer] 📖 P52: V7 blueprintChapterSynopses 精准填充 ${filledFromV7}/${missing.length} 个子任务的 chapterOutline`,
+        );
+      }
+
+      // 如果 V7 已全部填充，无需走旧路径
+      if (stillMissing.length === 0) return;
+
+      // 仅对 V7 未覆盖的子任务继续走旧路径
+      return this.fillMissingChapterOutlinesFromBlueprint(stillMissing, subTasks, blueprint ?? "");
+    }
+
+    // 无 V7 纲要，走旧路径
+    this.fillMissingChapterOutlinesFromBlueprint(missing, subTasks, blueprint ?? "");
+  }
+
+  /**
+   * O4 旧路径：从 masterBlueprint 文本中正则提取章节段落
+   */
+  private fillMissingChapterOutlinesFromBlueprint(
+    missing: SubTask[],
+    allSubTasks: SubTask[],
+    blueprint: string,
+  ): void {
+    if (!blueprint) return;
 
     // 按章节标题切分纲领（支持 "第N章"、"Chapter N"、"## N."、"**第N章**" 等格式）
     const chapterPattern = /(?:^|\n)(?:#{1,3}\s*)?(?:\*{0,2})(?:第[一二三四五六七八九十百千\d]+[章节篇幕]|Chapter\s+\d+|\d+[\.\)]\s*(?:第[一二三四五六七八九十百千\d]+[章节篇幕]|Chapter))(?:\*{0,2})[^\n]*/gi;
     const matches = [...blueprint.matchAll(chapterPattern)];
 
     if (matches.length === 0) {
-      // 纲领中没有明确的章节标题，跳过回退
       console.log(`[LLMTaskDecomposer] ⚠️ O4: 纲领中未找到章节标题，跳过 chapterOutline 回退`);
       return;
     }
@@ -668,13 +1015,15 @@ ${prompts.jsonOnlyReminder}`;
       });
     }
 
+    const cnMap: Record<string, number> = { "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10 };
+
     // 为每个缺少 chapterOutline 的子任务匹配对应章节
     let filled = 0;
     for (const subTask of missing) {
       if (!subTask.metadata) subTask.metadata = {};
 
       // 策略 1：按子任务在数组中的序号匹配（第 1 个子任务 → 第 1 章）
-      const taskIndex = subTasks.indexOf(subTask);
+      const taskIndex = allSubTasks.indexOf(subTask);
       let matched: typeof sections[0] | undefined;
 
       // 策略 2：按 summary 中的章节关键词匹配
@@ -682,8 +1031,6 @@ ${prompts.jsonOnlyReminder}`;
       const chapterNumMatch = summaryLower.match(/第([一二三四五六七八九十\d]+)[章节篇幕]|chapter\s*(\d+)/i);
       if (chapterNumMatch) {
         const numStr = chapterNumMatch[1] || chapterNumMatch[2];
-        // 中文数字转阿拉伯
-        const cnMap: Record<string, number> = { "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10 };
         const num = cnMap[numStr] ?? parseInt(numStr, 10);
         if (!isNaN(num) && num >= 1 && num <= sections.length) {
           matched = sections[num - 1];
@@ -706,7 +1053,7 @@ ${prompts.jsonOnlyReminder}`;
 
     if (filled > 0) {
       console.log(
-        `[LLMTaskDecomposer] 📖 O4: 自动回退填充 ${filled}/${missing.length} 个子任务的 chapterOutline`,
+        `[LLMTaskDecomposer] 📖 O4: masterBlueprint 回退填充 ${filled}/${missing.length} 个子任务的 chapterOutline`,
       );
     }
   }

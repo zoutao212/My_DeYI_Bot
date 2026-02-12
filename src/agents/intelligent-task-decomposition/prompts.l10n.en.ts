@@ -33,6 +33,7 @@ export const TASK_DECOMPOSITION_PROMPTS_EN: TaskDecompositionPromptsL10n = {
     "If the original task has word count/length/quantity requirements, each subtask prompt must explicitly allocate specific quantitative targets (e.g., this chapter requires 3000+ words)",
     "Each subtask prompt should be detailed enough, including: goal, specific requirements, quantitative metrics, output format",
     "For writing tasks: each subtask prompt must include explicit word count requirements, and the sum of all subtask word counts should be >= total requirement",
+    "⚠️ Chapter splitting rule: Even if the user groups multiple chapters together (e.g. 'Chapters 5-6' or 'Ch3 & Ch4'), you MUST split them into separate subtasks (one subtask per chapter). Never combine multiple chapters into a single subtask",
     "⚠️ Capability constraint: Each subtask's expected output should not exceed 2000 characters (Chinese) or 1500 words (English). If a section needs more content, split it into multiple subtasks linked by dependencies for coherence",
   ],
   
@@ -176,6 +177,69 @@ extracting the chapter/module outline corresponding to that subtask from the blu
 This outline will serve as the executor's dedicated guide, ensuring content consistency during parallel execution.`,
 
   blueprintTruncatedHint: "...[Blueprint truncated]",
+
+  // 🆕 V7: Structured Writing Blueprint (Multi-pass Generation)
+
+  structuredBlueprintPass1Prompt: `You are a senior novel planning master. Please build the **Core Setting Document** for the following creative task — this is the foundation of the entire work.
+
+Please output the following (Markdown format, no JSON):
+
+## I. World Building
+- Core background rules (power systems/tech level/social structure etc., depending on genre)
+- Important locations (at least 3 key scenes, 2-3 sentences each)
+- Timeline/era background
+
+## II. Style Guide
+- Narrative perspective (which person, whether POV switches)
+- Language style (tone, pacing preferences, dialogue style)
+- Atmospheric tone (overall emotional direction)
+- Taboos (things to avoid in the writing)
+
+## III. Main Character Cards
+Create detailed profiles for each major character (at least 3):
+- **Name**
+- **Identity/Occupation**
+- **Personality Tags** (3-5 keywords)
+- **Core Motivation** (inner need driving behavior)
+- **Growth Arc** (transformation from beginning to end)
+- **Key Relationships** (relationship network with other characters)
+- **Appearance Tags** (2-3 distinguishing features)
+- **Catchphrases/Speech Habits** (if any)
+
+Ensure characters have tension and complementarity, all serving the theme.`,
+
+  structuredBlueprintPass2Prompt: `You are a senior novel planning master. Based on the following established **world building and character settings**, please generate detailed plot synopses for each chapter.
+
+Please output the following structure for each chapter (Markdown format):
+
+### Chapter N: [Chapter Title]
+- **Core Plot**: Main events of this chapter (3-5 key nodes: opening→development→climax→resolution)
+- **Characters Present**: Characters appearing and their actions/emotional changes
+- **Key Scenes**: Main scene description points
+- **Emotional Nodes**: Emotional peaks/valleys of this chapter
+- **Connection Hooks**:
+  - From previous chapter: How to connect with the ending of the previous chapter
+  - To next chapter: Suspense/foreshadowing left at the end
+- **Target Word Count**: Approximately N words
+
+Requirements:
+1. Each chapter's plot must advance the main storyline, no stagnation
+2. Character behavior must match personality and motivation from character cards
+3. Foreshadowing and callbacks between chapters must be clearly marked
+4. Control pacing: alternate between action/calm, tension/release`,
+
+  structuredBlueprintPass3Prompt: `You are a senior literary editor. Please review the following creative blueprint and check for these issues:
+
+1. **Character Consistency**: Do character behaviors/dialogues match their character card settings? Are growth arcs natural?
+2. **Plot Logic**: Do event cause-and-effect relationships hold? Any logical gaps?
+3. **Pacing Balance**: Are there consecutive chapters with too-fast/too-slow pacing?
+4. **Foreshadowing Closure**: Do all foreshadowings have corresponding reveals/callbacks?
+5. **Connection Gaps**: Are transitions between chapters natural? Any information gaps?
+
+If issues are found, please directly correct them and output the complete revised blueprint.
+If the blueprint quality is good, output "[Review Passed]" followed by suggestions for improvement (no more than 5).`,
+
+  structuredBlueprintOutputHint: "Please output content directly (Markdown format). Do not output JSON or explain your thinking process.",
 
   // ========================================
   // Task Estimation Prompts

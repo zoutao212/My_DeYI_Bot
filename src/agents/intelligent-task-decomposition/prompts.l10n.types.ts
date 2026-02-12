@@ -149,6 +149,16 @@ export interface TaskDecompositionPromptsL10n {
   /** 纲领截断提示 */
   blueprintTruncatedHint: string;
 
+  // 🆕 V7: 结构化写作纲领（多轮次生成）
+  /** 第一轮：世界观+人物卡生成提示词 */
+  structuredBlueprintPass1Prompt: string;
+  /** 第二轮：章节剧情纲要生成提示词 */
+  structuredBlueprintPass2Prompt: string;
+  /** 第三轮（可选）：一致性审查+迭代优化提示词 */
+  structuredBlueprintPass3Prompt: string;
+  /** 结构化纲领输出格式提示 */
+  structuredBlueprintOutputHint: string;
+
   // ========================================
   // 任务估算提示词
   // ========================================

@@ -447,11 +447,20 @@ export class Orchestrator {
               // 扫描失败，保持原值
             }
           }
-          const threshold = Math.floor(wordCountReq * 0.6); // 60% 硬性底线（零 LLM 成本拦截）
-          // 🔧 问题 G 修复：从 30% 提高到 60%
-          // 原因：30% 太低，大量不达标的输出（如 32%）会通过前置检查，
-          // 然后交给 LLM 质检（消耗 1 次 LLM 调用）才被 restart。
-          // 60% 门槛可以在零成本下拦截大部分不达标输出，节省 LLM 预算。
+          // 🔧 P45: 字数阈值根据任务子类型动态调整（替代一刀切 60%）
+          // 刻板问题：所有任务统一用 60% 阈值，但不同子类型的合理阈值不同——
+          // - 分段子任务（isSegment）：每段目标较小（800-2500字），LLM 产出波动大，60% 过严
+          // - 续写子任务（isContinuation）：补充差额，目标精确度低，可以更宽容
+          // - 完整章节任务：保持 60%，确保产出质量
+          let wordCountThresholdRatio = 0.6; // 基线 60%
+          if (subTask.metadata?.isSegment) {
+            wordCountThresholdRatio = 0.5; // 分段子任务：50%（LLM 对短文产出波动更大）
+          } else if (subTask.metadata?.isContinuation) {
+            wordCountThresholdRatio = 0.45; // 续写子任务：45%（补充性质，目标精度低）
+          } else if (subTask.metadata?.isChunkTask) {
+            wordCountThresholdRatio = 0.4; // Map-Reduce chunk：40%（分析类输出长度不可预测）
+          }
+          const threshold = Math.floor(wordCountReq * wordCountThresholdRatio);
           // 🔧 诊断日志：当 actualLength 很小时，输出回退链状态帮助排查
           if (actualLength < threshold) {
             const diagSources: string[] = [];
@@ -593,11 +602,15 @@ export class Orchestrator {
           if (nonWritingStrategies.length > 0) {
             try {
               const { validateTaskOutput } = await import("./task-output-validator.js");
+              // 🔧 P31 修复：传入 overrideStrategies 排除 word_count（已由上方 P5 字数检查覆盖）
+              // 旧代码用 subTask.output.length 作为 actualLength，对写作任务会把 LLM 确认消息的 310 字
+              // 当成实际产出，触发虚假的字数失败 → decompose/restart 死循环。
               const validationCtx = {
                 actualContent: subTask.output ?? undefined,
                 actualLength: (subTask.output ?? "").length,
                 producedFilePaths: subTask.metadata?.producedFilePaths,
                 fallbackFilePath: subTask.metadata?.fallbackFilePath,
+                overrideStrategies: nonWritingStrategies,
               };
               const validationResult = await validateTaskOutput(subTask, taskTree, validationCtx);
 
@@ -868,7 +881,59 @@ export class Orchestrator {
           }
         }
       } catch (err) {
-        console.warn(`[Orchestrator] ⚠️ 子任务质量评估失败，默认通过:`, err);
+        // 🔧 P57: 质检异常细化分类（升级 P50 的二分法为四分法）
+        // P50 只分"临时性 vs 非临时性"，P57 进一步区分：
+        // - transient（网络超时/限流）→ restart 重试
+        // - llm_degraded（JSON 解析失败/LLMDegradedError）→ 降级到规则验证
+        // - config_error（API key/认证）→ 标记失败，停止执行
+        // - 其他/重试耗尽 → 降级通过
+        const errMsg = String(err);
+        const errName = (err as Error)?.name ?? "";
+        const isTransient = /timeout|ECONNRESET|ENOTFOUND|429|503|fetch.*fail|network/i.test(errMsg);
+        const isLLMDegraded = errName === "LLMDegradedError" || /json.*pars|syntax.*error|unexpected.*token/i.test(errMsg);
+        const isConfigError = /api.?key|unauthorized|401|403|authentication|credential/i.test(errMsg);
+
+        if (isTransient && (subTask.retryCount ?? 0) < this.getDefaultMaxRetries()) {
+          // 临时性错误 → restart 重试
+          console.warn(`[Orchestrator] ⚠️ P57: 质检临时性错误（${errMsg.substring(0, 80)}），restart 重试`);
+          if (!subTask.metadata) subTask.metadata = {};
+          subTask.metadata.lastFailureFindings = [`质检临时性失败: ${errMsg.substring(0, 100)}`];
+          await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
+          subTask.retryCount = (subTask.retryCount ?? 0) + 1;
+          result.decision = "restart";
+          result.needsRequeue = true;
+          result.findings = [`P57: 质检临时性异常，重试 (${subTask.retryCount}/${this.getDefaultMaxRetries()})`];
+        } else if (isLLMDegraded) {
+          // LLM 降级（JSON 解析失败等）→ 降级到规则验证
+          console.warn(`[Orchestrator] ⚠️ P57: 质检 LLM 降级（${errMsg.substring(0, 80)}），转规则验证`);
+          try {
+            const ruleReview = this.qualityReviewer.ruleBasedCompletionReview(subTask);
+            if (ruleReview && ruleReview.decision !== "continue") {
+              result.decision = ruleReview.decision;
+              result.findings = [`P57: LLM降级→规则验证: ${ruleReview.findings?.join("; ") ?? ""}`];
+              if (ruleReview.decision === "restart") {
+                if (!subTask.metadata) subTask.metadata = {};
+                subTask.metadata.lastFailureFindings = ruleReview.findings ?? [];
+                await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
+                subTask.retryCount = (subTask.retryCount ?? 0) + 1;
+                result.needsRequeue = true;
+              }
+            } else {
+              console.log(`[Orchestrator] ✅ P57: 规则验证通过（LLM降级回退）`);
+            }
+          } catch (ruleErr) {
+            console.warn(`[Orchestrator] ⚠️ P57: 规则验证也失败，降级通过: ${ruleErr}`);
+          }
+        } else if (isConfigError) {
+          // 配置错误 → 标记失败，不继续浪费资源
+          console.error(`[Orchestrator] ❌ P57: 质检配置错误（${errMsg.substring(0, 100)}），标记任务失败`);
+          await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
+          subTask.error = `质检配置错误: ${errMsg.substring(0, 200)}`;
+          result.markedFailed = true;
+        } else {
+          // 其他错误或重试耗尽 → 降级通过
+          console.warn(`[Orchestrator] ⚠️ P57: 质检异常（未知类型或重试耗尽），降级通过: ${errMsg.substring(0, 120)}`);
+        }
       }
     }
 
@@ -1396,16 +1461,23 @@ export class Orchestrator {
     // ── 维度 6: prompt 长度（基础信号） ──
     const isLongPrompt = promptLen > 800;
 
+    // 🔧 P52: 最小粒度守卫 — prompt 短且字数要求小的任务不值得分解
+    // 根因：分解后子任务的 prompt 不会比原 prompt 简单多少，反而增加调度开销
+    const isSmallTask = promptLen < 1200 && (!extractedWordCount || extractedWordCount < 3000);
+
+    // 🔧 P59: 分类器置信度门槛 — 低置信度分类不触发自动分解
+    const classifierConfident = classification.confidence > 60;
+
     // 综合判断：
-    // - 写作分段/大输入候选 → 直接通过
-    // - 分类器建议分解 → 直接通过
-    // - 多维度综合得分 → 超过阈值通过
+    // - 写作分段/大输入候选 → 直接通过（不受最小粒度限制）
+    // - 分类器建议分解 + 置信度足够 + 非小任务 → 通过
+    // - 🔧 P52: 多维度综合得分 → 阈值从 1 提高到 2（至少满足两个条件）
     const legacyScore = (isLongPrompt ? 1 : 0) + (hasLargeWordCount ? 1 : 0) + (hasMultiStepSignals ? 1 : 0);
     const shouldDecompose = 
       isWritingSegmentCandidate ||
       isLargeInputCandidate ||
-      classifierSuggestsDecompose ||
-      (legacyScore >= 1 && (isLongPrompt || hasLargeWordCount));
+      (classifierSuggestsDecompose && classifierConfident && !isSmallTask) ||
+      (legacyScore >= 2 && !isSmallTask);
     
     if (shouldDecompose) {
       console.log(
@@ -1710,24 +1782,49 @@ export class Orchestrator {
     );
     if (roundTasks.length === 0) return false;
 
-    // 🔧 P1 修复：检测僵尸 active 任务（active 超过 5 分钟无进展）
+    // 🔧 P1 修复：检测僵尸 active 任务（active 超过动态阈值无进展）
     // 根因：如果 retry 执行被中断（进程退出、API 异常），任务停在 active 状态，
     // isRoundCompleted 永远返回 false，导致轮次无法终结、drain 无法清理。
     // 修复：将超时的 active 任务自动标记为 failed，附带诊断信息。
-    const ZOMBIE_THRESHOLD_MS = 5 * 60 * 1000; // 5 分钟
+    // 🔧 P42: 超时阈值从固定 5 分钟改为根据任务类型动态计算
+    // 原因：不同任务执行时间差异巨大——简单编码 1-2 分钟，大章节写作 5-10 分钟，
+    // 遇到 429 限流时等待更久。固定 5 分钟对简单任务延迟发现问题，对复杂任务误杀。
+    const ZOMBIE_BASE_MS = 5 * 60 * 1000; // 基线 5 分钟
     const now = Date.now();
     for (const t of roundTasks) {
       if (t.status === "active") {
+        // 🔧 P33 修复：跳过 waitForChildren 且有实际子任务的父任务
+        // 根因：父任务在分解后被设为 active，合法等待子任务完成（可能超过 5 分钟）。
+        // 僵尸检测不应误杀这些正在等待子任务的父任务。
+        const hasRealChildren = t.waitForChildren && t.children && t.children.length > 0;
+        if (hasRealChildren) {
+          continue; // 跳过：父任务等待子任务完成是正常行为
+        }
+
+        // 🔧 P42: 根据任务类型动态计算超时阈值
+        let zombieThresholdMs = ZOMBIE_BASE_MS;
+        if (t.metadata?.isChunkTask) {
+          // Map-Reduce chunk 任务：读取大文件+分析，需要更长时间
+          zombieThresholdMs = 15 * 60 * 1000; // 15 分钟
+        } else if (t.metadata?.isSegment) {
+          // 分段写作子任务：可能遇到限流重试
+          zombieThresholdMs = 10 * 60 * 1000; // 10 分钟
+        } else if (t.taskType === "writing" || t.taskType === "coding") {
+          // 写作/编码任务：产出较多，需要更长时间
+          zombieThresholdMs = 10 * 60 * 1000; // 10 分钟
+        }
+        // 其他类型保持基线 5 分钟
+
         // 🔧 P10 修复：使用任务自身的 createdAt（而非 taskTree.updatedAt 全局时间）
         // 根因：并行执行时 taskTree.updatedAt 被频繁更新，所有 active 任务共享同一时间，
         // 导致要么所有 active 任务同时被判为僵尸，要么全部不触发。
         const activeStart = t.createdAt ?? 0;
-        if (now - activeStart > ZOMBIE_THRESHOLD_MS) {
+        if (now - activeStart > zombieThresholdMs) {
           console.warn(
-            `[Orchestrator] 🧟 检测到僵尸 active 任务: ${t.id} (active 超过 ${Math.round((now - activeStart) / 60000)} 分钟)`,
+            `[Orchestrator] 🧟 检测到僵尸 active 任务: ${t.id} (active 超过 ${Math.round((now - activeStart) / 60000)} 分钟, 阈值=${Math.round(zombieThresholdMs / 60000)}分钟)`,
           );
           t.status = "failed";
-          t.error = `僵尸任务：active 状态超过 ${Math.round((now - activeStart) / 60000)} 分钟无响应，自动标记失败`;
+          t.error = `僵尸任务：active 状态超过 ${Math.round((now - activeStart) / 60000)} 分钟无响应（阈值=${Math.round(zombieThresholdMs / 60000)}分钟），自动标记失败`;
         }
       }
     }
@@ -1876,27 +1973,74 @@ export class Orchestrator {
       }
       if (currentComplexity > complexityThreshold) {
 
-      console.log(`[Orchestrator] 🎼 开始生成总纲领 (taskType=${taskType}, complexity=${taskTree.metadata?.complexityScore})`);
-      const blueprint = await this.llmDecomposer.generateMasterBlueprint(
-        taskTree.rootTask,
-        taskType,
-      );
+      if (!taskTree.metadata) {
+        taskTree.metadata = { totalTasks: 0, completedTasks: 0, failedTasks: 0 };
+      }
 
-      if (blueprint) {
-        if (!taskTree.metadata) {
-          taskTree.metadata = { totalTasks: 0, completedTasks: 0, failedTasks: 0 };
+      // 🆕 V7: 写作任务走多轮次结构化纲领生成路径
+      // 生成独立的人物卡 + 世界观 + 章节纲要，每个章节子任务精准注入
+      if (taskType === "writing") {
+        console.log(`[Orchestrator] 🎼 V7: 写作任务 — 启动多轮次结构化纲领生成 (complexity=${currentComplexity})`);
+        const structured = await this.llmDecomposer.generateStructuredWritingBlueprint(
+          taskTree.rootTask,
+          true, // enablePass3: 启用一致性审查
+        );
+
+        if (structured) {
+          taskTree.metadata.masterBlueprint = structured.masterBlueprint;
+          taskTree.metadata.blueprintCharacterCards = structured.characterCards;
+          taskTree.metadata.blueprintWorldBuilding = structured.worldBuilding;
+          taskTree.metadata.blueprintStyleGuide = structured.styleGuide;
+          taskTree.metadata.blueprintChapterSynopses = structured.chapterSynopses;
+          taskTree.metadata.blueprintVersion = structured.version;
+          taskTree.metadata.blueprintGeneratedAt = Date.now();
+          const roundId = subTask.rootTaskId;
+          if (roundId) {
+            this.incrementLLMCallCount(taskTree, roundId, structured.llmCallCount);
+          }
+          await this.taskTreeManager.save(taskTree);
+          console.log(
+            `[Orchestrator] ✅ V7 结构化纲领生成完成: ` +
+            `blueprint=${structured.masterBlueprint.length} chars, ` +
+            `characters=${structured.characterCards.length} chars, ` +
+            `chapters=${Object.keys(structured.chapterSynopses).length}, ` +
+            `version=${structured.version}, llmCalls=${structured.llmCallCount}`,
+          );
+        } else {
+          // V7 结构化生成失败，回退到原有单次生成
+          console.log(`[Orchestrator] ⚠️ V7 结构化纲领生成失败，回退到单次生成`);
+          const blueprint = await this.llmDecomposer.generateMasterBlueprint(taskTree.rootTask, taskType);
+          if (blueprint) {
+            taskTree.metadata.masterBlueprint = blueprint;
+            taskTree.metadata.blueprintGeneratedAt = Date.now();
+            const roundId = subTask.rootTaskId;
+            if (roundId) { this.incrementLLMCallCount(taskTree, roundId, 1); }
+            await this.taskTreeManager.save(taskTree);
+            console.log(`[Orchestrator] ✅ 回退单次纲领生成完成 (${blueprint.length} chars)`);
+          } else {
+            console.log(`[Orchestrator] ⚠️ 纲领生成全部失败，子任务将以无纲领模式执行`);
+          }
         }
-        taskTree.metadata.masterBlueprint = blueprint;
-        taskTree.metadata.blueprintGeneratedAt = Date.now();
-        // 纲领生成消耗 1 次 LLM 调用
-        const roundId = subTask.rootTaskId;
-        if (roundId) {
-          this.incrementLLMCallCount(taskTree, roundId, 1);
-        }
-        await this.taskTreeManager.save(taskTree);
-        console.log(`[Orchestrator] ✅ 总纲领生成完成 (${blueprint.length} chars)，已持久化`);
       } else {
-        console.log(`[Orchestrator] ⚠️ 总纲领生成失败，子任务将以无纲领模式执行`);
+        // 非写作任务：保持原有单次纲领生成
+        console.log(`[Orchestrator] 🎼 开始生成总纲领 (taskType=${taskType}, complexity=${taskTree.metadata?.complexityScore})`);
+        const blueprint = await this.llmDecomposer.generateMasterBlueprint(
+          taskTree.rootTask,
+          taskType,
+        );
+
+        if (blueprint) {
+          taskTree.metadata.masterBlueprint = blueprint;
+          taskTree.metadata.blueprintGeneratedAt = Date.now();
+          const roundId = subTask.rootTaskId;
+          if (roundId) {
+            this.incrementLLMCallCount(taskTree, roundId, 1);
+          }
+          await this.taskTreeManager.save(taskTree);
+          console.log(`[Orchestrator] ✅ 总纲领生成完成 (${blueprint.length} chars)，已持久化`);
+        } else {
+          console.log(`[Orchestrator] ⚠️ 总纲领生成失败，子任务将以无纲领模式执行`);
+        }
       }
       }
     }
@@ -1999,12 +2143,67 @@ export class Orchestrator {
       }
     }
 
+    // 🔧 P40b: 多章节子任务自动拆分（后置防线）
+    // LLM 可能无视提示词指令，把"第5-6章"作为单个子任务返回。
+    // 检测 summary/prompt 中的多章节模式（如"第5-6章"、"第3、4章"），自动拆分为独立章节子任务。
+    const expandedTasks: SubTask[] = [];
+    for (const dt of decomposedTasks) {
+      const multiChapterMatch = dt.summary?.match(/第\s*(\d+)\s*[-–—~～至到]\s*(\d+)\s*章/);
+      if (multiChapterMatch) {
+        const startCh = parseInt(multiChapterMatch[1], 10);
+        const endCh = parseInt(multiChapterMatch[2], 10);
+        if (endCh > startCh && endCh - startCh <= 5) {
+          console.log(
+            `[Orchestrator] 🔧 P40: 检测到多章节子任务「${dt.summary}」(第${startCh}-${endCh}章)，自动拆分为 ${endCh - startCh + 1} 个独立章节`,
+          );
+          // 提取字数要求并平分
+          const totalWC = this.qualityReviewer.extractWordCountRequirement(dt.prompt);
+          const chapterCount = endCh - startCh + 1;
+          const perChapterWC = totalWC ? Math.ceil(totalWC / chapterCount) : 3000;
+
+          for (let ch = startCh; ch <= endCh; ch++) {
+            // 从原始 prompt 中提取该章节的具体要求（如果有）
+            const chapterLabel = `第${ch}章`;
+            // 构建新的 prompt：保留原始 prompt 的风格要求，替换章节编号和字数
+            const newPrompt = dt.prompt
+              .replace(/第\s*\d+\s*[-–—~～至到]\s*\d+\s*章/g, chapterLabel)
+              .replace(/约\s*\d+\s*字/g, `约 ${perChapterWC} 字`)
+              .replace(/(\d+)\s*字以上/g, `${perChapterWC} 字以上`);
+            // 从原始 summary 提取书名部分
+            const bookPrefix = dt.summary.replace(/第\s*\d+.*$/, "").trim();
+            const newSummary = `${bookPrefix}${chapterLabel}`;
+
+            const splitTask: SubTask = {
+              ...dt,
+              id: `${dt.id}-ch${ch}`,
+              prompt: newPrompt,
+              summary: newSummary,
+              metadata: {
+                ...dt.metadata,
+                // 保留 chapterOutline 但标注只适用于本章
+                chapterOutline: dt.metadata?.chapterOutline
+                  ? `[以下为第${startCh}-${endCh}章的合并大纲，请只关注第${ch}章的部分]\n${dt.metadata.chapterOutline}`
+                  : undefined,
+              },
+              // 后续章节依赖前一章（保证顺序）
+              dependencies: ch > startCh ? [`${dt.id}-ch${ch - 1}`] : (dt.dependencies ?? []),
+            };
+            expandedTasks.push(splitTask);
+          }
+          continue; // 跳过原始的合并子任务
+        }
+      }
+      expandedTasks.push(dt); // 非多章节子任务直接保留
+    }
+    // 如果有拆分发生，用拆分后的列表替换
+    const finalTasks = expandedTasks.length > 0 ? expandedTasks : decomposedTasks;
+
     // 🔧 P3 修复：确保分解产生的子任务继承父任务的 rootTaskId
     // 修复前：LLM 返回的子任务没有 rootTaskId，task-tree-manager.addSubTask 也不自动继承
     // 导致 getNextExecutableTasksForDrain 的 roundFilter 过滤掉这些任务
     const parentRootTaskId = subTask.rootTaskId;
     if (parentRootTaskId) {
-      for (const dt of decomposedTasks) {
+      for (const dt of finalTasks) {
         if (!dt.rootTaskId) {
           dt.rootTaskId = parentRootTaskId;
           dt.roundId = parentRootTaskId;
@@ -2016,7 +2215,7 @@ export class Orchestrator {
     // 这让 drain.ts 的 findParallelGroups 能识别并同时执行这些任务
     if (taskTree.metadata?.masterBlueprint) {
       let parallelCount = 0;
-      for (const dt of decomposedTasks) {
+      for (const dt of finalTasks) {
         const hasDeps = dt.dependencies && dt.dependencies.length > 0;
         const isWaiting = dt.waitForChildren;
         if (!hasDeps && !isWaiting) {
@@ -2026,12 +2225,12 @@ export class Orchestrator {
         }
       }
       if (parallelCount > 1) {
-        console.log(`[Orchestrator] 🚀 V3: ${parallelCount}/${decomposedTasks.length} 个子任务标记为可并行执行`);
+        console.log(`[Orchestrator] 🚀 V3: ${parallelCount}/${finalTasks.length} 个子任务标记为可并行执行`);
       }
     }
 
     // 5. 将分解后的子任务添加到任务树
-    for (const decomposedTask of decomposedTasks) {
+    for (const decomposedTask of finalTasks) {
       await this.taskTreeManager.addSubTask(taskTree, subTaskId, decomposedTask);
       // 🔧 问题 L 修复：将分解子任务加入 Round.subTaskIds
       if (decomposedTask.rootTaskId) {
@@ -2051,7 +2250,7 @@ export class Orchestrator {
     if (subTask.status === "active" || subTask.status === "pending") {
       subTask.status = "completed";
       subTask.completedAt = Date.now();
-      subTask.output = `[已分解为 ${decomposedTasks.length} 个子任务]`;
+      subTask.output = `[已分解为 ${finalTasks.length} 个子任务]`;
     }
 
     // 🔧 P6 防御：分解后立即创建检查点，防止后续并发写入覆盖分解结果
@@ -2059,17 +2258,17 @@ export class Orchestrator {
     await this.taskTreeManager.save(taskTree);
 
     // P6 验证：确认分解的子任务确实在任务树中
-    const verifyCount = decomposedTasks.filter(dt =>
+    const verifyCount = finalTasks.filter(dt =>
       taskTree.subTasks.some(t => t.id === dt.id),
     ).length;
-    if (verifyCount !== decomposedTasks.length) {
+    if (verifyCount !== finalTasks.length) {
       console.error(
-        `[Orchestrator] ❌ P6: 分解验证失败！预期 ${decomposedTasks.length} 个子任务在树中，实际 ${verifyCount} 个`,
+        `[Orchestrator] ❌ P6: 分解验证失败！预期 ${finalTasks.length} 个子任务在树中，实际 ${verifyCount} 个`,
       );
     }
 
-    console.log(`[Orchestrator] ✅ 子任务 ${subTaskId} 分解完成，生成 ${decomposedTasks.length} 个子任务`);
-    return decomposedTasks;
+    console.log(`[Orchestrator] ✅ 子任务 ${subTaskId} 分解完成，生成 ${finalTasks.length} 个子任务`);
+    return finalTasks;
   }
 
   // ========================================
@@ -2077,18 +2276,57 @@ export class Orchestrator {
   // ========================================
 
   /**
-   * 每个分段子任务的目标字数范围
+   * 分段目标字数基线值（保守默认，基于 maxTokens=4096）
    * 
-   * 根据 maxTokens=4096 的限制，单次 LLM 输出约 800-1600 中文字符。
-   * 取中间值 1200 作为分段目标，确保单次 LLM 调用可以稳定产出。
+   * 🔧 P41: 实际使用时通过 getAdaptiveSegmentTarget() 动态计算，
+   * 根据任务类型和上下文信号适配更优的分段大小。
    */
   static readonly SEGMENT_TARGET_CHARS = 1200;
   /** 分段目标下限（低于此值的任务不值得拆分） */
   static readonly SEGMENT_MIN_CHARS = 800;
   /** 分段目标上限（单次 LLM 输出的安全上限） */
-  static readonly SEGMENT_MAX_CHARS = 1600;
+  static readonly SEGMENT_MAX_CHARS = 3000;
   /** 章节默认字数（用户未指定时使用） */
   static readonly DEFAULT_CHAPTER_CHARS = 6000;
+
+  /**
+   * 🔧 P41: 根据任务类型和上下文动态计算分段目标字数
+   * 
+   * 解决的刻板问题：固定 1200 字分段不适配不同场景——
+   * - 翻译/分析类任务：每段内容独立性强，可以更大段（减少分段数 → 减少延迟）
+   * - 有详细大纲的任务：LLM 有明确指引，产出更稳定，可以更大段
+   * - 续写/无大纲任务：保持保守分段，确保连贯性
+   * 
+   * @param taskType 任务类型（writing/analysis/research/generic 等）
+   * @param hasOutline 是否有详细的 chapterOutline
+   * @param isTranslation 是否为翻译任务
+   * @returns 适配的分段目标字数
+   */
+  private getAdaptiveSegmentTarget(
+    taskType: string,
+    hasOutline: boolean,
+    isTranslation: boolean,
+  ): number {
+    let target = Orchestrator.SEGMENT_TARGET_CHARS; // 基线 1200
+
+    // 翻译类：每段独立，不需要前后衔接，可以更大段
+    if (isTranslation) {
+      target = 2500;
+    }
+    // 分析/研究/数据类：段间独立性高
+    else if (["analysis", "research", "data", "review"].includes(taskType)) {
+      target = 2000;
+    }
+    // 写作类：有详细大纲时可以更大段（LLM 有明确指引）
+    else if (hasOutline) {
+      target = 1800;
+    }
+    // 其他写作类：保持保守分段
+    // target 保持 1200
+
+    // 约束在 [MIN, MAX] 范围内
+    return Math.max(Orchestrator.SEGMENT_MIN_CHARS, Math.min(target, Orchestrator.SEGMENT_MAX_CHARS));
+  }
 
   // ========================================
   // 🆕 V5: 大文本 Map-Reduce 分析
@@ -2512,21 +2750,90 @@ export class Orchestrator {
       return [];
     }
 
-    // 2. 计算分段数
-    const segmentTarget = Orchestrator.SEGMENT_TARGET_CHARS;
+    // 2. 🔧 P41: 动态计算分段大小（替代固定 1200 字）
+    const subTaskType = subTask.taskType ?? classifyTaskType(subTask.prompt).type;
+    const hasOutline = !!(subTask.metadata?.chapterOutline);
+    const isTranslation = /翻译|译文|translate|translation/i.test(subTask.prompt);
+    const segmentTarget = this.getAdaptiveSegmentTarget(subTaskType, hasOutline, isTranslation);
     const segmentCount = Math.max(2, Math.ceil(targetChars / segmentTarget));
     const charsPerSegment = Math.ceil(targetChars / segmentCount);
 
     // 3. 从 prompt 中提取章节文件名（如 "九天星辰录_第01章.txt"）
-    const fileNameMatch = subTask.prompt.match(
-      /(?:写入|保存|输出|文件[名：:])\s*[`"']*([^\s`"']+\.(?:txt|md))[`"']*/,
-    );
-    const chapterFileName = fileNameMatch?.[1] ?? `${subTask.summary}.txt`;
+    // 🔧 P26 修复：旧正则 `输出` 匹配太早，且捕获组不排除中文引号 `""`，
+    // 导致 chapterFileName = "：将内容写入文件"九天星辰录_第02章.txt"（垃圾前缀）。
+    // 新策略：多轮匹配，优先匹配最精确的模式。
+    const fileNamePatterns = [
+      // 最精确：`文件` + 必须有引号 + 文件名（如 `写入文件"九天星辰录_第02章.txt"`）
+      // 以 `文件` 为锚点而非 `输出/写入`，避免 `输出` 位置过早匹配的问题
+      /文件\s*[`"'\u201C\u300C]+([^\s`"'\u201D\u300D\u3002\uFF0C\/\\]+\.(?:txt|md))/,
+      // 次精确：`文件名:` / `文件：` 后的文件名（无需引号）
+      /文件[名：:]\s*([^\s`"'\u201C\u201D\u300C\u300D\u3002\uFF0C\/\\]+\.(?:txt|md))/,
+      // 兜底：任何引号包裹的 .txt/.md 文件名
+      /[`"'\u201C\u300C]([^\s`"'\u201C\u201D\u300C\u300D\u3002\uFF0C\/\\]+\.(?:txt|md))[`"'\u201D\u300D]*/,
+    ];
+    let chapterFileName = `${subTask.summary}.txt`; // 默认值
+    for (const pattern of fileNamePatterns) {
+      const m = subTask.prompt.match(pattern);
+      if (m?.[1]) {
+        // 二次清洗：去除可能残留的中文标点前缀（如 `：`、`"`）
+        const cleaned = m[1].replace(/^[：:"\u201C\u300C]+/, "");
+        if (cleaned.length > 0 && cleaned.includes(".")) {
+          chapterFileName = cleaned;
+          break;
+        }
+      }
+    }
+
+    // 🔧 P37 修复：从 chapterFileName 提取前缀和章号，用于生成标准化分段文件名
+    // 例如："ch3" => 第03章，"第01章" => 第01章
+    const chapterBase = chapterFileName.replace(/\.(?:txt|md)$/i, "");
+    // 尝试提取书名前缀（第一个“第”字前面的部分，包含分隔符）
+    const chNumMatch = chapterBase.match(/^(.+?)[\_\-]?第\s*([\d\-]+)/);
+    let segFilePrefix = chapterBase; // 默认直接用整个基础名
+    let chapterNumStr = "";
+    if (chNumMatch) {
+      segFilePrefix = chNumMatch[1].replace(/[\_\-]+$/, ""); // 书名部分，去尾部分隔符
+      chapterNumStr = chNumMatch[2]; // 章号字符串，可能是 "01" 或 "05-06"
+    }
+
+    // 🔧 P43: 根据任务类型决定分段是否可并行
+    // 刻板问题：所有分段都强制串行（seg-2 依赖 seg-1），但翻译/分析类任务的各段是独立的
+    // 修复：翻译/分析/数据类任务分段可并行，叙事写作保持串行（需要前后衔接）
+    const allowParallelSegments = isTranslation ||
+      ["analysis", "research", "data", "review"].includes(subTaskType);
+
+    // 🔧 P51: 从 chapterNumStr 或 summary 中提取章节编号（用于 V7 blueprintChapterSynopses 精准匹配）
+    let chapterNumber = 0;
+    if (chapterNumStr) {
+      // chapterNumStr 可能是 "01"、"3"、"05-06" 等，取第一个数字
+      const numPart = chapterNumStr.match(/(\d+)/);
+      if (numPart) chapterNumber = parseInt(numPart[1], 10);
+    }
+    if (!chapterNumber) {
+      // 从 summary 中提取："第3章"、"第三章" 等
+      const cnMap: Record<string, number> = { "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10 };
+      const summaryMatch = (subTask.summary ?? "").match(/第\s*([一二三四五六七八九十\d]+)\s*[章节篇幕]/);
+      if (summaryMatch) {
+        chapterNumber = cnMap[summaryMatch[1]] ?? parseInt(summaryMatch[1], 10);
+        if (isNaN(chapterNumber)) chapterNumber = 0;
+      }
+    }
+
+    // 🔧 P53: 优先从 V7 blueprintChapterSynopses 获取该章精准纲要
+    let effectiveChapterOutline = subTask.metadata?.chapterOutline ?? "";
+    if (chapterNumber > 0 && taskTree.metadata?.blueprintChapterSynopses) {
+      const v7Synopsis = taskTree.metadata.blueprintChapterSynopses[String(chapterNumber)];
+      if (v7Synopsis && v7Synopsis.length > effectiveChapterOutline.length) {
+        effectiveChapterOutline = v7Synopsis;
+        console.log(`[Orchestrator] 🎼 P53: 分段使用 V7 第${chapterNumber}章纲要 (${v7Synopsis.length} chars) 替代 chapterOutline (${subTask.metadata?.chapterOutline?.length ?? 0} chars)`);
+      }
+    }
 
     console.log(
       `[Orchestrator] 🔪 V4: 写作分段开始 — ${subTask.id} (${subTask.summary})`,
       `\n  目标字数=${targetChars}, 分段数=${segmentCount}, 每段≈${charsPerSegment}字`,
-      `\n  章节文件=${chapterFileName}`,
+      `\n  章节文件=${chapterFileName}, 分段前缀=${segFilePrefix}, 章号=${chapterNumStr}`,
+      `\n  🔧 P41: 自适应分段=${segmentTarget}字, P43: 并行=${allowParallelSegments}`,
     );
 
     // 4. 将父任务标记为已分解（不再直接执行）
@@ -2550,12 +2857,12 @@ export class Orchestrator {
         `原始任务：${subTask.summary}`,
       ];
 
-      // 注入章节大纲（如果有）
-      if (subTask.metadata?.chapterOutline) {
+      // 🔧 P53: 注入章节大纲（优先 V7 blueprintChapterSynopses，回退到 chapterOutline）
+      if (effectiveChapterOutline) {
         segmentPromptParts.push(
           ``,
           `📖 章节完整大纲（请严格遵守，本段只写大纲中对应的部分）：`,
-          subTask.metadata.chapterOutline,
+          effectiveChapterOutline,
         );
       }
 
@@ -2585,11 +2892,20 @@ export class Orchestrator {
         );
       }
 
+      // 🔧 P37 修复：生成标准化分段文件名
+      // 格式：{segFilePrefix}_第{NN}章_第{M}节.txt
+      let segmentFileName: string;
+      if (chapterNumStr) {
+        segmentFileName = `${segFilePrefix}_第${chapterNumStr}章_第${segIndex}节.txt`;
+      } else {
+        segmentFileName = `${segFilePrefix}_第${segIndex}节.txt`;
+      }
+
       // 通用指令
       segmentPromptParts.push(
         ``,
         `⚠️ 重要：`,
-        `- 必须使用 write 工具将内容写入文件`,
+        `- 必须使用 write 工具将内容写入文件，文件名必须为：「${segmentFileName}」`,
         `- 保持与原始任务一致的风格、语气、人称`,
         `- 只写本段负责的内容，不要尝试写完整章`,
       );
@@ -2616,8 +2932,10 @@ export class Orchestrator {
         parentId: subTask.id,
         depth: (subTask.depth ?? 0) + 1,
         children: [],
-        // 串行依赖：每段依赖前一段
-        dependencies: isFirst ? [] : [`${subTask.id}-seg-${segIndex - 1}`],
+        // 🔧 P43: 串行 vs 并行依赖（翻译/分析类任务各段独立，可并行执行）
+        dependencies: allowParallelSegments
+          ? [] // 并行：无依赖
+          : (isFirst ? [] : [`${subTask.id}-seg-${segIndex - 1}`]), // 串行：依赖前一段
         canDecompose: false, // 分段子任务不再分解
         decomposed: false,
         rootTaskId: subTask.rootTaskId,
@@ -2630,10 +2948,13 @@ export class Orchestrator {
           segmentIndex: segIndex,
           totalSegments: segmentCount,
           segmentTargetChars: charsPerSegment,
+          parallelSafe: allowParallelSegments, // 🔧 P43: 标记可并行
           chapterFileName,
+          segmentFileName, // 🔧 P37: 标准化分段文件名
           requiresFileOutput: true,
-          // 透传章节大纲到分段
-          chapterOutline: subTask.metadata?.chapterOutline,
+          // 🔧 P51+P53: 透传章节大纲（优先 V7 纲要）+ 章节编号
+          chapterOutline: effectiveChapterOutline || subTask.metadata?.chapterOutline,
+          chapterNumber: chapterNumber || undefined,
         },
       };
 
@@ -2951,6 +3272,17 @@ export class Orchestrator {
 
     // 计算还需要多少字
     const remainingChars = wordCountReq ? Math.max(0, wordCountReq - existingLength) : 0;
+
+    // 🔧 P27 修复：已达标时不创建续写任务
+    // 根因：当 wordCountReq 存在且 existingLength >= wordCountReq 时，remainingChars=0，
+    // 但旧代码仍默认创建 2 个续写任务（charsPerTask=2000），导致虚假的字数要求。
+    // 修复：已达标直接返回空数组，让调用方回退到 continue/restart。
+    if (wordCountReq && remainingChars <= 0) {
+      console.log(
+        `[Orchestrator] ✅ P27: decomposeFailedTask 跳过 — 已有 ${existingLength} 字 >= 要求 ${wordCountReq} 字，无需续写`,
+      );
+      return [];
+    }
 
     // 单次 LLM 输出能力上限（保守估计）
     const maxOutputPerTask = 2000;
@@ -3334,6 +3666,29 @@ export class Orchestrator {
         });
 
         if (!allChildrenCompleted) {
+          // 🔧 P34 修复：检查是否所有子任务都已结束（含 failed/skipped）
+          // 根因：seg-2 failed + seg-3 skipped 后，allChildrenCompleted 永远为 false，
+          // 父任务永远卡在 active 状态，最终被僵尸检测误杀。
+          // 修复：如果所有子任务都已终结但有失败的，直接标记父任务为 failed。
+          const TERMINAL_STATUSES = new Set(["completed", "failed", "skipped"]);
+          const allChildrenDone = childIds.every(childId => {
+            const freshChild = taskTree.subTasks.find(t => t.id === childId);
+            return freshChild && TERMINAL_STATUSES.has(freshChild.status);
+          });
+
+          if (allChildrenDone) {
+            const failedChildren = childIds.filter(childId => {
+              const freshChild = taskTree.subTasks.find(t => t.id === childId);
+              return freshChild && (freshChild.status === "failed" || freshChild.status === "skipped");
+            });
+            console.warn(
+              `[Orchestrator] 🔧 P34: 父任务 ${subTask.id} 的所有子任务已结束，但 ${failedChildren.length} 个失败/跳过，标记父任务为 failed`,
+            );
+            subTask.status = "failed";
+            subTask.error = `子任务未全部成功：${failedChildren.length} 个失败或跳过`;
+            continue;
+          }
+
           console.log(`[Orchestrator] ⏳ Task ${subTask.id} waiting for children to complete`);
           continue; // 子任务未完成,跳过父任务
         }
@@ -3383,12 +3738,34 @@ ${childOutputs.join("\n\n---\n\n")}
       executableTasks.push(subTask);
     }
 
-    // 6. 按优先级排序（high > medium > low）
+    // 🔧 P55: 综合优先级排序（priority + 依赖阻塞权重 + 顺序权重）
+    // 修复前：只看显式 priority 字段，忽略了"被多个任务依赖"的关键路径任务
+    // 修复后：阻塞权重高的任务优先执行，续写/分段按顺序排列
     executableTasks.sort((a, b) => {
-      const priorityOrder = { high: 3, medium: 2, low: 1 };
-      const aPriority = priorityOrder[a.metadata?.priority || "medium"];
-      const bPriority = priorityOrder[b.metadata?.priority || "medium"];
-      return bPriority - aPriority;
+      const priorityOrder: Record<string, number> = { high: 3, medium: 2, low: 1 };
+      const aPriority = priorityOrder[a.metadata?.priority || "medium"] ?? 2;
+      const bPriority = priorityOrder[b.metadata?.priority || "medium"] ?? 2;
+
+      // 计算阻塞权重：被多少个 pending 任务依赖
+      const aBlocking = taskTree.subTasks.filter(
+        t => t.status === "pending" && t.dependencies?.includes(a.id),
+      ).length;
+      const bBlocking = taskTree.subTasks.filter(
+        t => t.status === "pending" && t.dependencies?.includes(b.id),
+      ).length;
+
+      // 续写/分段任务按 segmentIndex 顺序排列（保证连贯性）
+      const aSeqIdx = a.metadata?.segmentIndex ?? 0;
+      const bSeqIdx = b.metadata?.segmentIndex ?? 0;
+      const bothSequential = (a.metadata?.isSegment && b.metadata?.isSegment && a.metadata?.segmentOf === b.metadata?.segmentOf);
+      if (bothSequential && aSeqIdx !== bSeqIdx) {
+        return aSeqIdx - bSeqIdx; // 低序号优先
+      }
+
+      // 综合得分：priority × 10 + blockingWeight × 3
+      const aScore = aPriority * 10 + aBlocking * 3;
+      const bScore = bPriority * 10 + bBlocking * 3;
+      return bScore - aScore;
     });
 
     // 🆕 7. 如果启用批量执行，创建批次并记录到任务树
@@ -3590,20 +3967,25 @@ ${childOutputs.join("\n\n---\n\n")}
         });
         if (!allDepsDone) continue;
 
-        // 🔧 问题 O 修复：续写子任务的依赖 failed/skipped 时应该级联 skip
+        // 🔧 问题 O + P29 修复：续写/分段子任务的依赖 failed/skipped 时应该级联 skip
         // 原因：续写子任务 2 依赖续写子任务 1。如果续写 1 failed，续写 2 没有前序内容可以续写，
         // 强制执行会产出不连贯的内容。对于续写场景，依赖失败 = 自己也无法完成。
+        // 🔧 P29 修复：分段子任务（seg-N）同理 — seg-5 依赖 seg-4，seg-4 失败后 seg-5 没有前文可续写，
+        // 旧代码只处理续写任务（-cont-），分段任务漏掉导致 seg-5 永久卡在 pending。
         const isContinuationTask = task.id.includes("-cont-") || task.metadata?.isContinuation || task.summary?.includes("续写");
-        if (isContinuationTask) {
+        const isSequentialSegment = task.metadata?.isSegment && (task.metadata?.segmentIndex ?? 0) > 1;
+        if (isContinuationTask || isSequentialSegment) {
           const hasFailedDep = task.dependencies.some((depId) => {
             const dep = taskTree.subTasks.find((t) => t.id === depId);
             return dep && (dep.status === "failed" || dep.status === "skipped");
           });
           if (hasFailedDep) {
             task.status = "skipped";
-            task.error = "续写依赖的前序任务失败，级联跳过";
+            task.error = isSequentialSegment
+              ? "分段依赖的前序分段失败，级联跳过"
+              : "续写依赖的前序任务失败，级联跳过";
             treeModifiedBySkip = true; // 🔧 问题 II 修复：标记需要保存
-            console.log(`[Orchestrator] ⏭️ 续写任务 ${task.id} 级联跳过（依赖失败）`);
+            console.log(`[Orchestrator] ⏭️ ${isSequentialSegment ? "分段" : "续写"}任务 ${task.id} 级联跳过（依赖失败）`);
             continue;
           }
         }

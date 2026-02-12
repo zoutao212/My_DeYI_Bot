@@ -148,7 +148,8 @@ export class TaskTreeManager {
           const timer = setTimeout(async () => {
             this._pendingSave.delete(taskTree.id);
             try {
-              await this._doSave(taskTree, taskTreePath, backupPath, markdownPath, tmpPath);
+              const merged = await this._mergeWithDisk(taskTree);
+              await this._doSave(merged, taskTreePath, backupPath, markdownPath, tmpPath);
               resolve();
             } catch (err) {
               reject(err);
@@ -158,7 +159,8 @@ export class TaskTreeManager {
         });
       }
 
-      await this._doSave(taskTree, taskTreePath, backupPath, markdownPath, tmpPath);
+      const merged = await this._mergeWithDisk(taskTree);
+      await this._doSave(merged, taskTreePath, backupPath, markdownPath, tmpPath);
     }).catch((err) => {
       console.error(`[TaskTreeManager] ❌ Save failed (lock chain): ${err}`);
       throw err;
@@ -196,6 +198,171 @@ export class TaskTreeManager {
     await fs.writeFile(markdownPath, markdown, "utf-8");
 
     console.log(`[TaskTreeManager] ✅ Task tree saved: ${taskTreePath}`);
+  }
+
+  // ════════════════════════════════════════════════════════════════
+  // P32 fix: merge-on-save
+  //
+  // When runParallelChunked runs multiple tasks via Promise.allSettled,
+  // each followup-runner loads its OWN copy of the TaskTree from disk,
+  // modifies it, and saves it back. The last save wins, silently
+  // overwriting all other runners' changes (decomposition data,
+  // status transitions, new segment subtasks).
+  //
+  // Fix: before every disk write, reload the latest version from disk
+  // and merge local changes using a "take the more advanced state"
+  // heuristic. The existing _writeLock serializes the merge+write,
+  // preventing two merges from reading the same stale version.
+  // ════════════════════════════════════════════════════════════════
+
+  /**
+   * P32: determine if the local subtask version should overwrite the disk version.
+   *
+   * Principle: take whichever is more "advanced" — higher retryCount,
+   * decomposed flag set, higher status ordinal, has completedAt / output.
+   */
+  private _shouldTakeLocal(local: SubTask, disk: SubTask): boolean {
+    // 1. retryCount higher => restart happened in this runner
+    if ((local.retryCount ?? 0) > (disk.retryCount ?? 0)) return true;
+
+    // 2. decomposition happened in this runner
+    if (local.decomposed && !disk.decomposed) return true;
+
+    // 3. status more advanced (pending < active < completed/failed/skipped)
+    const ORDER: Record<string, number> = {
+      pending: 0,
+      active: 1,
+      completed: 2,
+      failed: 2,
+      skipped: 2,
+    };
+    const localOrd = ORDER[local.status] ?? 0;
+    const diskOrd = ORDER[disk.status] ?? 0;
+    if (localOrd > diskOrd) return true;
+
+    // 4. same status but local has completedAt
+    if (local.completedAt && !disk.completedAt) return true;
+
+    // 5. local produced output while disk has none
+    if (local.output && !disk.output) return true;
+
+    return false;
+  }
+
+  /**
+   * P32: merge local tree with disk tree.
+   * Disk tree is the base; local changes are applied on top.
+   */
+  private _mergeTrees(local: TaskTree, disk: TaskTree): TaskTree {
+    const merged: TaskTree = JSON.parse(JSON.stringify(disk));
+
+    // ── merge subtasks ──
+    for (const localSub of local.subTasks) {
+      const diskIdx = merged.subTasks.findIndex(
+        (t: SubTask) => t.id === localSub.id,
+      );
+      if (diskIdx >= 0) {
+        if (this._shouldTakeLocal(localSub, merged.subTasks[diskIdx])) {
+          merged.subTasks[diskIdx] = JSON.parse(JSON.stringify(localSub));
+        }
+      } else {
+        // new subtask produced by decomposition in this runner
+        merged.subTasks.push(JSON.parse(JSON.stringify(localSub)));
+      }
+    }
+
+    // ── merge rounds ──
+    for (const localRound of local.rounds ?? []) {
+      const mergedRound = (merged.rounds ?? []).find(
+        (r: { id: string }) => r.id === localRound.id,
+      );
+      if (mergedRound) {
+        for (const id of localRound.subTaskIds) {
+          if (!mergedRound.subTaskIds.includes(id)) {
+            mergedRound.subTaskIds.push(id);
+          }
+        }
+        const localCB = localRound.circuitBreaker;
+        const mergedCB = mergedRound.circuitBreaker;
+        if (localCB && mergedCB) {
+          if (localCB.llmCallCount > mergedCB.llmCallCount) {
+            mergedCB.llmCallCount = localCB.llmCallCount;
+          }
+          if (localCB.totalFailures > mergedCB.totalFailures) {
+            mergedCB.totalFailures = localCB.totalFailures;
+          }
+          if (localCB.totalTokensUsed > mergedCB.totalTokensUsed) {
+            mergedCB.totalTokensUsed = localCB.totalTokensUsed;
+          }
+          if (localCB.tripped && !mergedCB.tripped) {
+            mergedCB.tripped = true;
+            mergedCB.tripReason = localCB.tripReason;
+          }
+        }
+      } else {
+        if (!merged.rounds) merged.rounds = [];
+        merged.rounds.push(JSON.parse(JSON.stringify(localRound)));
+      }
+    }
+
+    // ── merge metadata ──
+    if (local.metadata || merged.metadata) {
+      const m = merged.metadata ?? ({} as NonNullable<TaskTree["metadata"]>);
+      if (local.metadata?.masterBlueprint && !m.masterBlueprint) {
+        m.masterBlueprint = local.metadata.masterBlueprint;
+        m.blueprintGeneratedAt = local.metadata.blueprintGeneratedAt;
+      }
+      m.totalTasks = merged.subTasks.length;
+      m.completedTasks = merged.subTasks.filter(
+        (t: SubTask) => t.status === "completed",
+      ).length;
+      m.failedTasks = merged.subTasks.filter(
+        (t: SubTask) => t.status === "failed",
+      ).length;
+      merged.metadata = m;
+    }
+
+    // ── merge tree-level status ──
+    const TREE_ORD: Record<string, number> = {
+      pending: 0,
+      active: 1,
+      completed: 2,
+      failed: 2,
+    };
+    if (
+      (TREE_ORD[local.status] ?? 0) > (TREE_ORD[merged.status] ?? 0)
+    ) {
+      merged.status = local.status;
+    }
+
+    // maxDepth: take larger
+    if ((local.maxDepth ?? 0) > (merged.maxDepth ?? 0)) {
+      merged.maxDepth = local.maxDepth;
+    }
+
+    return merged;
+  }
+
+  /**
+   * P32: reload the latest tree from disk and merge with local copy.
+   * If the file does not exist yet (first save), returns localTree as-is.
+   */
+  private async _mergeWithDisk(localTree: TaskTree): Promise<TaskTree> {
+    try {
+      const taskTreePath = this.getTaskTreePath(localTree.id);
+      const content = await fs.readFile(taskTreePath, "utf-8");
+      const diskTree = JSON.parse(content) as TaskTree;
+      const merged = this._mergeTrees(localTree, diskTree);
+      console.log(
+        `[TaskTreeManager] P32 merge-on-save: ` +
+          `local=${localTree.subTasks.length} disk=${diskTree.subTasks.length} ` +
+          `merged=${merged.subTasks.length} subtasks`,
+      );
+      return merged;
+    } catch {
+      // file does not exist yet (first save), use local as-is
+      return localTree;
+    }
   }
 
   /**

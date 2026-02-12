@@ -28,6 +28,7 @@ import type {
   TaskTreeChange
 } from "./types.js";
 import { classifyTaskType, isWordCountCritical } from "./task-type-classifier.js";
+import { calculateWordCountThreshold } from "./task-output-validator.js";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -43,6 +44,19 @@ interface LLMConfig {
   model: string;
   apiKey?: string;
   endpoint?: string;
+}
+
+/**
+ * 🔧 P44: LLM 降级错误（区分"LLM 不可用"和"其他错误"）
+ * 
+ * 当 LLM 管线不可用时抛出此错误，让调用方可以选择走规则驱动验证，
+ * 而不是一律返回 "passed" 盲目放行。
+ */
+class LLMDegradedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LLMDegradedError";
+  }
 }
 
 /**
@@ -143,6 +157,8 @@ export class QualityReviewer {
     rootTaskOverride?: string,
   ): Promise<QualityReviewResult> {
     const prompts = getPrompts();
+    // 🔧 P44: 提升到 try 外，让 catch 中的规则验证也能访问文件内容
+    let fileContent: string | undefined;
     try {
       // 1. 找到子任务
       const subTask = this.findSubTask(taskTree, subTaskId);
@@ -153,7 +169,6 @@ export class QualityReviewer {
       // 🔧 关键修复：读取实际文件内容用于质检
       // subTask.output 可能只是 LLM 的确认消息（如"已创作完成"），不是文件内容。
       // 质检 LLM 必须看到真实产出才能做出有意义的评估。
-      let fileContent: string | undefined;
       const producedPaths = subTask.metadata?.producedFilePaths;
       if (producedPaths && producedPaths.length > 0) {
         try {
@@ -216,6 +231,14 @@ export class QualityReviewer {
       
       return result;
     } catch (error) {
+      // 🔧 P44: LLM 降级时走规则驱动验证，而非盲目通过
+      if (error instanceof LLMDegradedError) {
+        console.log(`[QualityReviewer] 🔧 P44: LLM 降级，走规则驱动验证 — ${subTaskId}`);
+        const subTask = this.findSubTask(taskTree, subTaskId);
+        if (subTask) {
+          return this.ruleBasedCompletionReview(subTask, fileContent);
+        }
+      }
       console.error(`${prompts.qualityReviewer.errors.completionReviewFailed}:`, error);
       return {
         status: "passed",
@@ -225,6 +248,86 @@ export class QualityReviewer {
         suggestions: []
       };
     }
+  }
+
+  /**
+   * 🔧 P44: 规则驱动的子任务完成验证（LLM 不可用时的降级方案）
+   * 
+   * 刻板问题：LLM 不可用时一律返回 "passed"，低质量内容直接通过。
+   * 修复：用已有的规则检查能力做基本验证：
+   * - 字数检查：写作类任务字数 < 70% 要求时 restart
+   * - 内容存在性：有字数要求但无实际内容时 restart
+   * - 其他类型：无文件产出时降级为 warning
+   */
+  ruleBasedCompletionReview(
+    subTask: SubTask,
+    fileContent?: string,
+  ): QualityReviewResult {
+    const findings: string[] = [];
+    const suggestions: string[] = [];
+    let decision: ReviewDecision = "continue";
+    let status: QualityStatus = "passed";
+    let failureType: string | undefined;
+
+    // 检查 1: 字数验证（写作类任务）
+    const taskType = subTask.taskType ?? "generic";
+    const wordCountReq = this.extractWordCountRequirement(subTask.prompt);
+    if (wordCountReq && isWordCountCritical(taskType)) {
+      const actualContent = fileContent ?? subTask.output ?? "";
+      const actualLength = actualContent.length;
+      const ratio = actualLength / Math.max(wordCountReq, 1);
+
+      // 🔧 P51: 使用公共阈值计算函数（与 OutputValidator 统一标准）
+      // 修复前：硬编码 0.5/0.7，与 OutputValidator 的动态阈值矛盾——
+      // 续写子任务 OutputValidator 通过(60%>55%)但 QualityReviewer 拒绝(60%<70%) → 无限 restart
+      const dynamicThreshold = calculateWordCountThreshold(subTask);
+      if (ratio < dynamicThreshold * 0.7) {
+        // 极端不足（低于动态阈值的 70%）：restart
+        findings.push(`P44规则检查：字数严重不足 — 要求 ${wordCountReq} 字，实际 ${actualLength} 字（${Math.round(ratio * 100)}%，阈值 ${Math.round(dynamicThreshold * 100)}%）`);
+        decision = "restart";
+        status = "needs_restart";
+        failureType = "word_count";
+      } else if (ratio < dynamicThreshold) {
+        // 不达标（低于动态阈值）：restart
+        findings.push(`P44规则检查：字数不达标 — 要求 ${wordCountReq} 字，实际 ${actualLength} 字（${Math.round(ratio * 100)}%，阈值 ${Math.round(dynamicThreshold * 100)}%）`);
+        decision = "restart";
+        status = "needs_restart";
+        failureType = "word_count";
+      } else {
+        // >= 动态阈值：通过
+        findings.push(`P44规则检查：字数达标 — ${actualLength}/${wordCountReq} 字（${Math.round(ratio * 100)}%，阈值 ${Math.round(dynamicThreshold * 100)}%）`);
+      }
+    }
+
+    // 检查 2: 内容存在性
+    if (decision === "continue") {
+      const hasOutput = !!(subTask.output && subTask.output.length > 50);
+      const hasFile = !!(subTask.metadata?.producedFilePaths?.length || subTask.metadata?.fallbackFilePath);
+      const hasContent = hasOutput || hasFile || !!fileContent;
+
+      if (!hasContent && wordCountReq) {
+        findings.push(`P44规则检查：无实际内容产出（要求 ${wordCountReq} 字）`);
+        decision = "restart";
+        status = "needs_restart";
+        failureType = "incomplete";
+      } else if (!hasContent) {
+        findings.push(`P44规则检查：无内容产出（非写作任务，降级为 warning）`);
+        suggestions.push("检查任务是否正确执行");
+      }
+    }
+
+    console.log(
+      `[QualityReviewer] 🔧 P44 规则验证结果: decision=${decision}, findings=[${findings.join("; ")}]`,
+    );
+
+    return {
+      status,
+      decision,
+      criteria: ["P44规则驱动验证"],
+      findings,
+      suggestions,
+      failureType,
+    } as QualityReviewResult;
   }
 
   /**
@@ -548,20 +651,64 @@ ${prompts.jsonOnlyReminder}`;
       ? `\n\n📋 历史信息：这是第 ${subTask.retryCount ?? 0} 次重试。上次被打回的原因：\n${previousFindings.map((f, i) => `${i + 1}. ${f}`).join("\n")}\n请重点检查这些问题是否已改进。如果已改进，即使其他方面略有不足也可以 continue。\n`
       : "";
 
-    // 🆕 V3: 注入总纲领摘要 + 子任务专属大纲到质检 prompt
-    // 让质检 LLM 能判断输出是否符合纲领的角色/风格/世界观要求
+    // 🆕 V3+P54: 注入纲领上下文到质检 prompt
+    // 🔧 P54: 优先使用 V7 结构化组件（人物卡 + 该章纲要），替代截断的 masterBlueprint
+    // V7 路径：精准注入人物卡（角色一致性审查关键）+ 该章剧情纲要
+    // 回退路径：截断 masterBlueprint 到 2000 字
     let blueprintReviewCtx = "";
-    if (taskTree.metadata?.masterBlueprint) {
-      const bp = taskTree.metadata.masterBlueprint;
-      // 截断到 2000 字符，质检只需要核心要素（角色、风格、世界观），不需要完整纲领
-      const truncatedBp = bp.length > 2000
-        ? bp.substring(0, 2000) + "\n...[纲领已截断]"
-        : bp;
-      blueprintReviewCtx = `\n\n📋 **总纲领摘要**（用于判断内容一致性）：\n${truncatedBp}\n`;
-    }
     let chapterOutlineCtx = "";
-    if (subTask.metadata?.chapterOutline) {
-      chapterOutlineCtx = `\n📖 **本子任务专属大纲**：\n${subTask.metadata.chapterOutline}\n请重点检查输出是否覆盖了大纲中的核心情节点、角色行动和衔接点。\n`;
+    const meta = taskTree.metadata;
+    const hasV7 = meta?.blueprintCharacterCards && meta.blueprintCharacterCards.length > 50;
+
+    if (hasV7) {
+      // V7 路径：精准组件注入
+      const parts: string[] = [];
+
+      // 人物卡（角色一致性审查的核心依据，截断到 1500 字）
+      if (meta.blueprintCharacterCards) {
+        const cards = meta.blueprintCharacterCards.length > 1500
+          ? meta.blueprintCharacterCards.substring(0, 1500) + "\n...[人物卡已截断]"
+          : meta.blueprintCharacterCards;
+        parts.push(`👤 **人物卡片**（审查角色行为/语言是否一致）：\n${cards}`);
+      }
+
+      // 风格指南（审查风格一致性）
+      if (meta.blueprintStyleGuide) {
+        const sg = meta.blueprintStyleGuide.length > 500
+          ? meta.blueprintStyleGuide.substring(0, 500) + "\n...[风格指南已截断]"
+          : meta.blueprintStyleGuide;
+        parts.push(`🎨 **风格指南**：\n${sg}`);
+      }
+
+      if (parts.length > 0) {
+        blueprintReviewCtx = `\n\n📋 **V7 结构化纲领**（用于判断内容一致性）：\n${parts.join("\n\n")}\n`;
+      }
+
+      // 精准匹配该章纲要
+      const cnMap: Record<string, number> = { "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10 };
+      let chNum = subTask.metadata?.chapterNumber ?? 0;
+      if (!chNum) {
+        const chMatch = (subTask.summary ?? "").match(/第\s*([一二三四五六七八九十\d]+)\s*[章节篇幕]/);
+        if (chMatch) chNum = cnMap[chMatch[1]] ?? parseInt(chMatch[1], 10);
+      }
+      const v7Synopsis = chNum > 0 ? meta.blueprintChapterSynopses?.[String(chNum)] : undefined;
+      if (v7Synopsis) {
+        chapterOutlineCtx = `\n📖 **本章剧情纲要（第${chNum}章）**：\n${v7Synopsis}\n请重点检查输出是否覆盖了纲要中的核心情节点、角色行动和衔接点。\n`;
+      } else if (subTask.metadata?.chapterOutline) {
+        chapterOutlineCtx = `\n📖 **本子任务专属大纲**：\n${subTask.metadata.chapterOutline}\n请重点检查输出是否覆盖了大纲中的核心情节点、角色行动和衔接点。\n`;
+      }
+    } else {
+      // 回退路径：截断 masterBlueprint
+      if (meta?.masterBlueprint) {
+        const bp = meta.masterBlueprint;
+        const truncatedBp = bp.length > 2000
+          ? bp.substring(0, 2000) + "\n...[纲领已截断]"
+          : bp;
+        blueprintReviewCtx = `\n\n📋 **总纲领摘要**（用于判断内容一致性）：\n${truncatedBp}\n`;
+      }
+      if (subTask.metadata?.chapterOutline) {
+        chapterOutlineCtx = `\n📖 **本子任务专属大纲**：\n${subTask.metadata.chapterOutline}\n请重点检查输出是否覆盖了大纲中的核心情节点、角色行动和衔接点。\n`;
+      }
     }
 
     // 🔧 关键修复：优先使用文件内容作为质检对象
@@ -804,6 +951,9 @@ ${prompts.jsonOnlyReminder}`;
 
   /**
    * 调用 LLM
+   * 
+   * 🔧 P44: LLM 不可用时抛出 LLMDegradedError（而非返回假 "passed"），
+   * 让调用方可以选择走规则驱动验证，而不是盲目通过。
    */
   private async callLLM(prompt: string): Promise<string> {
     // 优先使用注入的系统 LLM 调用器（走 auth profiles + completeSimple）
@@ -813,18 +963,13 @@ ${prompts.jsonOnlyReminder}`;
         return await this.externalLLMCaller.call(prompt);
       } catch (err) {
         console.warn(`[QualityReviewer] ⚠️ 系统 LLM 调用失败，降级到规则驱动:`, err);
+        throw new LLMDegradedError("系统 LLM 调用失败");
       }
     }
 
-    // 降级：规则驱动质量评估默认通过
-    console.log(`[QualityReviewer] 使用规则驱动评估（降级），提示词长度: ${prompt.length}`);
-    return `{
-  "status": "passed",
-  "decision": "continue",
-  "criteria": ["覆盖性", "独立性", "合理性"],
-  "findings": [],
-  "suggestions": []
-}`;
+    // 无 LLM 可用
+    console.warn(`[QualityReviewer] ⚠️ P44: 无可用 LLM，抛出降级错误让调用方走规则检查`);
+    throw new LLMDegradedError("无可用 LLM 管线");
   }
 
   /**

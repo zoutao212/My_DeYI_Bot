@@ -74,6 +74,33 @@ export interface ValidationContext {
   fallbackFilePath?: string;
   /** 工具调用记录 */
   toolCalls?: Array<{ name: string; args?: unknown }>;
+  /** 🔧 P31: 覆盖要执行的验证策略列表（优先于 subTask.metadata.validationStrategies） */
+  overrideStrategies?: string[];
+}
+
+// ========================================
+// 🔧 P51: 公共字数阈值计算（统一标准）
+// ========================================
+
+/**
+ * 根据子任务类型计算字数达标阈值比例
+ * 
+ * 🔧 P51 修复：quality-reviewer 和 task-output-validator 曾各自维护阈值，
+ * 导致同一子任务被两个验证器用不同标准判定（OutputValidator 通过但 QualityReviewer 拒绝）。
+ * 提取为公共函数，确保全系统使用同一标准。
+ * 
+ * @param subTask 待验证的子任务
+ * @returns 字数达标比例阈值（0-1），低于此比例判定为不达标
+ */
+export function calculateWordCountThreshold(subTask: SubTask): number {
+  if (subTask.metadata?.isSegment) {
+    return 0.6; // 分段子任务：LLM 短文产出波动更大
+  } else if (subTask.metadata?.isContinuation) {
+    return 0.55; // 续写子任务：补充性质，目标精度低
+  } else if (subTask.metadata?.isChunkTask) {
+    return 0.5; // Map-Reduce chunk：分析类输出长度不可预测
+  }
+  return 0.7; // 默认基线
 }
 
 // ========================================
@@ -105,14 +132,15 @@ const wordCountStrategy: ValidationStrategy = {
     const required = parseInt(wcMatch[1], 10);
     const actual = context.actualLength ?? 0;
     const ratio = actual / Math.max(required, 1);
-    const threshold = 0.7;
+    // 🔧 P51: 使用公共阈值计算函数（替代各自维护的硬编码阈值）
+    const threshold = calculateWordCountThreshold(subTask);
 
     if (ratio < threshold) {
       return {
         strategy: "word_count",
         passed: false,
         severity: "critical",
-        reason: `字数不达标：要求 ${required} 字，实际 ${actual} 字（${Math.round(ratio * 100)}%，阈值 ${threshold * 100}%）`,
+        reason: `字数不达标：要求 ${required} 字，实际 ${actual} 字（${Math.round(ratio * 100)}%，阈值 ${Math.round(threshold * 100)}%）`,
         suggestedDecision: actual >= 500 ? "decompose" : "restart",
         metrics: { required, actual, ratio: Math.round(ratio * 100) },
       };
@@ -347,7 +375,8 @@ export async function validateTaskOutput(
   context: ValidationContext,
 ): Promise<AggregatedValidationResult> {
   // 确定要执行的验证策略
-  const strategyNames = subTask.metadata?.validationStrategies ?? ["completeness"];
+  // 🔧 P31 修复：优先使用 context.overrideStrategies（调用方已过滤掉不适用的策略）
+  const strategyNames = context.overrideStrategies ?? subTask.metadata?.validationStrategies ?? ["completeness"];
 
   const results: ValidationResult[] = [];
 

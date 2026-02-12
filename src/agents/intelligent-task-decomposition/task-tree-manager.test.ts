@@ -843,4 +843,139 @@ describe("TaskTreeManager", () => {
       expect(task2After?.depth).toBe(1);
     });
   });
+
+  // ════════════════════════════════════════════════════════════════
+  // P32: merge-on-save regression tests
+  // ════════════════════════════════════════════════════════════════
+  describe("P32: merge-on-save", () => {
+    it("should preserve both status changes when two stale copies save sequentially", async () => {
+      const taskTree = await manager.initialize("root", testSessionId);
+
+      const taskA: SubTask = {
+        id: "p32-a", prompt: "A", summary: "A",
+        status: "pending", retryCount: 0, createdAt: Date.now(),
+        depth: 0, parentId: null, children: [],
+      };
+      const taskB: SubTask = {
+        id: "p32-b", prompt: "B", summary: "B",
+        status: "pending", retryCount: 0, createdAt: Date.now(),
+        depth: 0, parentId: null, children: [],
+      };
+      await manager.addSubTask(taskTree, null, taskA);
+      await manager.addSubTask(taskTree, null, taskB);
+
+      // Simulate two parallel runners each loading their own copy
+      const copy1 = await manager.load(testSessionId);
+      const copy2 = await manager.load(testSessionId);
+
+      // Runner 1 completes task A
+      const a1 = copy1!.subTasks.find(t => t.id === "p32-a")!;
+      a1.status = "completed";
+      a1.completedAt = Date.now();
+
+      // Runner 2 completes task B (loaded before runner 1 saved)
+      const b2 = copy2!.subTasks.find(t => t.id === "p32-b")!;
+      b2.status = "completed";
+      b2.completedAt = Date.now();
+
+      // Sequential saves (simulates lock serialization)
+      await manager.save(copy1!);
+      await manager.save(copy2!);
+
+      // Without P32 fix: copy2 overwrites copy1, task A reverts to pending
+      // With P32 fix: merge preserves both completions
+      const result = await manager.load(testSessionId);
+      expect(result!.subTasks.find(t => t.id === "p32-a")!.status).toBe("completed");
+      expect(result!.subTasks.find(t => t.id === "p32-b")!.status).toBe("completed");
+    });
+
+    it("should preserve decomposition data when a stale copy saves later", async () => {
+      const taskTree = await manager.initialize("root", testSessionId);
+
+      const taskA: SubTask = {
+        id: "p32-dec-a", prompt: "A", summary: "A",
+        status: "pending", retryCount: 0, createdAt: Date.now(),
+        depth: 0, parentId: null, children: [],
+      };
+      const taskB: SubTask = {
+        id: "p32-dec-b", prompt: "B", summary: "B",
+        status: "pending", retryCount: 0, createdAt: Date.now(),
+        depth: 0, parentId: null, children: [],
+      };
+      await manager.addSubTask(taskTree, null, taskA);
+      await manager.addSubTask(taskTree, null, taskB);
+
+      // Both runners load the same version
+      const copy1 = await manager.load(testSessionId);
+      const copy2 = await manager.load(testSessionId);
+
+      // Runner 1: decompose task A (fast path — creates segments)
+      const a1 = copy1!.subTasks.find(t => t.id === "p32-dec-a")!;
+      a1.decomposed = true;
+      a1.status = "active";
+      a1.waitForChildren = true;
+      const seg1: SubTask = {
+        id: "p32-dec-a-seg-1", prompt: "Seg 1", summary: "Seg 1",
+        status: "pending", retryCount: 0, createdAt: Date.now(),
+        depth: 1, parentId: "p32-dec-a", children: [],
+      };
+      const seg2: SubTask = {
+        id: "p32-dec-a-seg-2", prompt: "Seg 2", summary: "Seg 2",
+        status: "pending", retryCount: 0, createdAt: Date.now(),
+        depth: 1, parentId: "p32-dec-a", children: [],
+        dependencies: ["p32-dec-a-seg-1"],
+      };
+      copy1!.subTasks.push(seg1, seg2);
+
+      // Runner 1 saves first (decomposition is fast)
+      await manager.save(copy1!);
+
+      // Runner 2: complete task B (slow path — LLM execution)
+      // copy2 is stale — does NOT have decomposition data
+      const b2 = copy2!.subTasks.find(t => t.id === "p32-dec-b")!;
+      b2.status = "completed";
+      b2.completedAt = Date.now();
+      b2.output = "Result of B";
+
+      // Runner 2 saves (stale copy that lacks decomposition)
+      await manager.save(copy2!);
+
+      // Verify: both decomposition AND completion are preserved
+      const result = await manager.load(testSessionId);
+      const ra = result!.subTasks.find(t => t.id === "p32-dec-a")!;
+      expect(ra.decomposed).toBe(true);
+      expect(ra.status).toBe("active");
+
+      expect(result!.subTasks.find(t => t.id === "p32-dec-a-seg-1")).toBeDefined();
+      expect(result!.subTasks.find(t => t.id === "p32-dec-a-seg-2")).toBeDefined();
+
+      const rb = result!.subTasks.find(t => t.id === "p32-dec-b")!;
+      expect(rb.status).toBe("completed");
+      expect(rb.output).toBe("Result of B");
+    });
+
+    it("should handle restart (status regression with higher retryCount)", async () => {
+      const taskTree = await manager.initialize("root", testSessionId);
+
+      const task: SubTask = {
+        id: "p32-restart", prompt: "T", summary: "T",
+        status: "pending", retryCount: 0, createdAt: Date.now(),
+        depth: 0, parentId: null, children: [],
+      };
+      await manager.addSubTask(taskTree, null, task);
+
+      // Runner loads, sets active, then restarts (pending + retryCount++)
+      const copy = await manager.load(testSessionId);
+      const t = copy!.subTasks.find(t => t.id === "p32-restart")!;
+      t.status = "pending";
+      t.retryCount = 1;
+
+      await manager.save(copy!);
+
+      const result = await manager.load(testSessionId);
+      const rt = result!.subTasks.find(t => t.id === "p32-restart")!;
+      expect(rt.status).toBe("pending");
+      expect(rt.retryCount).toBe(1);
+    });
+  });
 });

@@ -142,7 +142,10 @@ function validateSubTaskOutput(
     };
   }
 
-  // 规则 4：检测重复内容（同一段文字重复 3 次以上）
+  // 规则 4：检测重复内容（同一段文字重复多次）
+  // 🔧 P49: 根据任务类型动态调整重复检测阈值（替代一刀切 5 次）
+  // 刻板问题：写作类任务正常使用排比/回声/重复修辞手法，5 次阈值容易误判
+  // 分析/编码类任务几乎不会有正常重复，阈值应更低以更快检测 LLM 循环生成
   if (outputText.length > 500) {
     const lines = outputText.split("\n").filter(l => l.trim().length > 20);
     const lineSet = new Map<string, number>();
@@ -151,11 +154,14 @@ function validateSubTaskOutput(
       lineSet.set(trimmed, (lineSet.get(trimmed) ?? 0) + 1);
     }
     const maxRepeat = Math.max(...lineSet.values(), 0);
-    if (maxRepeat >= 5) {
+    // 根据上下文推断任务类型（OutputValidator 没有直接的 taskType 参数）
+    const looksLikeWriting = /[写作创作小说故事章节|翻译|诗歌|散文]/u.test(outputText.substring(0, 200));
+    const repeatThreshold = looksLikeWriting ? 8 : (context?.isRootTask ? 5 : 4);
+    if (maxRepeat >= repeatThreshold) {
       return {
         valid: false,
         failureCode: "excessive_repetition",
-        failureReason: `检测到严重重复内容（同一行重复 ${maxRepeat} 次），疑似 LLM 循环生成`,
+        failureReason: `检测到严重重复内容（同一行重复 ${maxRepeat} 次，阈值 ${repeatThreshold}），疑似 LLM 循环生成`,
         suggestedAction: "retry",
       };
     }
@@ -583,9 +589,26 @@ export function createFollowupRunner(params: {
             // 🔧 子任务工具白名单：大幅裁剪 system prompt 体积（60KB → ~15KB）
             // 创作/执行子任务只需 write+read+edit+exec，无需 browser/web/slack/canvas 等
             const isSubTaskExec = Boolean(queued.subTaskId) && !queued.isRootTask && !queued.isNewRootTask;
-            const subTaskToolAllowlist = isSubTaskExec
-              ? ["write", "read", "edit", "exec", "process"]
-              : undefined;
+            // 🔧 P46: 根据任务类型动态调整工具白名单（替代一刀切 5 工具）
+            // 刻板问题：所有子任务统一只允许 write/read/edit/exec/process，
+            // 但自动化/研究类子任务需要 browser/web 等工具才能完成任务。
+            let subTaskToolAllowlist: string[] | undefined;
+            if (isSubTaskExec) {
+              const taskType = subTask?.taskType ?? "generic";
+              if (taskType === "automation") {
+                // 自动化类：需要浏览器、网络、命令执行等全套工具
+                subTaskToolAllowlist = ["write", "read", "edit", "exec", "process", "browser", "web", "fetch"];
+              } else if (taskType === "research" || taskType === "analysis") {
+                // 研究/分析类：需要网络搜索和文件读写
+                subTaskToolAllowlist = ["write", "read", "edit", "exec", "process", "web", "fetch"];
+              } else if (taskType === "coding") {
+                // 编码类：需要执行和测试
+                subTaskToolAllowlist = ["write", "read", "edit", "exec", "process", "test"];
+              } else {
+                // 写作/通用类：基础工具即可
+                subTaskToolAllowlist = ["write", "read", "edit", "exec", "process"];
+              }
+            }
             return runEmbeddedPiAgent({
               sessionId: queued.run.sessionId,
               sessionKey: effectiveSessionKey,
@@ -622,9 +645,39 @@ export function createFollowupRunner(params: {
                       parts.push("请针对以上问题重点改进。");
                     }
                     if (subTask.metadata.previousOutput) {
-                      const prevSnippet = subTask.metadata.previousOutput.length > 1500
-                        ? subTask.metadata.previousOutput.substring(0, 1500) + "...[截断]"
-                        : subTask.metadata.previousOutput;
+                      // 🔧 P47: 根据任务类型动态调整 previousOutput 截断长度
+                      // 刻板问题：固定 1500 字截断不区分任务类型——
+                      // 写作类需要更多上下文保持风格/情节连贯，编码类 1000 字就够定位问题
+                      const prevOutputTaskType = subTask.taskType ?? "generic";
+                      let prevMaxLen = 1500; // 基线
+                      if (prevOutputTaskType === "writing") {
+                        prevMaxLen = 2500; // 写作类：需要更多上下文保连贯性
+                      } else if (prevOutputTaskType === "coding" || prevOutputTaskType === "data") {
+                        prevMaxLen = 1000; // 编码/数据类：关键错误信息通常在开头
+                      }
+                      // 🔧 P60: 智能截断 — 按内容结构找最近的完整边界，避免断在句子/函数中间
+                      let prevSnippet: string;
+                      if (subTask.metadata.previousOutput.length <= prevMaxLen) {
+                        prevSnippet = subTask.metadata.previousOutput;
+                      } else {
+                        const raw = subTask.metadata.previousOutput.substring(0, prevMaxLen);
+                        let cutIdx = prevMaxLen;
+                        if (prevOutputTaskType === "writing") {
+                          // 写作类：找最后一个段落边界或句号
+                          const paraIdx = raw.lastIndexOf("\n\n");
+                          const sentIdx = Math.max(raw.lastIndexOf("。"), raw.lastIndexOf("！"), raw.lastIndexOf("？"), raw.lastIndexOf(".")); 
+                          cutIdx = paraIdx > prevMaxLen * 0.6 ? paraIdx : (sentIdx > prevMaxLen * 0.6 ? sentIdx + 1 : prevMaxLen);
+                        } else if (prevOutputTaskType === "coding") {
+                          // 编码类：找最后一个完整行
+                          const lineIdx = raw.lastIndexOf("\n");
+                          cutIdx = lineIdx > prevMaxLen * 0.5 ? lineIdx : prevMaxLen;
+                        } else {
+                          // 其他：找最后一个句子边界
+                          const sentIdx = Math.max(raw.lastIndexOf("。"), raw.lastIndexOf("。"), raw.lastIndexOf("\n"), raw.lastIndexOf(". "));
+                          cutIdx = sentIdx > prevMaxLen * 0.6 ? sentIdx + 1 : prevMaxLen;
+                        }
+                        prevSnippet = raw.substring(0, cutIdx) + "\n...[截断]";
+                      }
                       parts.push(`上次的输出（供参考和改进）：\n---\n${prevSnippet}\n---`);
                       parts.push("请在上次输出的基础上改进，保留好的部分，修正问题部分。");
                     }
@@ -658,28 +711,125 @@ export function createFollowupRunner(params: {
                   ? "\n\n[SYSTEM] 子任务必须用 write 工具落盘，禁止纯文本输出。严禁使用 enqueue_task/sessions_spawn/batch_enqueue_tasks 委派任务，必须亲自完成。"
                   : "";
 
-                // 🆕 V3: 注入总纲领（Master Blueprint）到子任务上下文
-                // 让每个并行执行的子任务都能看到"指挥家的总谱"，保证内容一致性
+                // 🆕 V7: 结构化纲领精准注入（写作任务优先）
+                // 当结构化纲领组件可用时，精准注入"人物卡 + 风格指南 + 该章纲要"
+                // 替代原来的"大段截断纲领"，信息损失为零
                 let blueprintCtx = "";
-                if (isSubTask && taskTree?.metadata?.masterBlueprint) {
-                  const blueprint = taskTree.metadata.masterBlueprint;
-                  // 🔧 O6: 智能截断纲领——保留"前3000（世界观/角色设定）+ 后3000（后面章节大纲）"
-                  // 原策略"前6000一刀切"会导致后面章节（如第5、6章）的大纲完全丢失
-                  const MAX_BLUEPRINT = 6000;
-                  const truncated = blueprint.length > MAX_BLUEPRINT
-                    ? blueprint.substring(0, MAX_BLUEPRINT / 2)
-                      + "\n\n...[纲领中段已省略，保留首尾关键内容]...\n\n"
-                      + blueprint.substring(blueprint.length - MAX_BLUEPRINT / 2)
-                    : blueprint;
-                  blueprintCtx = `\n\n[📋 总纲领 / Master Blueprint]\n以下是整体任务的详细规划纲领，你必须严格遵循其中与你当前子任务相关的部分。\n确保角色描述、世界观设定、风格要求与纲领一致。\n---\n${truncated}\n---`;
-                  console.log(`[followup-runner] 🎼 注入总纲领 (${blueprint.length} chars, truncated=${blueprint.length > 6000})`);
-                }
-
-                // 🆕 V3: 注入子任务专属大纲（chapterOutline）
                 let chapterOutlineCtx = "";
-                if (isSubTask && subTask?.metadata?.chapterOutline) {
-                  chapterOutlineCtx = `\n\n[📖 本任务专属大纲]\n以下是你当前子任务的详细大纲，请严格按此大纲完成创作/执行：\n---\n${subTask.metadata.chapterOutline}\n---`;
-                  console.log(`[followup-runner] 📖 注入章节大纲 (${subTask.metadata.chapterOutline.length} chars)`);
+                const meta = taskTree?.metadata;
+                const hasStructuredBlueprint = meta?.blueprintCharacterCards && meta.blueprintCharacterCards.length > 50;
+
+                if (isSubTask && hasStructuredBlueprint) {
+                  // ── V7 路径：结构化精准注入 ──
+                  const parts: string[] = [];
+
+                  // 1. 世界观设定（紧凑版，截断到 1500 字）
+                  if (meta.blueprintWorldBuilding) {
+                    const wb = meta.blueprintWorldBuilding.length > 1500
+                      ? meta.blueprintWorldBuilding.substring(0, 1500) + "\n...[世界观设定已截断]"
+                      : meta.blueprintWorldBuilding;
+                    parts.push(`[🌍 世界观设定]\n${wb}`);
+                  }
+
+                  // 2. 风格指南（完整注入，通常较短）
+                  if (meta.blueprintStyleGuide) {
+                    parts.push(`[🎨 风格指南]\n${meta.blueprintStyleGuide}`);
+                  }
+
+                  // 3. 人物卡片（完整注入——这是创作一致性的关键）
+                  if (meta.blueprintCharacterCards) {
+                    parts.push(`[👤 人物卡片]\n以下是所有主要角色的详细档案，你必须严格遵循每个角色的性格特征、动机和语言习惯：\n${meta.blueprintCharacterCards}`);
+                  }
+
+                  // 4. 精准匹配该章节的剧情纲要（替代原来的大段截断）
+                  if (meta.blueprintChapterSynopses && Object.keys(meta.blueprintChapterSynopses).length > 0) {
+                    // 从 summary 中提取章节号
+                    const cnMap: Record<string, number> = { "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10 };
+                    const chMatch = subTask?.summary?.match(/第\s*([一二三四五六七八九十\d]+)\s*[章节篇幕]/);
+                    let chapterNum = 0;
+                    if (chMatch) {
+                      chapterNum = cnMap[chMatch[1]] ?? parseInt(chMatch[1], 10);
+                    }
+                    // 🔧 P51: 优先使用 chapterNumber（精确章节号），替代错误的 segmentIndex 回退
+                    // segmentIndex 是段内序号（第几段），不是章节号，不能用于匹配章节纲要
+                    if (!chapterNum && subTask?.metadata?.chapterNumber) {
+                      chapterNum = subTask.metadata.chapterNumber;
+                    }
+
+                    const synopsis = chapterNum > 0
+                      ? meta.blueprintChapterSynopses[String(chapterNum)]
+                      : undefined;
+
+                    if (synopsis) {
+                      // 精准注入该章的剧情纲要
+                      chapterOutlineCtx = `\n\n[📖 本章剧情纲要（第${chapterNum}章）]\n以下是你当前章节的详细剧情纲要，请严格按此纲要完成创作：\n---\n${synopsis}\n---`;
+                      console.log(`[followup-runner] � V7 精准注入第${chapterNum}章纲要 (${synopsis.length} chars)`);
+
+                      // 同时注入相邻章节的简要摘要（衔接用）
+                      const prevSynopsis = chapterNum > 1 ? meta.blueprintChapterSynopses[String(chapterNum - 1)] : undefined;
+                      const nextSynopsis = meta.blueprintChapterSynopses[String(chapterNum + 1)];
+                      if (prevSynopsis || nextSynopsis) {
+                        const adjacentParts: string[] = [];
+                        if (prevSynopsis) {
+                          // 上一章只取前 300 字作为衔接参考
+                          adjacentParts.push(`[上一章（第${chapterNum - 1}章）简要]: ${prevSynopsis.substring(0, 300)}...`);
+                        }
+                        if (nextSynopsis) {
+                          adjacentParts.push(`[下一章（第${chapterNum + 1}章）简要]: ${nextSynopsis.substring(0, 300)}...`);
+                        }
+                        chapterOutlineCtx += `\n\n[🔗 相邻章节参考]\n${adjacentParts.join("\n")}`;
+                      }
+                    } else {
+                      // 未匹配到章节号，注入所有章节纲要概览
+                      const allSynopses = Object.entries(meta.blueprintChapterSynopses)
+                        .sort(([a], [b]) => Number(a) - Number(b))
+                        .map(([num, syn]) => `第${num}章: ${syn.substring(0, 150)}...`)
+                        .join("\n");
+                      if (allSynopses) {
+                        chapterOutlineCtx = `\n\n[📖 各章节纲要概览]\n${allSynopses}`;
+                      }
+                    }
+                  }
+
+                  blueprintCtx = parts.length > 0
+                    ? `\n\n${parts.join("\n\n---\n\n")}`
+                    : "";
+                  const totalInjected = blueprintCtx.length + chapterOutlineCtx.length;
+                  console.log(`[followup-runner] 🎼 V7 结构化纲领注入: worldBuilding=${meta.blueprintWorldBuilding?.length ?? 0}, styleGuide=${meta.blueprintStyleGuide?.length ?? 0}, characters=${meta.blueprintCharacterCards?.length ?? 0}, total=${totalInjected} chars`);
+
+                } else if (isSubTask && meta?.masterBlueprint) {
+                  // ── 回退路径：原有纲领截断注入（P48 位置感知截断） ──
+                  const blueprint = meta.masterBlueprint;
+                  const MAX_BLUEPRINT = 6000;
+                  let truncated: string;
+                  if (blueprint.length <= MAX_BLUEPRINT) {
+                    truncated = blueprint;
+                  } else {
+                    const segIndex = subTask?.metadata?.segmentIndex ?? 0;
+                    const totalSegs = subTask?.metadata?.totalSegments ?? 0;
+                    const chMatch = subTask?.summary?.match(/第\s*(\d+)\s*章/);
+                    const chapterNum = chMatch ? parseInt(chMatch[1], 10) : 0;
+                    let positionRatio = 0.5;
+                    if (totalSegs > 0 && segIndex > 0) {
+                      positionRatio = (segIndex - 1) / Math.max(totalSegs - 1, 1);
+                    } else if (chapterNum > 0) {
+                      positionRatio = Math.min((chapterNum - 1) / 6, 1);
+                    }
+                    const headRatio = Math.max(0.3, 1 - positionRatio * 0.6);
+                    const headLen = Math.floor(MAX_BLUEPRINT * headRatio);
+                    const tailLen = MAX_BLUEPRINT - headLen;
+                    truncated = blueprint.substring(0, headLen)
+                      + "\n\n...[纲领中段已省略，保留首尾关键内容]...\n\n"
+                      + blueprint.substring(blueprint.length - tailLen);
+                  }
+                  blueprintCtx = `\n\n[📋 总纲领 / Master Blueprint]\n以下是整体任务的详细规划纲领，你必须严格遵循其中与你当前子任务相关的部分。\n确保角色描述、世界观设定、风格要求与纲领一致。\n---\n${truncated}\n---`;
+                  console.log(`[followup-runner] 🎼 注入总纲领 (${blueprint.length} chars, truncated=${blueprint.length > MAX_BLUEPRINT})`);
+
+                  // 回退路径也注入 chapterOutline（如果有）
+                  if (subTask?.metadata?.chapterOutline) {
+                    chapterOutlineCtx = `\n\n[📖 本任务专属大纲]\n以下是你当前子任务的详细大纲，请严格按此大纲完成创作/执行：\n---\n${subTask.metadata.chapterOutline}\n---`;
+                    console.log(`[followup-runner] 📖 注入章节大纲 (${subTask.metadata.chapterOutline.length} chars)`);
+                  }
                 }
 
                 const combined = [base, siblingCtx, persistInstruction, blueprintCtx, chapterOutlineCtx].filter(Boolean).join("");
@@ -756,6 +906,22 @@ export function createFollowupRunner(params: {
 
             // 如果建议重试且重试次数未超限，重新入队
             if (validation.suggestedAction === "retry" && subTask.retryCount < 3) {
+              // 🔧 P35 修复：hallucinated_tool_calls 重试时主动标记 provider 降级
+              // 根因：LLM 用纯文本输出 tool call，重试时同一 provider 仍然降级，
+              // 但 text-tool-fallback 在 Step 5.5 才检测降级（太晚），导致重试同样失败。
+              // 修复：提前标记降级，确保下次从 Step 3.9 就注入文本工具描述。
+              if (validation.failureCode === "hallucinated_tool_calls" && fallbackProvider) {
+                try {
+                  const { markDegradedProvider } = await import("../../agents/text-tool-fallback.js");
+                  markDegradedProvider(fallbackProvider, fallbackModel ?? "unknown");
+                  console.log(
+                    `[followup-runner] 🔧 P35: 标记 provider ${fallbackProvider}/${fallbackModel} 为降级，下次重试将启用文本工具模式`,
+                  );
+                } catch {
+                  // text-tool-fallback 模块加载失败，不影响重试流程
+                }
+              }
+
               subTask.status = "pending";
               await orchestrator.saveTaskTree(taskTree);
               console.log(
@@ -961,8 +1127,13 @@ export function createFollowupRunner(params: {
                       ? path.join(wsDir, "workspace", queued.rootTaskId)
                       : path.join(wsDir, "workspace");
                     await fs.mkdir(taskOutputDir, { recursive: true });
-                    // 从任务树目标生成语义化文件名
-                    const rootGoal = taskTree.rootTask?.substring(0, 30)?.replace(/[\\/:*?"<>|\n\r]/g, "_") ?? "output";
+                    // 🔧 P38 修复：从任务树目标提取作品名称（而非用户 prompt 片段）
+                    // 尝试提取书名号《》中的内容作为文件名，回退到 rootTask 前30字
+                    const rootTaskStr = taskTree.rootTask ?? "";
+                    const bookMatch = rootTaskStr.match(/[《\u300A]([^》\u300B]+)[》\u300B]/);
+                    const rootGoal = bookMatch
+                      ? bookMatch[1].replace(/[\\/:*?"<>|\n\r]/g, "_")
+                      : (rootTaskStr.substring(0, 30).replace(/[\\/:*?"<>|\n\r]/g, "_") || "output");
                     const copyName = `${rootGoal}_完整版.txt`;
                     userCopyPath = path.join(taskOutputDir, copyName);
                     await fs.copyFile(roundResult.mergedFilePath, userCopyPath);

@@ -434,10 +434,28 @@ export class FileManager {
       // 🔧 P13 修复：按 roundId 过滤，只合并指定轮次的子任务
       if (roundId && subTask.rootTaskId !== roundId) continue;
       
-      // 🔧 P1 修复：跳过操作型/汇总型任务（它们不产生实际内容）
+      // 🔧 P1+P36 修复：跳过操作型/汇总型任务
+      // 但 V4 分段合并后的父任务（waitForChildren + 有 producedFilePaths）不跳过——
+      // 它持有合并后的章节文件，是最终合并的正确数据源。
       if (subTask.waitForChildren || subTask.metadata?.isSummaryTask || subTask.metadata?.isRootTask) {
-        console.log(`[FileManager] ⏭️ 跳过汇总/操作型任务: ${subTask.id} (${subTask.summary})`);
-        continue;
+        const hasProducedFiles = subTask.metadata?.producedFilePaths && subTask.metadata.producedFilePaths.length > 0;
+        if (!hasProducedFiles) {
+          console.log(`[FileManager] ⏭️ 跳过汇总/操作型任务: ${subTask.id} (${subTask.summary})`);
+          continue;
+        }
+        // 有 producedFilePaths 的父任务不跳过，走正常的策略1/2/3
+        console.log(`[FileManager] 📖 P36: 保留已合并的父任务: ${subTask.id} (${subTask.summary}) — ${subTask.metadata!.producedFilePaths!.length} 个文件`);
+      }
+
+      // 🔧 P36 修复：跳过分段子任务（isSegment），如果父任务已完成合并
+      // 原因：mergeSegmentsIfComplete 已将分段内容合并到父任务的章节文件中，
+      // 如果同时合并分段子任务的碎片文件和父任务的章节文件，会导致内容重复。
+      if (subTask.metadata?.isSegment && subTask.metadata.segmentOf) {
+        const parentTask = taskTree.subTasks.find(t => t.id === subTask.metadata!.segmentOf);
+        if (parentTask?.status === "completed" && parentTask.metadata?.producedFilePaths?.length) {
+          console.log(`[FileManager] ⏭️ P36: 跳过已合并的分段子任务: ${subTask.id} (${subTask.summary})`);
+          continue;
+        }
       }
 
       // 🔧 问题 W 修复：跳过被 decompose 标记为 completed 的原始子任务
@@ -538,19 +556,23 @@ export class FileManager {
     // 正确顺序应该是：第一章 → 续写第一章第2部分 → 续写第一章第3部分 → 第二章 → ...
     // 排序策略：按 taskId 排序（续写子任务 ID 格式为 "{原始ID}-cont-{N}"，自然排序会紧跟原始任务）
     allFiles.sort((a, b) => {
-      // 提取基础 ID（去掉 -cont-N 后缀）和续写序号
+      // 🔧 P39 修复：同时识别 -cont-N 和 -seg-N 后缀
       const parseId = (id: string) => {
         const contMatch = id.match(/^(.+)-cont-(\d+)$/);
         if (contMatch) {
-          return { baseId: contMatch[1], contNum: parseInt(contMatch[2], 10) };
+          return { baseId: contMatch[1], seqNum: parseInt(contMatch[2], 10) };
         }
-        return { baseId: id, contNum: 0 }; // 原始任务序号为 0
+        const segMatch = id.match(/^(.+)-seg-(\d+)$/);
+        if (segMatch) {
+          return { baseId: segMatch[1], seqNum: parseInt(segMatch[2], 10) };
+        }
+        return { baseId: id, seqNum: 0 };
       };
       const aInfo = parseId(a.taskId);
       const bInfo = parseId(b.taskId);
-      // 同一个基础任务的文件按续写序号排序
+      // 同一个基础任务的文件按序号排序
       if (aInfo.baseId === bInfo.baseId) {
-        return aInfo.contNum - bInfo.contNum;
+        return aInfo.seqNum - bInfo.seqNum;
       }
       // 不同基础任务按原始数组顺序（通过在 taskTree.subTasks 中的位置）
       const aIdx = taskTree.subTasks.findIndex(t => t.id === a.taskId || t.id === aInfo.baseId);
@@ -583,7 +605,7 @@ export class FileManager {
     
     for (let i = 0; i < mergeFiles.length; i++) {
       const file = mergeFiles[i];
-      const isContinuation = file.taskId.includes("-cont-");
+      const isContinuation = file.taskId.includes("-cont-") || file.taskId.includes("-seg-");
       const prevFile = i > 0 ? mergeFiles[i - 1] : null;
       const isPrevSameBase = prevFile && (() => {
         const baseA = file.taskId.replace(/-cont-\d+$/, "");
