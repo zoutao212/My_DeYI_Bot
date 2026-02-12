@@ -31,6 +31,12 @@ export interface DeliveryReport {
     durationMs: number;
     successRate: string;
   };
+  /** 🆕 P65: 合并质量摘要 */
+  mergeQuality?: {
+    totalChapters: number;
+    totalChars: number;
+    qualityCounts: { excellent: number; good: number; degraded: number; failed: number };
+  };
 }
 
 /**
@@ -48,6 +54,9 @@ export class DeliveryReporter {
     const failed = taskTree.subTasks.filter((t) => t.status === "failed");
     const total = taskTree.subTasks.length;
     const durationMs = taskTree.updatedAt - taskTree.createdAt;
+
+    // 🆕 P65: 收集合并质量指标
+    const mergeQuality = this.collectMergeQuality(taskTree);
 
     return {
       summary: this.buildSummary(taskTree, completed.length, failed.length),
@@ -69,6 +78,7 @@ export class DeliveryReporter {
         durationMs,
         successRate: total > 0 ? `${Math.round((completed.length / total) * 100)}%` : "0%",
       },
+      mergeQuality,
     };
   }
 
@@ -120,6 +130,23 @@ export class DeliveryReporter {
       parts.push("");
     }
 
+    // 🆕 P65: 合并质量摘要
+    if (report.mergeQuality && report.mergeQuality.totalChapters > 0) {
+      const mq = report.mergeQuality;
+      parts.push("## 📝 合并质量");
+      parts.push(`- **章节数**: ${mq.totalChapters}`);
+      parts.push(`- **总字数**: ${mq.totalChars.toLocaleString()}`);
+      const qLabels = [];
+      if (mq.qualityCounts.excellent > 0) qLabels.push(`✅ 优秀 ${mq.qualityCounts.excellent}`);
+      if (mq.qualityCounts.good > 0) qLabels.push(`🟡 良好 ${mq.qualityCounts.good}`);
+      if (mq.qualityCounts.degraded > 0) qLabels.push(`⚠️ 偏低 ${mq.qualityCounts.degraded}`);
+      if (mq.qualityCounts.failed > 0) qLabels.push(`❌ 不足 ${mq.qualityCounts.failed}`);
+      if (qLabels.length > 0) {
+        parts.push(`- **质量分布**: ${qLabels.join(" | ")}`);
+      }
+      parts.push("");
+    }
+
     // 失败与教训
     if (report.failuresAndLessons.length > 0) {
       parts.push("## ❌ 失败与教训");
@@ -164,6 +191,30 @@ export class DeliveryReporter {
       return `重试 ${task.retryCount} 次后仍然失败，可能需要调整策略`;
     }
     return undefined;
+  }
+
+  /**
+   * 🆕 P65: 收集合并质量指标（从含 mergeQuality 的父任务中提取）
+   */
+  private collectMergeQuality(taskTree: TaskTree): DeliveryReport["mergeQuality"] {
+    const chaptersWithQuality = taskTree.subTasks.filter(
+      (t) => t.metadata?.mergeQuality && t.metadata?.mergeChars != null,
+    );
+    if (chaptersWithQuality.length === 0) return undefined;
+
+    const qualityCounts = { excellent: 0, good: 0, degraded: 0, failed: 0 };
+    let totalChars = 0;
+    for (const ch of chaptersWithQuality) {
+      const q = ch.metadata!.mergeQuality as keyof typeof qualityCounts;
+      if (q in qualityCounts) qualityCounts[q]++;
+      totalChars += ch.metadata!.mergeChars ?? 0;
+    }
+
+    return {
+      totalChapters: chaptersWithQuality.length,
+      totalChars,
+      qualityCounts,
+    };
   }
 
   private formatDuration(ms: number): string {

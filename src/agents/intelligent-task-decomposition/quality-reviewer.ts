@@ -128,7 +128,12 @@ export class QualityReviewer {
       return result;
     } catch (error) {
       console.error(`${prompts.qualityReviewer.errors.reviewFailed}:`, error);
-      // 返回默认的通过结果
+      // 🆕 三级降级链：Full LLM → Lightweight LLM → Auto-pass
+      const lightResult = await this.lightweightDecompositionReview(taskTree, subTaskId);
+      if (lightResult) {
+        console.log(`[QualityReviewer] ✅ 分解质检降级到轻量级 LLM 成功: decision=${lightResult.decision}`);
+        return lightResult;
+      }
       return {
         status: "passed",
         decision: "continue",
@@ -231,14 +236,25 @@ export class QualityReviewer {
       
       return result;
     } catch (error) {
-      // 🔧 P44: LLM 降级时走规则驱动验证，而非盲目通过
-      if (error instanceof LLMDegradedError) {
-        console.log(`[QualityReviewer] 🔧 P44: LLM 降级，走规则驱动验证 — ${subTaskId}`);
-        const subTask = this.findSubTask(taskTree, subTaskId);
-        if (subTask) {
-          return this.ruleBasedCompletionReview(subTask, fileContent);
+      // 🆕 三级降级链：Full LLM → Lightweight LLM → Rule-based → Auto-pass
+      const subTask = this.findSubTask(taskTree, subTaskId);
+
+      // 第二级：轻量级 LLM 质检（短 prompt 更不容易超时/限流/格式错误）
+      if (subTask) {
+        const lightResult = await this.lightweightLLMReview(subTask, fileContent, rootTaskOverride);
+        if (lightResult) {
+          console.log(`[QualityReviewer] ✅ 子任务质检降级到轻量级 LLM 成功: decision=${lightResult.decision}`);
+          return lightResult;
         }
       }
+
+      // 第三级：规则驱动验证（LLM 完全不可用时的兜底）
+      if (error instanceof LLMDegradedError && subTask) {
+        console.log(`[QualityReviewer] 🔧 LLM 完全不可用，降级到规则验证 — ${subTaskId}`);
+        return this.ruleBasedCompletionReview(subTask, fileContent);
+      }
+
+      // 最后一级：自动通过
       console.error(`${prompts.qualityReviewer.errors.completionReviewFailed}:`, error);
       return {
         status: "passed",
@@ -251,13 +267,211 @@ export class QualityReviewer {
   }
 
   /**
-   * 🔧 P44: 规则驱动的子任务完成验证（LLM 不可用时的降级方案）
+   * 🆕 轻量级 LLM 质检 — 子任务完成质量（三级降级链的第二级）
    * 
-   * 刻板问题：LLM 不可用时一律返回 "passed"，低质量内容直接通过。
-   * 修复：用已有的规则检查能力做基本验证：
-   * - 字数检查：写作类任务字数 < 70% 要求时 restart
-   * - 内容存在性：有字数要求但无实际内容时 restart
-   * - 其他类型：无文件产出时降级为 warning
+   * 设计思路：不为每种 taskType 写死硬编码规则，而是用极短的 prompt（~2KB）
+   * 调用同一个 LLM 做快速质检。短 prompt 更不容易超时/被限流/产出格式错误。
+   * 
+   * 降级链：Full LLM Review → Lightweight LLM Review → Rule-based Review → Auto-pass
+   */
+  async lightweightLLMReview(
+    subTask: SubTask,
+    fileContent?: string,
+    rootTaskOverride?: string,
+  ): Promise<QualityReviewResult | null> {
+    if (!this.externalLLMCaller) return null;
+
+    try {
+      const taskType = subTask.taskType ?? "generic";
+      const taskDesc = (subTask.prompt ?? "").substring(0, 400);
+
+      // 取输出摘要（优先文件内容，截断到 1500 字符）
+      const rawContent = fileContent ?? subTask.output ?? "";
+      let contentSnippet: string;
+      if (rawContent.length <= 1500) {
+        contentSnippet = rawContent;
+      } else {
+        contentSnippet = rawContent.substring(0, 1000) + "\n...[省略]...\n" + rawContent.substring(rawContent.length - 400);
+      }
+
+      const focusHint = this.getLightweightReviewFocus(taskType);
+
+      const prompt = `你是任务质检员。请快速评估以下子任务的完成质量。
+
+【任务类型】${taskType}
+【任务描述】${taskDesc}${rootTaskOverride ? `\n【总目标】${rootTaskOverride.substring(0, 200)}` : ""}
+【实际产出（${rawContent.length} 字符）】
+${contentSnippet}
+${focusHint}
+
+请用 JSON 回答（仅此格式，无其他文字）：
+\`\`\`json
+{"decision":"continue或restart","findings":["一句话发现"],"failureType":"可选的失败类型"}
+\`\`\`
+
+decision 说明：产出基本合格→continue，明显不合格（跑题/严重缺失/格式完全错误）→restart。只有明显缺陷才 restart。`;
+
+      console.log(`[QualityReviewer] 🔄 尝试轻量级 LLM 质检，prompt 长度: ${prompt.length}`);
+      const response = await this.externalLLMCaller.call(prompt);
+      const result = this.parseReviewResponse(response);
+      console.log(`[QualityReviewer] ✅ 轻量级 LLM 质检完成: decision=${result.decision}`);
+      return result;
+    } catch (err) {
+      console.warn(`[QualityReviewer] ⚠️ 轻量级 LLM 质检也失败，继续降级到规则验证:`, err);
+      return null;
+    }
+  }
+
+  /**
+   * 🆕 轻量级 LLM 质检 — 任务分解质量
+   * 
+   * 用极短 prompt 评估分解方案是否合理，替代 reviewDecomposition 失败时的盲目通过。
+   */
+  async lightweightDecompositionReview(
+    taskTree: TaskTree,
+    subTaskId: string | null,
+  ): Promise<QualityReviewResult | null> {
+    if (!this.externalLLMCaller) return null;
+
+    try {
+      const subTasksSummary = taskTree.subTasks
+        .slice(0, 15)
+        .map(st => `- ${st.summary ?? st.id} (${st.status})`)
+        .join("\n");
+
+      const prompt = `你是任务分解质检员。请快速评估以下任务分解方案是否合理。
+
+【根任务】${(taskTree.rootTask ?? "").substring(0, 300)}
+【子任务列表】
+${subTasksSummary}
+
+审查重点：子任务是否覆盖目标？有无遗漏或冗余？粒度是否合适？
+
+请用 JSON 回答（仅此格式）：
+\`\`\`json
+{"decision":"continue或adjust","findings":["一句话发现"],"suggestions":["可选建议"]}
+\`\`\`
+
+分解基本合理→continue，有明显遗漏或严重冗余→adjust。`;
+
+      console.log(`[QualityReviewer] 🔄 尝试轻量级分解质检，prompt 长度: ${prompt.length}`);
+      const response = await this.externalLLMCaller.call(prompt);
+      const result = this.parseReviewResponse(response);
+      console.log(`[QualityReviewer] ✅ 轻量级分解质检完成: decision=${result.decision}`);
+      return result;
+    } catch (err) {
+      console.warn(`[QualityReviewer] ⚠️ 轻量级分解质检也失败，降级通过:`, err);
+      return null;
+    }
+  }
+
+  /**
+   * 🆕 轻量级 LLM 质检 — 整体完成评估
+   * 
+   * 用极短 prompt 评估所有子任务完成后的整体质量。
+   */
+  async lightweightOverallReview(
+    taskTree: TaskTree,
+    rootTaskOverride?: string,
+  ): Promise<QualityReviewResult | null> {
+    if (!this.externalLLMCaller) return null;
+
+    try {
+      const effectiveRootTask = rootTaskOverride || taskTree.rootTask;
+      const completedSummary = taskTree.subTasks
+        .filter(st => st.status === "completed")
+        .slice(0, 15)
+        .map(st => `- ${st.summary ?? st.id}: ${(st.output ?? "").substring(0, 80)}`)
+        .join("\n");
+      const failedCount = taskTree.subTasks.filter(st => st.status === "failed").length;
+
+      const prompt = `你是任务质检员。请快速评估以下任务的整体完成情况。
+
+【总目标】${(effectiveRootTask ?? "").substring(0, 300)}
+【已完成子任务】
+${completedSummary}
+${failedCount > 0 ? `【失败子任务数】${failedCount}` : ""}
+
+审查重点：是否满足用户需求？有无关键遗漏？
+
+请用 JSON 回答（仅此格式）：
+\`\`\`json
+{"decision":"continue或restart","findings":["一句话发现"],"suggestions":["可选建议"]}
+\`\`\`
+
+整体基本达标→continue，有重大缺陷→restart。`;
+
+      console.log(`[QualityReviewer] 🔄 尝试轻量级整体质检，prompt 长度: ${prompt.length}`);
+      const response = await this.externalLLMCaller.call(prompt);
+      const result = this.parseReviewResponse(response);
+      console.log(`[QualityReviewer] ✅ 轻量级整体质检完成: decision=${result.decision}`);
+      return result;
+    } catch (err) {
+      console.warn(`[QualityReviewer] ⚠️ 轻量级整体质检也失败，降级通过:`, err);
+      return null;
+    }
+  }
+
+  /**
+   * 🆕 轻量级 LLM 失败分析
+   * 
+   * 用极短 prompt 分析任务失败原因，替代 analyzeFailure 失败时的盲目默认值。
+   */
+  async lightweightFailureAnalysis(
+    subTask: SubTask,
+    error: string,
+  ): Promise<FailureAnalysisResult | null> {
+    if (!this.externalLLMCaller) return null;
+
+    try {
+      const prompt = `你是任务失败分析员。请快速分析以下任务失败的原因。
+
+【任务描述】${(subTask.prompt ?? "").substring(0, 300)}
+【错误信息】${error.substring(0, 500)}
+【任务产出】${(subTask.output ?? "").substring(0, 300)}
+
+请用 JSON 回答（仅此格式）：
+\`\`\`json
+{"reason":"根本原因","context":"上下文","lessons":["教训"],"improvements":["改进"],"decision":"adjust或restart"}
+\`\`\``;
+
+      console.log(`[QualityReviewer] 🔄 尝试轻量级失败分析，prompt 长度: ${prompt.length}`);
+      const response = await this.externalLLMCaller.call(prompt);
+      const result = this.parseFailureAnalysisResponse(response);
+      console.log(`[QualityReviewer] ✅ 轻量级失败分析完成: decision=${result.decision}`);
+      return result;
+    } catch (err) {
+      console.warn(`[QualityReviewer] ⚠️ 轻量级失败分析也失败，使用默认值:`, err);
+      return null;
+    }
+  }
+
+  /**
+   * 🆕 根据任务类型生成轻量级质检的审查重点（一行式）
+   * 
+   * 与 buildTaskTypeReviewHint 不同，这里只给 1-2 行精简提示，
+   * 用于轻量级 prompt 场景，最大限度减少 token 消耗。
+   */
+  private getLightweightReviewFocus(taskType: string): string {
+    switch (taskType) {
+      case "writing": return "\n【审查重点】字数是否达标、内容是否连贯、是否跑题";
+      case "coding": return "\n【审查重点】代码逻辑是否正确、是否覆盖需求、有无明显 bug";
+      case "analysis": return "\n【审查重点】分析是否有深度、结论是否有依据、结构是否清晰";
+      case "research": return "\n【审查重点】调研是否全面、有无遗漏关键维度";
+      case "data": return "\n【审查重点】数据处理是否正确、格式是否符合要求";
+      case "design": return "\n【审查重点】方案是否可行、是否覆盖需求、接口是否完整";
+      case "automation": return "\n【审查重点】操作是否实际执行、步骤是否完整、结果是否符合预期";
+      case "planning": return "\n【审查重点】计划是否完整覆盖目标、步骤是否可执行";
+      case "review": return "\n【审查重点】修改是否全面、是否引入新问题";
+      default: return "\n【审查重点】是否完成了任务要求、输出质量是否合格";
+    }
+  }
+
+  /**
+   * 🔧 P44: 规则驱动的子任务完成验证（LLM 完全不可用时的最后兜底）
+   * 
+   * 降级链的第三级：Full LLM → Lightweight LLM → Rule-based → Auto-pass
+   * 只在 LLM 完全不可用时才走到这里。
    */
   ruleBasedCompletionReview(
     subTask: SubTask,
@@ -373,6 +587,12 @@ export class QualityReviewer {
       return result;
     } catch (error) {
       console.error(`${prompts.qualityReviewer.errors.overallReviewFailed}:`, error);
+      // 🆕 三级降级链：Full LLM → Lightweight LLM → Auto-pass
+      const lightResult = await this.lightweightOverallReview(taskTree, rootTaskOverride);
+      if (lightResult) {
+        console.log(`[QualityReviewer] ✅ 整体质检降级到轻量级 LLM 成功: decision=${lightResult.decision}`);
+        return lightResult;
+      }
       return {
         status: "passed",
         decision: "continue",
@@ -436,6 +656,16 @@ export class QualityReviewer {
       return result;
     } catch (error) {
       console.error(`${prompts.qualityReviewer.errors.failureAnalysisFailed}:`, error);
+      // 🆕 三级降级链：Full LLM → Lightweight LLM → Default
+      const subTask = this.findSubTask(taskTree, subTaskId);
+      if (subTask) {
+        const errStr = error instanceof Error ? error.message : String(error);
+        const lightResult = await this.lightweightFailureAnalysis(subTask, errStr);
+        if (lightResult) {
+          console.log(`[QualityReviewer] ✅ 失败分析降级到轻量级 LLM 成功: decision=${lightResult.decision}`);
+          return lightResult;
+        }
+      }
       return {
         reason: "Unknown error",
         context: "",

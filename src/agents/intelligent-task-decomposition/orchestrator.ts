@@ -15,11 +15,12 @@ import { RecoveryManager } from "./recovery-manager.js";
 import { LLMTaskDecomposer } from "./llm-task-decomposer.js";
 import { QualityReviewer } from "./quality-reviewer.js";
 import { TaskAdjuster } from "./task-adjuster.js";
-import { FileManager } from "./file-manager.js";
+import { FileManager, detectConfirmationMessage, type MergeQualityMetrics } from "./file-manager.js";
 import { OutputFormatter } from "./output-formatter.js";
 import { TaskGrouper, type GroupingOptions } from "./task-grouper.js";
 import { BatchExecutor, type LLMCaller } from "./batch-executor.js";
 import { DeliveryReporter, type DeliveryReport } from "./delivery-reporter.js";
+import { checkCoherence, formatCoherenceReport } from "./coherence-checker.js";
 import { ComplexityScorer } from "./complexity-scorer.js";
 import { beginTracking, collectTrackedFiles, clearTracking } from "./file-tracker.js";
 import { findParallelGroups } from "./dependency-analyzer.js";
@@ -53,6 +54,8 @@ export class Orchestrator {
 
   // 🆕 A2: 系统配置引用（用于读取 taskDecomposition 默认值）
   private config: ClawdbotConfig | undefined;
+  // 🔧 S4: 已通过完整性校验的轮次 ID（避免每次 drain 调用都重复校验）
+  private validatedRounds = new Set<string>();
 
   constructor(
     groupingOptions?: GroupingOptions,
@@ -853,6 +856,16 @@ export class Orchestrator {
               await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
               subTask.retryCount = currentRetry + 1;
               result.needsRequeue = true;
+              // V8 P3: 记录质检 restart 经验
+              import("./experience-pool.js").then(ep =>
+                ep.recordExperience({
+                  category: "quality",
+                  pattern: "quality_review_restart",
+                  lesson: `质检 restart: ${(review.findings ?? []).join("; ").substring(0, 200)}`,
+                  suggestion: "检查子任务 prompt 是否缺少关键约束（字数/格式/风格）",
+                  taskType: subTask.taskType,
+                }),
+              ).catch(() => {});
             }
             break;
           }
@@ -871,6 +884,16 @@ export class Orchestrator {
               subTask.error = `质量评估 overthrow → 降级 restart (${overthrowCount}/2)：${review.findings.join("; ")}`;
               result.decision = "restart";
               result.needsRequeue = true;
+              // V8 P3: 记录 overthrow 经验（严重质量问题）
+              import("./experience-pool.js").then(ep =>
+                ep.recordExperience({
+                  category: "quality",
+                  pattern: "quality_review_overthrow",
+                  lesson: `质检 overthrow(第${overthrowCount}次): ${review.findings.join("; ").substring(0, 200)}`,
+                  suggestion: "增强 prompt 约束或切换更强的模型",
+                  taskType: subTask.taskType,
+                }),
+              ).catch(() => {});
             } else {
               console.log(`[Orchestrator] ❌ 质量连续 ${overthrowCount} 次严重不满意，标记失败`);
               await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
@@ -904,25 +927,30 @@ export class Orchestrator {
           result.needsRequeue = true;
           result.findings = [`P57: 质检临时性异常，重试 (${subTask.retryCount}/${this.getDefaultMaxRetries()})`];
         } else if (isLLMDegraded) {
-          // LLM 降级（JSON 解析失败等）→ 降级到规则验证
-          console.warn(`[Orchestrator] ⚠️ P57: 质检 LLM 降级（${errMsg.substring(0, 80)}），转规则验证`);
+          // 🆕 三级降级链：Full LLM → Lightweight LLM → Rule-based → Auto-pass
+          console.warn(`[Orchestrator] ⚠️ P57: 质检 LLM 降级（${errMsg.substring(0, 80)}），尝试轻量级 LLM`);
           try {
-            const ruleReview = this.qualityReviewer.ruleBasedCompletionReview(subTask);
-            if (ruleReview && ruleReview.decision !== "continue") {
-              result.decision = ruleReview.decision;
-              result.findings = [`P57: LLM降级→规则验证: ${ruleReview.findings?.join("; ") ?? ""}`];
-              if (ruleReview.decision === "restart") {
+            // 第二级：轻量级 LLM 质检（短 prompt 更不容易超时/限流/格式错误）
+            const lightReview = await this.qualityReviewer.lightweightLLMReview(subTask);
+            const effectiveReview = lightReview
+              ?? this.qualityReviewer.ruleBasedCompletionReview(subTask);
+            const reviewSource = lightReview ? "轻量级LLM" : "规则验证";
+
+            if (effectiveReview && effectiveReview.decision !== "continue") {
+              result.decision = effectiveReview.decision;
+              result.findings = [`P57: LLM降级→${reviewSource}: ${effectiveReview.findings?.join("; ") ?? ""}`];
+              if (effectiveReview.decision === "restart") {
                 if (!subTask.metadata) subTask.metadata = {};
-                subTask.metadata.lastFailureFindings = ruleReview.findings ?? [];
+                subTask.metadata.lastFailureFindings = effectiveReview.findings ?? [];
                 await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
                 subTask.retryCount = (subTask.retryCount ?? 0) + 1;
                 result.needsRequeue = true;
               }
             } else {
-              console.log(`[Orchestrator] ✅ P57: 规则验证通过（LLM降级回退）`);
+              console.log(`[Orchestrator] ✅ P57: ${reviewSource}通过（LLM降级回退）`);
             }
           } catch (ruleErr) {
-            console.warn(`[Orchestrator] ⚠️ P57: 规则验证也失败，降级通过: ${ruleErr}`);
+            console.warn(`[Orchestrator] ⚠️ P57: 轻量级LLM+规则验证都失败，降级通过: ${ruleErr}`);
           }
         } else if (isConfigError) {
           // 配置错误 → 标记失败，不继续浪费资源
@@ -1699,7 +1727,10 @@ export class Orchestrator {
    * 🆕 A2: 从系统配置中读取默认最大重试次数
    */
   getDefaultMaxRetries(): number {
-    return this.config?.agents?.defaults?.taskDecomposition?.maxRetries ?? 3;
+    // 🔧 GAP-5: 默认从 3 提升到 4。retryCount 被多个不同错误源共享
+    // （字数检查/V6验证/LLM质检/P57临时错误/onTaskFailed），
+    // 3 次预算在遇到多种不同类型问题时过于紧张。
+    return this.config?.agents?.defaults?.taskDecomposition?.maxRetries ?? 4;
   }
 
   /**
@@ -1815,10 +1846,11 @@ export class Orchestrator {
         }
         // 其他类型保持基线 5 分钟
 
-        // 🔧 P10 修复：使用任务自身的 createdAt（而非 taskTree.updatedAt 全局时间）
-        // 根因：并行执行时 taskTree.updatedAt 被频繁更新，所有 active 任务共享同一时间，
-        // 导致要么所有 active 任务同时被判为僵尸，要么全部不触发。
-        const activeStart = t.createdAt ?? 0;
+        // 🔧 P10+GAP-1 修复：使用 lastActiveAt（进入 active 的时间）替代 createdAt
+        // P10 根因：并行执行时 taskTree.updatedAt 被频繁更新，所有 active 任务共享同一时间。
+        // GAP-1 根因：createdAt 在重试时不更新，重试任务的 now-createdAt 远大于实际 active 时间，
+        // 导致刚开始重试的任务就被僵尸检测误杀。lastActiveAt 在每次 onTaskStarting 中更新。
+        const activeStart = t.lastActiveAt ?? t.createdAt ?? 0;
         if (now - activeStart > zombieThresholdMs) {
           console.warn(
             `[Orchestrator] 🧟 检测到僵尸 active 任务: ${t.id} (active 超过 ${Math.round((now - activeStart) / 60000)} 分钟, 阈值=${Math.round(zombieThresholdMs / 60000)}分钟)`,
@@ -2091,6 +2123,19 @@ export class Orchestrator {
       }
     }
 
+    // V8 P3: 分解前查询经验池，注入历史教训到 metadata（供 buildDecompositionPrompt 读取）
+    try {
+      const { generateExperienceSummary } = await import("./experience-pool.js");
+      const expSummary = await generateExperienceSummary(subTask.taskType, 5);
+      if (expSummary) {
+        if (!taskTree.metadata) taskTree.metadata = { totalTasks: 0, completedTasks: 0, failedTasks: 0 };
+        taskTree.metadata.experienceSummary = expSummary;
+        console.log(`[Orchestrator] 🧠 V8 P3: 注入经验摘要到分解上下文 (${expSummary.length} chars)`);
+      }
+    } catch {
+      // 经验池查询失败不阻塞分解流程
+    }
+
     // 3. 调用 LLM 进行分解
     const decomposedTasks = await this.llmDecomposer.decomposeRecursively(
       taskTree,
@@ -2307,22 +2352,37 @@ export class Orchestrator {
     hasOutline: boolean,
     isTranslation: boolean,
   ): number {
-    let target = Orchestrator.SEGMENT_TARGET_CHARS; // 基线 1200
+    // V8 P1: 优先从 TaskTemplate 获取该类型的分段基线参数
+    let target = Orchestrator.SEGMENT_TARGET_CHARS; // 硬编码兜底 1200
+    let templateHasValue = false;
+    try {
+      // 注意：此方法为同步，不能用 await import()；require 在 Bun/CJS 编译下可用
+      const { getTaskTemplate } = require("./task-template.js") as typeof import("./task-template.js");
+      const tmpl = getTaskTemplate(taskType);
+      if (tmpl.decomposition?.segmentTargetChars) {
+        target = tmpl.decomposition.segmentTargetChars;
+        templateHasValue = true;
+      }
+    } catch {
+      // task-template 加载失败时使用硬编码兜底
+    }
 
-    // 翻译类：每段独立，不需要前后衔接，可以更大段
-    if (isTranslation) {
-      target = 2500;
+    // 仅在模板未提供 segmentTargetChars 时，走老的类型推断回退链
+    if (!templateHasValue) {
+      // 翻译类：每段独立，不需要前后衔接，可以更大段
+      if (isTranslation) {
+        target = 2500;
+      }
+      // 分析/研究/数据类：段间独立性高
+      else if (["analysis", "research", "data", "review"].includes(taskType)) {
+        target = 2000;
+      }
+      // 写作类：有详细大纲时可以更大段（LLM 有明确指引）
+      else if (hasOutline) {
+        target = 1800;
+      }
+      // 其他：保持硬编码基线 1200
     }
-    // 分析/研究/数据类：段间独立性高
-    else if (["analysis", "research", "data", "review"].includes(taskType)) {
-      target = 2000;
-    }
-    // 写作类：有详细大纲时可以更大段（LLM 有明确指引）
-    else if (hasOutline) {
-      target = 1800;
-    }
-    // 其他写作类：保持保守分段
-    // target 保持 1200
 
     // 约束在 [MIN, MAX] 范围内
     return Math.max(Orchestrator.SEGMENT_MIN_CHARS, Math.min(target, Orchestrator.SEGMENT_MAX_CHARS));
@@ -2768,10 +2828,14 @@ export class Orchestrator {
       /文件\s*[`"'\u201C\u300C]+([^\s`"'\u201D\u300D\u3002\uFF0C\/\\]+\.(?:txt|md))/,
       // 次精确：`文件名:` / `文件：` 后的文件名（无需引号）
       /文件[名：:]\s*([^\s`"'\u201C\u201D\u300C\u300D\u3002\uFF0C\/\\]+\.(?:txt|md))/,
+      // 🔧 P69: 路径中提取文件名（如 `写入 C:\Users\xxx\九天星辰录_第01章.txt`）
+      // 无引号时前两个 pattern 匹配不到，这里从完整路径中提取最后的文件名
+      /(?:写入|保存|输出)[^\n]*?[\\\/]([^\s\\\/`"'\u201C\u201D]+\.(?:txt|md))/,
       // 兜底：任何引号包裹的 .txt/.md 文件名
       /[`"'\u201C\u300C]([^\s`"'\u201C\u201D\u300C\u300D\u3002\uFF0C\/\\]+\.(?:txt|md))[`"'\u201D\u300D]*/,
     ];
-    let chapterFileName = `${subTask.summary}.txt`; // 默认值
+    // 🔧 P69: 默认值从 summary 生成时，清洗 Windows 非法文件名字符（:*?"<>| 和中文冒号：）
+    let chapterFileName = `${(subTask.summary ?? "output").replace(/[：:*?"<>|]/g, "_")}.txt`; // 默认值
     for (const pattern of fileNamePatterns) {
       const m = subTask.prompt.match(pattern);
       if (m?.[1]) {
@@ -2955,6 +3019,16 @@ export class Orchestrator {
           // 🔧 P51+P53: 透传章节大纲（优先 V7 纲要）+ 章节编号
           chapterOutline: effectiveChapterOutline || subTask.metadata?.chapterOutline,
           chapterNumber: chapterNumber || undefined,
+          // 🔧 S1: 生成 OutputContract（结构化产出契约）
+          outputContract: {
+            expectedFileName: segmentFileName,
+            expectedLanguage: "zh",
+            minChars: Math.floor(charsPerSegment * 0.4),
+            maxChars: charsPerSegment * 2,
+            projectName: segFilePrefix,
+            chapterNumber: chapterNumber || undefined,
+            parentChapterFileName: chapterFileName,
+          },
         },
       };
 
@@ -3032,14 +3106,39 @@ export class Orchestrator {
       (a, b) => (a.metadata?.segmentIndex ?? 0) - (b.metadata?.segmentIndex ?? 0),
     );
 
-    // 读取每个分段的文件内容
+    // 🆕 P62+P64: 读取每个分段的文件内容（含质量验证门 + 指标跟踪）
     const fsModule = await import("node:fs/promises");
     const mergedParts: string[] = [];
+    const metrics: MergeQualityMetrics = {
+      totalSegments: sortedSegments.length,
+      successfulReads: 0,
+      fallbackHits: { producedFilePaths: 0, fallbackFilePath: 0, segmentFileName: 0, outputPathExtract: 0, outputFallback: 0 },
+      confirmationIntercepted: 0,
+      mergedChars: 0,
+      expectedMinChars: sortedSegments.reduce((sum, s) => sum + (s.metadata?.segmentTargetChars ?? 800), 0) * 0.3,
+      quality: "excellent",
+    };
+
+    // 🆕 P62: 辅助函数 — 尝试读取内容，如果是确认消息则拒绝并继续下一层
+    const tryAcceptContent = (content: string, source: string, segId: string): boolean => {
+      if (!content || content.trim().length === 0) return false;
+      const detection = detectConfirmationMessage(content);
+      if (detection.isConfirmation && detection.confidence !== "low") {
+        metrics.confirmationIntercepted++;
+        console.warn(
+          `[Orchestrator] 🛡️ P62: 分段 ${segId} 第 ${source} 层内容被拦截 — ` +
+          `${detection.reason} — 继续尝试下一层回退`,
+        );
+        return false;
+      }
+      return true;
+    };
 
     for (const seg of sortedSegments) {
       let segContent = "";
+      let hitLayer = "";
 
-      // 优先读取 producedFilePaths
+      // 层1: 优先读取 producedFilePaths
       const filePaths = seg.metadata?.producedFilePaths ?? [];
       for (const rawPath of filePaths) {
         try {
@@ -3048,45 +3147,134 @@ export class Orchestrator {
             filePath = path.join(os.homedir(), "clawd", filePath);
           }
           const content = await fsModule.readFile(filePath, "utf-8");
-          segContent += content;
+          if (tryAcceptContent(content, "producedFilePaths", seg.id)) {
+            segContent = content;
+            hitLayer = "producedFilePaths";
+          }
         } catch {
           // 文件读取失败
         }
       }
 
-      // 回退到 fallbackFilePath
+      // 层2: 回退到 fallbackFilePath
       if (!segContent && seg.metadata?.fallbackFilePath) {
         try {
-          segContent = await fsModule.readFile(seg.metadata.fallbackFilePath, "utf-8");
+          const content = await fsModule.readFile(seg.metadata.fallbackFilePath, "utf-8");
+          if (tryAcceptContent(content, "fallbackFilePath", seg.id)) {
+            segContent = content;
+            hitLayer = "fallbackFilePath";
+          }
         } catch {
           // 兜底文件读取失败
         }
       }
 
-      // 最后回退到 output
+      // 层3: P61a 回退 — segmentFileName 从 workspace 目录读取
+      if (!segContent && seg.metadata?.segmentFileName) {
+        const rootTaskId = seg.rootTaskId ?? taskTree.id;
+        const candidatePaths = [
+          path.join(os.homedir(), "clawd", "workspace", rootTaskId, seg.metadata.segmentFileName),
+          path.join(os.homedir(), "clawd", "workspace", taskTree.id, seg.metadata.segmentFileName),
+        ];
+        for (const candidatePath of candidatePaths) {
+          try {
+            const content = await fsModule.readFile(candidatePath, "utf-8");
+            if (content && content.length > 0 && tryAcceptContent(content, "segmentFileName", seg.id)) {
+              segContent = content;
+              hitLayer = "segmentFileName";
+              console.log(
+                `[Orchestrator] 🔧 P61a: segmentFileName 回退成功 — ${seg.metadata.segmentFileName} (${content.length} 字) ← ${candidatePath}`,
+              );
+              if (!seg.metadata.producedFilePaths || seg.metadata.producedFilePaths.length === 0) {
+                seg.metadata.producedFilePaths = [candidatePath];
+                seg.metadata.producedFiles = [seg.metadata.segmentFileName];
+              }
+              break;
+            }
+          } catch {
+            // 候选路径不存在
+          }
+        }
+      }
+
+      // 层4: P61a 回退 — 从 output 文本中提取文件路径并读取
       if (!segContent && seg.output) {
+        const pathPatterns = [
+          /`workspace\/([^`]+)`/g,
+          /`([^`]*[\\/]创作[^`]*\.txt)`/g,
+          /`([^`]*[\\/][^`]+\.txt)`/g,
+        ];
+        for (const pattern of pathPatterns) {
+          for (const match of seg.output.matchAll(pattern)) {
+            const relativePath = match[1];
+            const absolutePath = path.join(os.homedir(), "clawd", relativePath);
+            try {
+              const content = await fsModule.readFile(absolutePath, "utf-8");
+              if (content && content.length > 100 && tryAcceptContent(content, "outputPathExtract", seg.id)) {
+                segContent = content;
+                hitLayer = "outputPathExtract";
+                console.log(
+                  `[Orchestrator] 🔧 P61a: output 路径提取回退成功 — ${path.basename(absolutePath)} (${content.length} 字)`,
+                );
+                break;
+              }
+            } catch {
+              // 路径无效
+            }
+          }
+          if (segContent) break;
+        }
+      }
+
+      // 层5: 最后回退到 output（仅当所有文件回退都失败时，且跳过确认消息检测——已无更好选择）
+      if (!segContent && seg.output) {
+        const detection = detectConfirmationMessage(seg.output);
+        if (detection.isConfirmation) {
+          console.warn(
+            `[Orchestrator] ⚠️ P62: 分段 ${seg.id} 最终回退到 output 但检测为确认消息 — ${detection.reason}`,
+          );
+        }
         segContent = seg.output;
+        hitLayer = "outputFallback";
       }
 
       if (segContent) {
         mergedParts.push(segContent.trim());
+        metrics.successfulReads++;
+        if (hitLayer) {
+          metrics.fallbackHits[hitLayer as keyof typeof metrics.fallbackHits]++;
+        }
       } else {
-        console.warn(
-          `[Orchestrator] ⚠️ V4: 分段 ${seg.id} 无可用内容`,
-        );
+        console.warn(`[Orchestrator] ⚠️ V4: 分段 ${seg.id} 无可用内容`);
       }
     }
 
     // 合并写入章节文件
     const mergedContent = mergedParts.join("\n\n");
+    metrics.mergedChars = mergedContent.length;
     const chapterFileName = meta.chapterFileName ?? `${parentId}_merged.txt`;
+
+    // 🆕 P64: 合并后质量断言
+    if (metrics.mergedChars < metrics.expectedMinChars) {
+      metrics.quality = metrics.mergedChars < metrics.expectedMinChars * 0.3 ? "failed" : "degraded";
+      console.warn(
+        `[Orchestrator] ⚠️ P64: 章节合并质量${metrics.quality === "failed" ? "严重不足" : "偏低"} — ` +
+        `${chapterFileName}: ${metrics.mergedChars} 字 (期望 ≥${Math.round(metrics.expectedMinChars)} 字) | ` +
+        `回退统计: paths=${metrics.fallbackHits.producedFilePaths} fb=${metrics.fallbackHits.fallbackFilePath} ` +
+        `seg=${metrics.fallbackHits.segmentFileName} extract=${metrics.fallbackHits.outputPathExtract} ` +
+        `output=${metrics.fallbackHits.outputFallback} | 确认消息拦截=${metrics.confirmationIntercepted}`,
+      );
+    } else {
+      metrics.quality = metrics.confirmationIntercepted === 0 ? "excellent" : "good";
+      console.log(
+        `[Orchestrator] 📊 P64: 章节合并质量=${metrics.quality} — ${chapterFileName}: ` +
+        `${metrics.mergedChars} 字, ${metrics.successfulReads}/${metrics.totalSegments} 段成功` +
+        (metrics.confirmationIntercepted > 0 ? ` (${metrics.confirmationIntercepted} 次确认消息已拦截)` : ""),
+      );
+    }
 
     // 写入到 workspace 目录
     const parentTask = taskTree.subTasks.find(t => t.id === parentId);
-    const workspaceDir = path.join(
-      os.homedir(), ".clawdbot", "tasks", taskTree.id,
-    );
-    // 同时写到用户的 clawd workspace
     const clawdWorkspaceDir = path.join(os.homedir(), "clawd", "workspace", taskTree.id);
     await fsModule.mkdir(clawdWorkspaceDir, { recursive: true });
     const mergedFilePath = path.join(clawdWorkspaceDir, chapterFileName);
@@ -3107,6 +3295,9 @@ export class Orchestrator {
       if (!parentTask.metadata) parentTask.metadata = {};
       parentTask.metadata.producedFilePaths = [mergedFilePath];
       parentTask.metadata.producedFiles = [chapterFileName];
+      // 🆕 P65: 将合并质量指标存入父任务 metadata
+      parentTask.metadata.mergeQuality = metrics.quality;
+      parentTask.metadata.mergeChars = metrics.mergedChars;
     }
 
     await this.taskTreeManager.save(taskTree);
@@ -3323,9 +3514,34 @@ export class Orchestrator {
       ? Math.ceil(remainingChars / continuationCount)
       : maxOutputPerTask;
 
+    // 🔧 P68: 从原始子任务提取书名+章号，生成标准化续写文件名
+    // 解决续写任务 LLM 自由命名导致中英文混杂（如 Chapter2_Trial_and_Saintess.txt）的问题
+    let contFilePrefix = "";
+    // 策略1：从 producedFilePaths 提取（最可靠）
+    const origProducedPath = subTask.metadata?.producedFilePaths?.[0]
+      ?? subTask.metadata?.previousProducedFilePaths?.[0];
+    if (origProducedPath) {
+      const baseName = path.basename(origProducedPath).replace(/\.(?:txt|md)$/i, "");
+      contFilePrefix = baseName;
+    }
+    // 策略2：从 prompt 中提取文件名（如 "写入 C:\xxx\九天星辰录_第02章.txt"）
+    if (!contFilePrefix) {
+      const pathMatch = subTask.prompt.match(/[\\/]([^\s\\/`"'\u201C\u201D]+\.(?:txt|md))/);
+      if (pathMatch) {
+        contFilePrefix = pathMatch[1].replace(/\.(?:txt|md)$/i, "");
+      }
+    }
+    // 策略3：从 summary 生成（清洗非法字符）
+    if (!contFilePrefix) {
+      contFilePrefix = (subTask.summary ?? "output").replace(/[：:*?"<>|]/g, "_");
+    }
+
     for (let i = 0; i < continuationCount; i++) {
       const partNumber = i + 2; // 第一部分是已有输出
       const isLast = i === continuationCount - 1;
+
+      // 🔧 P68: 标准化续写文件名
+      const contFileName = `${contFilePrefix}_续写${partNumber}.txt`;
 
       // 构建续写 prompt：注入前文结尾 + 字数要求 + 连贯性指令
       const continuationPrompt = [
@@ -3347,7 +3563,7 @@ export class Orchestrator {
         isLast ? `这是最后一部分，请写出完整的结尾。` : `请在适当的段落处结束，为下一部分留出衔接点。`,
         ``,
         `⚠️ 重要：`,
-        `- 必须使用 write 工具将内容写入文件`,
+        `- 必须使用 write 工具将内容写入文件，文件名必须为：「${contFileName}」`,
         `- 保持与前文一致的风格、语气、人称`,
         `- 不要重复前文已有的内容`,
       ].filter(Boolean).join("\n");
@@ -3376,6 +3592,23 @@ export class Orchestrator {
           isContinuation: true, // 🔧 问题 Q 修复：用 metadata 标识续写子任务
           continuationOf: subTask.id, // 原始子任务 ID
           continuationPart: partNumber, // 续写部分编号
+          // 🔧 S1: 从父任务继承关键元数据（解决 L2 上下文继承断裂）
+          // 续写任务不再是"失忆患者"：它知道自己属于哪本书、哪个章节、用什么验证策略
+          validationStrategies: subTask.metadata?.validationStrategies,
+          chapterFileName: subTask.metadata?.chapterFileName,
+          chapterNumber: subTask.metadata?.chapterNumber,
+          requiresFileOutput: subTask.metadata?.requiresFileOutput,
+          chapterOutline: subTask.metadata?.chapterOutline,
+          // 🔧 S1: 生成 OutputContract（结构化产出契约）
+          outputContract: {
+            expectedFileName: contFileName,
+            expectedLanguage: "zh",
+            minChars: Math.floor(charsPerTask * 0.4),
+            maxChars: charsPerTask * 2,
+            projectName: contFilePrefix.match(/^(.+?)(?:_第|$)/)?.[1] || contFilePrefix,
+            chapterNumber: subTask.metadata?.chapterNumber,
+            parentChapterFileName: subTask.metadata?.chapterFileName,
+          },
         },
       };
 
@@ -3898,7 +4131,21 @@ ${childOutputs.join("\n\n---\n\n")}
       return { action: "round_done", reason: `轮次 ${roundId} 已完成`, roundId };
     }
 
-    // 3. 收集当前轮次的 pending 任务，应用语义过滤
+    // 3a. 🔧 S4: 一次性任务树完整性校验（每个轮次只运行一次）
+    const validationKey = roundId ?? taskTree.id;
+    if (!this.validatedRounds.has(validationKey)) {
+      this.validatedRounds.add(validationKey);
+      const { issues, autoFixed } = this.validateTaskTreeIntegrity(taskTree, roundId);
+      if (autoFixed > 0) {
+        // 有自动修复，需要保存（fire-and-forget，非致命）
+        void this.taskTreeManager.save(taskTree).catch(() => { /* 非致命 */ });
+      }
+      if (issues.length > 0) {
+        console.warn(`[Orchestrator] ⚠️ S4: 任务树存在 ${issues.length} 个结构问题: ${issues.join("; ")}`);
+      }
+    }
+
+    // 3b. 收集当前轮次的 pending 任务，应用语义过滤
     const roundFilter = roundId
       ? (t: SubTask) => t.rootTaskId === roundId
       : () => true;
@@ -3975,17 +4222,54 @@ ${childOutputs.join("\n\n---\n\n")}
         const isContinuationTask = task.id.includes("-cont-") || task.metadata?.isContinuation || task.summary?.includes("续写");
         const isSequentialSegment = task.metadata?.isSegment && (task.metadata?.segmentIndex ?? 0) > 1;
         if (isContinuationTask || isSequentialSegment) {
-          const hasFailedDep = task.dependencies.some((depId) => {
-            const dep = taskTree.subTasks.find((t) => t.id === depId);
-            return dep && (dep.status === "failed" || dep.status === "skipped");
-          });
-          if (hasFailedDep) {
+          const failedDeps = task.dependencies
+            .map((depId) => taskTree.subTasks.find((t) => t.id === depId))
+            .filter((dep): dep is SubTask => !!dep && (dep.status === "failed" || dep.status === "skipped"));
+          
+          if (failedDeps.length > 0) {
+            // 🔧 S3: 级联失败智能恢复（替代盲目 cascade-skip）
+            // 如果失败的依赖可以重试（retryCount < 2 且错误是可重试的），
+            // 重置它为 pending 而非跳过后续任务。
+            // 典型场景：cont-2 因上下文溢出失败（34字符），重试时截断上下文可能成功。
+            const MAX_CASCADE_RETRY = 2;
+            const recoverableDeps = failedDeps.filter((dep) => {
+              if (dep.status === "skipped") return false; // 已被跳过的不恢复
+              if ((dep.retryCount ?? 0) >= MAX_CASCADE_RETRY) return false; // 重试耗尽
+              // 🔧 GAP-3: 扩展可重试错误模式列表，对齐 isRetryableError
+              const err = (dep.error ?? "").toLowerCase();
+              // 先排除明确不可重试的错误
+              const nonRetryable = ["prohibited_content", "safety", "recitation", "blocked",
+                "content_filter", "policy_violation", "invalid_request_error",
+                "authentication_error", "permission_denied"];
+              if (nonRetryable.some(p => err.includes(p))) return false;
+              // 可重试模式（含原有 + isRetryableError 中已覆盖的模式）
+              const isRetryable = /上下文溢出|context.*overflow|abort|timeout|429|500|502|503|504|truncat|rate_limit|overloaded|network|internal_error|econnreset|econnrefused|enotfound|fetch.*fail/i.test(err)
+                || err.includes("outputvalidator");
+              return isRetryable;
+            });
+
+            if (recoverableDeps.length > 0) {
+              // 尝试恢复：重置失败的依赖为 pending
+              for (const dep of recoverableDeps) {
+                dep.status = "pending";
+                dep.retryCount = (dep.retryCount ?? 0) + 1;
+                dep.error = undefined;
+                console.log(
+                  `[Orchestrator] 🔧 S3: 智能恢复失败依赖 ${dep.id} (retry ${dep.retryCount}/${MAX_CASCADE_RETRY})，` +
+                  `避免级联跳过 ${task.id}`,
+                );
+              }
+              treeModifiedBySkip = true;
+              continue; // 跳过当前任务，等依赖重试完成
+            }
+
+            // 不可恢复：cascade-skip
             task.status = "skipped";
             task.error = isSequentialSegment
               ? "分段依赖的前序分段失败，级联跳过"
               : "续写依赖的前序任务失败，级联跳过";
-            treeModifiedBySkip = true; // 🔧 问题 II 修复：标记需要保存
-            console.log(`[Orchestrator] ⏭️ ${isSequentialSegment ? "分段" : "续写"}任务 ${task.id} 级联跳过（依赖失败）`);
+            treeModifiedBySkip = true;
+            console.log(`[Orchestrator] ⏭️ ${isSequentialSegment ? "分段" : "续写"}任务 ${task.id} 级联跳过（依赖失败且不可恢复）`);
             continue;
           }
         }
@@ -4024,6 +4308,98 @@ ${childOutputs.join("\n\n---\n\n")}
       remainingPending: pendingTasks.length - firstGroup.length,
       treeModified: treeModifiedBySkip,
     };
+  }
+
+  /**
+   * 🔧 S4: 任务树完整性校验（结构性防错）
+   *
+   * 在轮次创建后调用，检查任务树的结构健康度：
+   * 1. 文件名 OS 合法性（Windows 不允许 :*?"<>| 等字符）
+   * 2. 续写/分段任务的 OutputContract 缺失（自动补全）
+   * 3. 章节号连续性（检测缺失的章节）
+   *
+   * @returns 发现的问题列表和自动修复计数
+   */
+  validateTaskTreeIntegrity(
+    taskTree: TaskTree,
+    roundId?: string,
+  ): { issues: string[]; autoFixed: number } {
+    const issues: string[] = [];
+    let autoFixed = 0;
+
+    // 筛选目标轮次的子任务
+    const tasks = roundId
+      ? taskTree.subTasks.filter((t) => t.rootTaskId === roundId || t.roundId === roundId)
+      : taskTree.subTasks;
+
+    // ── 检查 1：文件名 OS 合法性 ──
+    const ILLEGAL_CHARS = /[：:*?"<>|]/g;
+    for (const task of tasks) {
+      const fileName = task.metadata?.chapterFileName
+        ?? task.metadata?.segmentFileName
+        ?? task.metadata?.outputContract?.expectedFileName;
+      if (fileName && ILLEGAL_CHARS.test(fileName)) {
+        const cleaned = fileName.replace(ILLEGAL_CHARS, "_");
+        // 自动修复
+        if (task.metadata?.chapterFileName) {
+          task.metadata.chapterFileName = cleaned;
+        }
+        if (task.metadata?.segmentFileName) {
+          task.metadata.segmentFileName = cleaned;
+        }
+        if (task.metadata?.outputContract?.expectedFileName) {
+          task.metadata.outputContract.expectedFileName = cleaned;
+        }
+        autoFixed++;
+        console.log(`[Orchestrator] 🔧 S4: 修复非法文件名 "${fileName}" → "${cleaned}" (${task.id})`);
+      }
+    }
+
+    // ── 检查 2：续写/分段任务缺失 OutputContract → 自动补全 ──
+    for (const task of tasks) {
+      if (!task.metadata) continue;
+      const needsContract = (task.metadata.isContinuation || task.metadata.isSegment)
+        && task.metadata.requiresFileOutput
+        && !task.metadata.outputContract;
+      if (needsContract) {
+        const expectedName = task.metadata.segmentFileName
+          ?? task.metadata.chapterFileName
+          ?? `${(task.summary ?? "output").replace(ILLEGAL_CHARS, "_")}.txt`;
+        task.metadata.outputContract = {
+          expectedFileName: expectedName,
+          expectedLanguage: "zh",
+          parentChapterFileName: task.metadata.chapterFileName,
+          chapterNumber: task.metadata.chapterNumber,
+        };
+        autoFixed++;
+        console.log(`[Orchestrator] 🔧 S4: 补全 OutputContract for ${task.id} → "${expectedName}"`);
+      }
+    }
+
+    // ── 检查 3：章节号连续性 ──
+    const chapterNumbers = tasks
+      .filter((t) => t.metadata?.chapterNumber && !t.metadata?.isSegment && !t.metadata?.isContinuation)
+      .map((t) => t.metadata!.chapterNumber!)
+      .sort((a, b) => a - b);
+    if (chapterNumbers.length >= 2) {
+      for (let i = 1; i < chapterNumbers.length; i++) {
+        if (chapterNumbers[i] - chapterNumbers[i - 1] > 1) {
+          const missing = [];
+          for (let n = chapterNumbers[i - 1] + 1; n < chapterNumbers[i]; n++) {
+            missing.push(n);
+          }
+          issues.push(`章节号不连续：缺少第 ${missing.join(", ")} 章（有第 ${chapterNumbers[i - 1]} 和 ${chapterNumbers[i]} 章）`);
+        }
+      }
+    }
+
+    if (issues.length > 0 || autoFixed > 0) {
+      console.log(
+        `[Orchestrator] 📋 S4: 任务树完整性校验完成 — ${issues.length} 个问题, ${autoFixed} 个自动修复`,
+      );
+    }
+
+    return { issues, autoFixed };
   }
 
   /**
@@ -4834,6 +5210,10 @@ ${childOutputs.join("\n\n---\n\n")}
     // 导致 isRoundCompleted 永远返回 false（有 active 任务），轮次无法终结。
     subTask.status = "active";
     subTask.error = undefined;
+    // 🔧 GAP-1: 记录进入 active 状态的时间戳（用于僵尸检测，替代 createdAt）
+    // 根因：createdAt 在重试时不更新，导致僵尸检测用原始创建时间判断超时，
+    // 重试的任务可能因为"创建时间过早"被误杀。
+    subTask.lastActiveAt = Date.now();
 
     // 5. 记录执行角色到子任务元数据
     subTask.executionRole = execCtx.role;
@@ -4990,7 +5370,40 @@ ${childOutputs.join("\n\n---\n\n")}
       };
     }
 
-    // 2. 不可重试或重试耗尽：标记 failed
+    // 2. 🔧 GAP-4: 不可重试或重试耗尽时，先尝试 decompose 保留部分输出
+    // 与 postProcessSubTaskCompletion 的 P25 策略对齐：如果有足够的产出（>= 500 字），
+    // 尝试保留已有内容并创建续写子任务，而非直接丢弃全部工作。
+    const hasPartialOutput = (subTask.output?.length ?? 0) >= 500
+      || (subTask.metadata?.producedFilePaths?.length ?? 0) > 0;
+    if (hasPartialOutput) {
+      try {
+        const wcReq = this.qualityReviewer.extractWordCountRequirement(subTask.prompt);
+        if (wcReq) {
+          console.log(
+            `[Orchestrator] 🔧 GAP-4: onTaskFailed 尝试 decompose 抢救部分输出 (output=${(subTask.output?.length ?? 0)} 字符)`,
+          );
+          // 临时标记 completed 以便 decomposeFailedTask 能读取产出
+          subTask.status = "completed";
+          const newSubTasks = await this.decomposeFailedTask(taskTree, subTask);
+          if (newSubTasks.length > 0) {
+            await this.taskTreeManager.save(taskTree);
+            console.log(
+              `[Orchestrator] ✅ GAP-4: decompose 成功，创建 ${newSubTasks.length} 个续写子任务，保留已有产出`,
+            );
+            return {
+              action: "retry" as const,
+              reason: `执行失败但 decompose 保留了部分输出，创建 ${newSubTasks.length} 个续写子任务`,
+              needsRequeue: true,
+              cascadeSkip: false,
+            };
+          }
+        }
+      } catch (decompErr) {
+        console.warn(`[Orchestrator] ⚠️ GAP-4: decompose 失败，回退到标记 failed: ${decompErr}`);
+      }
+    }
+
+    // decompose 失败或无部分输出：标记 failed
     subTask.status = "failed";
     subTask.error = message;
     await this.taskTreeManager.save(taskTree);
@@ -5133,7 +5546,28 @@ ${childOutputs.join("\n\n---\n\n")}
     try {
       const reporter = new DeliveryReporter();
       const report = reporter.generateReport(taskTree);
-      result.deliveryReportMarkdown = reporter.formatAsMarkdown(report);
+      let reportMarkdown = reporter.formatAsMarkdown(report);
+
+      // V8 P4: 一致性检查（规则驱动，零 LLM 调用）
+      try {
+        const coherenceResult = checkCoherence(taskTree, rootTaskId);
+        if (coherenceResult.issues.length > 0) {
+          const coherenceSection = formatCoherenceReport(coherenceResult);
+          reportMarkdown += "\n" + coherenceSection;
+          console.log(
+            `[Orchestrator] 🔍 V8 P4: 一致性检查完成 — ${coherenceResult.issues.length} 个问题 ` +
+            `(${coherenceResult.issues.filter(i => i.severity === "critical").length} 严重, ` +
+            `${coherenceResult.issues.filter(i => i.severity === "warning").length} 警告)`,
+          );
+        } else {
+          reportMarkdown += "\n## ✅ 一致性检查\n所有产出通过一致性检查，无问题。\n";
+          console.log(`[Orchestrator] ✅ V8 P4: 一致性检查通过，无问题`);
+        }
+      } catch (cohErr) {
+        console.warn(`[Orchestrator] ⚠️ V8 P4: 一致性检查异常（不阻塞）:`, cohErr);
+      }
+
+      result.deliveryReportMarkdown = reportMarkdown;
       console.log(
         `[Orchestrator] 📦 onRoundCompleted: 交付报告已生成 (${report.statistics?.successRate ?? "N/A"} 成功率)`,
       );
@@ -5169,7 +5603,10 @@ ${childOutputs.join("\n\n---\n\n")}
     for (const p of retryable) {
       if (message.includes(p)) return true;
     }
-    return false;
+    // 🔧 GAP-2: 未知错误默认可重试（保守策略）
+    // 根因：新的 API 错误格式或未预见的异常被当作永久失败，导致任务一次性死亡。
+    // 大多数未知错误重试至少一次是合理的，maxRetries 限制会防止无限重试。
+    return true;
   }
 
   // ========================================

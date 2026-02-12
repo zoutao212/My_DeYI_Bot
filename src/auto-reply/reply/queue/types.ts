@@ -147,6 +147,16 @@ export type FollowupRun = {
   // 🆕 V2: ExecutionContext（Phase 2 新增，替代 isQueueTask/isRootTask/isNewRootTask/taskDepth）
   // 过渡期：旧布尔标记保留（@deprecated），优先读取 executionContext
   executionContext?: ExecutionContext;
+
+  // 🆕 V8 P0: 模型上下文窗口信息（ContextBudgetManager 用）
+  // 由 enqueue-task-tool 构建 FollowupRun 时从 config 填入。
+  // followup-runner 构建 prompt 时传给 ContextBudgetManager 做预算分配。
+
+  /** 模型 context window 大小 (tokens) */
+  modelContextWindow?: number;
+
+  /** 模型最大输出 token 数 */
+  modelMaxOutputTokens?: number;
 };
 
 export type ResolveQueueSettingsParams = {

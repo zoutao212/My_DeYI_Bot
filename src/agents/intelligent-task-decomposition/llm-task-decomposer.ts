@@ -588,10 +588,15 @@ ${taskTree.metadata.masterBlueprint}
 ---\n`
       : "";
 
+    // V8 P3: 如果存在经验池摘要，注入到分解提示词（帮助 LLM 避免历史失败模式）
+    const experienceSection = taskTree.metadata?.experienceSummary
+      ? `\n[📚 历史经验教训]\n以下是从过往任务中积累的教训，请在分解时参考避免重复犯错：\n${taskTree.metadata.experienceSummary}\n`
+      : "";
+
     return `${prompts.decompositionExpertRole} ${prompts.decompositionInstruction}
 
 ${prompts.rootTaskLabel}：${taskTree.rootTask}
-${blueprintSection}
+${blueprintSection}${experienceSection}
 ${ancestorsStr}
 
 ${prompts.currentTaskLabel}：

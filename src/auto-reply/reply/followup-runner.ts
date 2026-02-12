@@ -41,7 +41,8 @@ import { deriveExecutionRole, createExecutionContext } from "../../agents/intell
 import { getPrompts } from "../../agents/intelligent-task-decomposition/prompts-loader.js";
 import type { SubTask, TaskTree, ExecutionContext } from "../../agents/intelligent-task-decomposition/types.js";
 import type { Orchestrator } from "../../agents/intelligent-task-decomposition/orchestrator.js";
-import { TaskProgressReporter, getTaskProgressFromTree } from "../../agents/intelligent-task-decomposition/task-progress-reporter.js";
+import { TaskProgressReporter, getTaskProgressFromTree, formatDetailedProgress } from "../../agents/intelligent-task-decomposition/task-progress-reporter.js";
+import { estimateTokens, allocateBudget, truncateToTokenBudget, type BudgetRequest } from "../../agents/intelligent-task-decomposition/context-budget-manager.js";
 
 // ── P10: 输出验证门（OutputValidator）──
 // 规则驱动，零 LLM 调用。在标记 completed 之前拦截明显无效输出。
@@ -510,6 +511,53 @@ export function createFollowupRunner(params: {
 
         await orchestrator.saveTaskTree(taskTree);
       }
+
+      // ── V8 P2: 执行策略路由 ──
+      // 在 LLM 执行前决定策略。system_merge / system_deliver 直接由系统处理，零 LLM 消耗。
+      if (taskTree && subTask && queued.subTaskId) {
+        const { routeStrategy, strategyRequiresLLM, executeSystemStrategy } = await import(
+          "../../agents/intelligent-task-decomposition/strategy-router.js"
+        );
+        const strategy = routeStrategy(subTask);
+        if (!strategyRequiresLLM(strategy)) {
+          console.log(`[followup-runner] 🔧 V8 P2: 子任务 ${subTask.id} 路由到系统策略 "${strategy}"，跳过 LLM`);
+          const sysResult = executeSystemStrategy(strategy, subTask, { taskTree });
+          subTask.output = sysResult.output;
+          subTask.completedAt = Date.now();
+          if (sysResult.producedFilePaths.length > 0) {
+            if (!subTask.metadata) subTask.metadata = {};
+            subTask.metadata.producedFilePaths = sysResult.producedFilePaths;
+            subTask.metadata.producedFiles = sysResult.producedFilePaths.map((p: string) => path.basename(p));
+          }
+          await orchestrator.updateSubTaskStatus(taskTree, subTask.id, sysResult.success ? "completed" : "failed");
+          // 进入统一后处理（质检 + 轮次完成检查）
+          try {
+            const postResult = await orchestrator.onTaskCompleted(taskTree, subTask, queued.rootTaskId);
+            if (postResult.roundCompleted && postResult.completedRoundId) {
+              console.log(`[followup-runner] 🏁 V8 P2: Round completed via system strategy: ${postResult.completedRoundId}`);
+              taskTree = (await orchestrator.loadTaskTree(sessionId)) ?? taskTree;
+              const roundResult = await orchestrator.onRoundCompleted(taskTree, postResult.completedRoundId);
+              if (roundResult.mergedFilePath) {
+                const mergedSendResult = await sendFallbackFile({ filePath: roundResult.mergedFilePath, caption: "📝 完整输出（子任务合并）", queued });
+                if (!mergedSendResult.ok) {
+                  await sendFollowupPayloads([{ text: `📝 子任务输出已合并保存到：\n${roundResult.mergedFilePath}` }], queued);
+                }
+              }
+              if (roundResult.deliveryReportMarkdown) {
+                await sendFollowupPayloads([{ text: roundResult.deliveryReportMarkdown }], queued);
+              }
+              archiveRoundMemory(orchestrator, taskTree, postResult.completedRoundId, queued, sessionId);
+            }
+          } catch (ppErr) {
+            console.warn(`[followup-runner] ⚠️ V8 P2: 系统策略后处理异常（不阻塞）: ${ppErr}`);
+          }
+          // 触发队列继续执行下一个任务
+          if (queued.run.sessionKey) {
+            finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
+          }
+          return;
+        }
+      }
       
       // 🔧 Session 隔离：子任务使用独立的 session 文件，防止 LLM 上下文交叉污染
       // 根因：所有子任务共享同一个 session 文件（JSONL 对话历史），导致：
@@ -697,7 +745,7 @@ export function createFollowupRunner(params: {
                 // 🆕 子任务间上下文共享：注入已完成兄弟任务的输出摘要
                 // 🔧 传入 currentTaskId，让 buildSiblingContext 智能过滤：
                 // 续写子任务只注入直接依赖的前序任务，避免 prompt 膨胀导致上下文溢出
-                const siblingCtx = taskTree?.subTasks
+                let siblingCtx = taskTree?.subTasks
                   ? buildSiblingContext(taskTree.subTasks, 200, subTask?.id)
                   : "";
                 if (siblingCtx) {
@@ -832,6 +880,53 @@ export function createFollowupRunner(params: {
                   }
                 }
 
+                // ── V8 P0: 预算感知组装 ──
+                // 在拼接前检查总 token 是否超预算，超预算时按优先级压缩低优先级组件。
+                // 保留现有的每个组件构建逻辑（提供合理的"期望"大小），
+                // 这里只做最终安全网——确保不超过模型 context window。
+                const contextWindow = queued.modelContextWindow;
+                const maxOutputTokens = queued.modelMaxOutputTokens;
+
+                if (contextWindow && contextWindow > 0 && isSubTask) {
+                  // 估算用户 prompt 消耗（已在外层 IIFE 构建完毕，这里用原始 prompt 估算）
+                  const promptTokensEstimate = estimateTokens(queued.prompt) + 500; // +500 for 落盘/禁委派/迭代指令
+                  const systemBaseTokens = estimateTokens(base) + estimateTokens(persistInstruction);
+
+                  const requests: BudgetRequest[] = [
+                    { slot: "systemBase", desired: systemBaseTokens, minimum: systemBaseTokens, priority: 0 },
+                    { slot: "userPrompt", desired: promptTokensEstimate, minimum: promptTokensEstimate, priority: 2 },
+                    { slot: "chapterOutline", desired: estimateTokens(chapterOutlineCtx), minimum: 200, priority: 3, content: chapterOutlineCtx },
+                    { slot: "blueprint", desired: estimateTokens(blueprintCtx), minimum: 300, priority: 4, content: blueprintCtx },
+                    { slot: "siblingContext", desired: estimateTokens(siblingCtx), minimum: 0, priority: 6, content: siblingCtx },
+                  ];
+
+                  const allocation = allocateBudget(contextWindow, maxOutputTokens ?? 4096, requests);
+
+                  if (allocation.compressed) {
+                    console.log(`[followup-runner] 📊 V8 P0 预算压缩触发:\n${allocation.compressionLog}`);
+                    // 按分配结果截断被压缩的组件
+                    if (estimateTokens(blueprintCtx) > allocation.slots.blueprint && allocation.slots.blueprint > 0) {
+                      blueprintCtx = truncateToTokenBudget(blueprintCtx, allocation.slots.blueprint, {
+                        direction: "both", headRatio: 0.7, contentType: "writing",
+                      });
+                      console.log(`[followup-runner] 📊 纲领截断: ${allocation.slots.blueprint} tokens`);
+                    } else if (allocation.slots.blueprint === 0) {
+                      blueprintCtx = "";
+                      console.log(`[followup-runner] 📊 纲领完全丢弃（预算不足）`);
+                    }
+                    if (estimateTokens(chapterOutlineCtx) > allocation.slots.chapterOutline && allocation.slots.chapterOutline > 0) {
+                      chapterOutlineCtx = truncateToTokenBudget(chapterOutlineCtx, allocation.slots.chapterOutline, {
+                        direction: "head", contentType: "writing",
+                      });
+                    } else if (allocation.slots.chapterOutline === 0) {
+                      chapterOutlineCtx = "";
+                    }
+                    if (allocation.slots.siblingContext === 0) {
+                      siblingCtx = "";
+                    }
+                  }
+                }
+
                 const combined = [base, siblingCtx, persistInstruction, blueprintCtx, chapterOutlineCtx].filter(Boolean).join("");
                 return combined || undefined;
               })(),
@@ -900,6 +995,20 @@ export function createFollowupRunner(params: {
             subTask.error = `OutputValidator: ${validation.failureReason}`;
             subTask.retryCount = (subTask.retryCount ?? 0) + 1;
 
+            // V8 P3: 记录质量经验（OutputValidator 拦截）
+            import("../../agents/intelligent-task-decomposition/experience-pool.js").then(ep =>
+              ep.recordExperience({
+                category: "quality",
+                pattern: `output_validator_${validation.failureCode}`,
+                lesson: `OutputValidator 拦截: ${validation.failureReason}`,
+                suggestion: validation.failureCode === "hallucinated_tool_calls"
+                  ? "标记 provider 降级，启用文本工具模式"
+                  : "检查子任务 prompt 是否过于模糊",
+                taskType: subTask?.taskType,
+                providerHint: fallbackProvider,
+              }),
+            ).catch(() => {});
+
             // 收集并清理文件追踪
             collectTrackedFiles(subTask.id);
             await orchestrator.saveTaskTree(taskTree);
@@ -950,11 +1059,13 @@ export function createFollowupRunner(params: {
 
           subTask.output = outputText;
           subTask.completedAt = Date.now();
-          // 🔧 P7 修复：通过 taskTreeManager 统一管理状态转换，而非直接赋值
-          // 这样 taskTreeManager 内部的状态转换验证和副作用（如自动设置 completedAt）都能生效
-          await orchestrator.updateSubTaskStatus(taskTree, subTask.id, "completed");
-          
-          // 🔧 收集文件追踪结果（与 orchestrator.executeSubTask 对齐）
+
+          // 🔧 P61c 时序修复：先收集文件追踪结果，再更新状态
+          // 根因：updateSubTaskStatus("completed") 会触发 TaskTreeManager 保存。
+          // 如果 producedFilePaths 在保存之后才设置，并行 runner 可能在两次保存之间
+          // 重新加载 tree，拿到无 paths 的 completed 版本。P32 _shouldTakeLocal 对
+          // 两个相同状态的 subtask 默认取磁盘版（无 paths），导致 paths 永久丢失。
+          // 修复：先设置 producedFilePaths，再 updateSubTaskStatus，确保单次保存包含完整信息。
           const trackedFiles = collectTrackedFiles(subTask.id);
           if (trackedFiles.length > 0) {
             if (!subTask.metadata) subTask.metadata = {};
@@ -966,10 +1077,6 @@ export function createFollowupRunner(params: {
             );
           }
           // 🔧 FileTracker 断裂回退：从 toolMetas 中提取 write 工具的文件路径
-          // 场景：FileTracker 的 ALS 上下文丢失或 beginTracking 未被调用，
-          // 导致 collectTrackedFiles 返回 0，但 LLM 确实调用了 write 工具写了文件。
-          // toolMetas 的 meta 字段对于 write 工具包含文件路径（由 resolveWriteDetail 提取）。
-          // 注意：meta 经过 shortenHomeInString 处理，路径可能以 ~ 开头，需要展开。
           if (trackedFiles.length === 0 && runResult.toolMetas) {
             const writeMetas = runResult.toolMetas.filter(
               (m) => m.toolName === "write" && typeof m.meta === "string" && m.meta.length > 0,
@@ -979,7 +1086,6 @@ export function createFollowupRunner(params: {
               const homedir = os.homedir();
               const recoveredPaths = writeMetas.map((m) => {
                 let p = String(m.meta);
-                // shortenHomeInString 可能把 home 路径缩短为 ~
                 if (p.startsWith("~/") || p.startsWith("~\\")) {
                   p = path.join(homedir, p.slice(2));
                 }
@@ -994,6 +1100,51 @@ export function createFollowupRunner(params: {
               );
             }
           }
+
+          // 🔧 S2: Post-execution OutputContract 文件名校验+自动重命名
+          // 解决 L3（无后验产出校验）：LLM 用了错误文件名时系统自动修正
+          const outputContract = subTask.metadata?.outputContract;
+          if (outputContract?.expectedFileName && subTask.metadata?.producedFilePaths?.length) {
+            const expectedName = outputContract.expectedFileName;
+            const actualPaths = subTask.metadata.producedFilePaths;
+            const actualNames = subTask.metadata.producedFiles ?? actualPaths.map(p => path.basename(p));
+            
+            // 检查第一个产出文件是否匹配契约（只校验主文件）
+            const mainActualName = actualNames[0];
+            if (mainActualName && mainActualName !== expectedName) {
+              // 文件名不匹配 → 自动重命名
+              const mainActualPath = actualPaths[0];
+              const expectedPath = path.join(path.dirname(mainActualPath), expectedName);
+              try {
+                await fs.rename(mainActualPath, expectedPath);
+                // 更新 metadata 中的路径
+                subTask.metadata.producedFilePaths[0] = expectedPath;
+                subTask.metadata.producedFiles![0] = expectedName;
+                console.log(
+                  `[followup-runner] 🔧 S2: OutputContract 文件重命名: "${mainActualName}" → "${expectedName}"`,
+                );
+                // V8 P3: 记录命名经验（LLM 产出了错误的文件名）
+                import("../../agents/intelligent-task-decomposition/experience-pool.js").then(ep =>
+                  ep.recordExperience({
+                    category: "naming",
+                    pattern: "wrong_filename_auto_renamed",
+                    lesson: `LLM 产出文件名「${mainActualName}」与契约「${expectedName}」不符，已自动重命名`,
+                    suggestion: "在 prompt 中更明确地指定输出文件名",
+                    taskType: subTask?.taskType,
+                  }),
+                ).catch(() => {});
+              } catch (renameErr) {
+                // 重命名失败（文件不存在等），记录但不阻塞
+                console.warn(
+                  `[followup-runner] ⚠️ S2: 文件重命名失败 "${mainActualName}" → "${expectedName}": ${renameErr}`,
+                );
+              }
+            }
+          }
+
+          // 🔧 P7 修复：通过 taskTreeManager 统一管理状态转换，而非直接赋值
+          // 🔧 P61c：此时 producedFilePaths 已设置，保存时不会丢失
+          await orchestrator.updateSubTaskStatus(taskTree, subTask.id, "completed");
           
           // 🆕 V2 Phase 4: 兜底落盘（委托提取的辅助函数）
           // 🔧 问题 JJ 修复：兜底落盘仅保存文件，不立即发送给用户
@@ -1087,6 +1238,12 @@ export function createFollowupRunner(params: {
             // 🆕 进度报告：质检通过 + 任务完成
             progressReporter?.onQualityReviewComplete(true);
             progressReporter?.onTaskComplete();
+
+            // 🆕 V8 P5: 子任务完成后发送详细进度仪表盘
+            if (taskTree && queued.rootTaskId) {
+              const detailedProgress = formatDetailedProgress(taskTree, queued.rootTaskId);
+              console.log(`[followup-runner] ${detailedProgress}`);
+            }
 
             console.log(`[followup-runner] ✅ Sub task completed: ${subTask.id}`);
 

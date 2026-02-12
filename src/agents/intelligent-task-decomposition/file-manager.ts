@@ -9,6 +9,122 @@ import path from "node:path";
 import os from "node:os";
 import type { SubTask, TaskTree } from "./types.js";
 
+// ========================================
+// 🆕 P62: 合并内容质量验证工具
+// ========================================
+
+/** LLM 确认消息特征模式（中英双语） */
+const CONFIRMATION_PATTERNS = [
+  /^(OK[。.]?\s*)?已完成/,
+  /^(OK[。.]?\s*)?已创作/,
+  /^(OK[。.]?\s*)?已将/,
+  /^(OK[。.]?\s*)?任务(已)?完成/,
+  /^(OK[。.]?\s*)?内容已(成功)?写入/,
+  /^(OK[。.]?\s*)?已成功/,
+  /^(OK[。.]?\s*)?《[^》]+》.*已(创作|完成|写入)/,
+  /content has been (written|saved|created)/i,
+  /task (is )?completed?/i,
+  /successfully (written|saved|created)/i,
+];
+
+/** 文件路径引用模式（LLM 确认消息中的路径引用） */
+const PATH_REFERENCE_PATTERNS = [
+  /`workspace\/[^`]+`/,
+  /`[^`]*[\\/][^`]*\.txt`/,
+  /写入(文件|了)\s*[`"]/,
+  /保存(到|至)\s*[`"]/,
+];
+
+/**
+ * 🆕 P62: 检测文本是否为 LLM 确认消息（而非实际内容）
+ * 
+ * 启发式规则：
+ * 1. 短文本（< 300 字符）且匹配确认模式 → 高置信度
+ * 2. 短文本（< 500 字符）且包含文件路径引用 → 中置信度
+ * 3. 长文本（> 500 字符）→ 即使匹配也可能是真正内容，不判定
+ * 
+ * @param text 待检测文本
+ * @returns 检测结果 { isConfirmation, confidence, reason }
+ */
+export function detectConfirmationMessage(text: string): {
+  isConfirmation: boolean;
+  confidence: "high" | "medium" | "low";
+  reason?: string;
+} {
+  if (!text || text.length === 0) {
+    return { isConfirmation: false, confidence: "low" };
+  }
+
+  const trimmed = text.trim();
+  const firstLine = trimmed.split("\n")[0].trim();
+
+  // 长文本大概率是真正内容
+  if (trimmed.length > 500) {
+    return { isConfirmation: false, confidence: "high" };
+  }
+
+  // 短文本（< 300 字符）+ 匹配确认模式 → 高置信度
+  if (trimmed.length < 300) {
+    for (const pattern of CONFIRMATION_PATTERNS) {
+      if (pattern.test(firstLine) || pattern.test(trimmed)) {
+        return {
+          isConfirmation: true,
+          confidence: "high",
+          reason: `短文本(${trimmed.length}字) + 匹配确认模式: ${pattern.source}`,
+        };
+      }
+    }
+  }
+
+  // 短文本（< 500 字符）+ 包含文件路径引用 → 中置信度
+  if (trimmed.length < 500) {
+    for (const pattern of PATH_REFERENCE_PATTERNS) {
+      if (pattern.test(trimmed)) {
+        // 额外检查：如果文本主体大部分是路径引用和确认语，则判定
+        const nonPathContent = trimmed
+          .replace(/`[^`]+`/g, "")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (nonPathContent.length < 200) {
+          return {
+            isConfirmation: true,
+            confidence: "medium",
+            reason: `短文本(${trimmed.length}字) + 文件路径引用，有效内容仅 ${nonPathContent.length} 字`,
+          };
+        }
+      }
+    }
+  }
+
+  return { isConfirmation: false, confidence: "low" };
+}
+
+/**
+ * 🆕 P64: 合并质量指标
+ */
+export interface MergeQualityMetrics {
+  /** 总分段数 */
+  totalSegments: number;
+  /** 成功读取的分段数 */
+  successfulReads: number;
+  /** 各层回退命中次数 */
+  fallbackHits: {
+    producedFilePaths: number;
+    fallbackFilePath: number;
+    segmentFileName: number;
+    outputPathExtract: number;
+    outputFallback: number;
+  };
+  /** 确认消息检测拦截次数 */
+  confirmationIntercepted: number;
+  /** 合并后总字数 */
+  mergedChars: number;
+  /** 期望最小字数 */
+  expectedMinChars: number;
+  /** 质量评级 */
+  quality: "excellent" | "good" | "degraded" | "failed";
+}
+
 /**
  * 差异统计信息
  */
@@ -580,10 +696,23 @@ export class FileManager {
       return aIdx - bIdx;
     });
     
-    // 内容验证：过滤掉"摘要式"内容（疑似操作型任务的兜底输出）
+    // 🆕 P63: 增强内容验证 — 过滤确认消息 + 摘要式内容
+    let confirmationFiltered = 0;
+    let summaryFiltered = 0;
     const beforeFilter = allFiles.length;
     const filteredFiles = allFiles.filter(f => {
+      // P63: 使用 detectConfirmationMessage 检测 LLM 确认消息
+      const detection = detectConfirmationMessage(f.content);
+      if (detection.isConfirmation && detection.confidence !== "low") {
+        confirmationFiltered++;
+        console.log(
+          `[FileManager] 🛡️ P63: 过滤确认消息 — ${f.taskSummary} (${f.content.length} 字符): ${detection.reason}`,
+        );
+        return false;
+      }
+      // 原有摘要过滤
       if (f.source === "output" && f.content.length < 500) {
+        summaryFiltered++;
         console.log(`[FileManager] 🗑️ 过滤疑似摘要内容: ${f.taskSummary} (${f.content.length} 字符)`);
         return false;
       }
@@ -592,15 +721,29 @@ export class FileManager {
     const filteredCount = beforeFilter - filteredFiles.length;
     if (filteredCount > 0) {
       console.log(
-        `[FileManager] 🧹 已过滤 ${filteredCount} 个疑似摘要内容（< 500 字符）`
+        `[FileManager] 🧹 P63: 已过滤 ${filteredCount} 个无效内容 ` +
+        `(确认消息=${confirmationFiltered}, 摘要=${summaryFiltered})`
       );
     }
     
     // 使用过滤后的文件列表
     const mergeFiles = filteredFiles.length > 0 ? filteredFiles : allFiles; // 如果全被过滤了，回退到原始列表
     
-    // 合并内容（纯文本，不加 Markdown 标记，适合直接阅读）
-    // 🔧 续写子任务的内容应该无缝衔接，不加分隔线
+    // 🆕 P66: 任务类型感知合并格式
+    // 推断主要任务类型（从子任务的 taskType 或 rootTask 关键词推断）
+    const taskTypeCounts: Record<string, number> = {};
+    for (const sub of taskTree.subTasks) {
+      const tt = sub.taskType ?? "generic";
+      taskTypeCounts[tt] = (taskTypeCounts[tt] ?? 0) + 1;
+    }
+    const dominantType = Object.entries(taskTypeCounts)
+      .sort((a, b) => b[1] - a[1])[0]?.[0] ?? "generic";
+
+    // 根据任务类型选择合并策略
+    const isWritingMerge = dominantType === "writing" ||
+      (taskTree.rootTask ?? "").match(/[写创作小说章节文章翻译]/);
+    const isCodingMerge = dominantType === "coding";
+
     let mergedContent = "";
     
     for (let i = 0; i < mergeFiles.length; i++) {
@@ -615,10 +758,18 @@ export class FileManager {
       
       if (mergeFiles.length > 1) {
         if (isContinuation && isPrevSameBase) {
-          // 续写子任务紧跟原始任务或前一个续写子任务，无缝衔接
+          // 续写/分段子任务紧跟原始任务，无缝衔接
           mergedContent += "\n\n";
+        } else if (isWritingMerge) {
+          // P66: 写作类 — 章节之间只用空行分隔，不加机器感分隔线
+          mergedContent += i > 0 ? "\n\n\n" : "";
+        } else if (isCodingMerge) {
+          // P66: 编码类 — 用文件路径风格的标题
+          mergedContent += `\n\n// ${"─".repeat(50)}\n`;
+          mergedContent += `// ${file.taskSummary}\n`;
+          mergedContent += `// ${"─".repeat(50)}\n\n`;
         } else {
-          // 不同任务之间用分隔线
+          // 通用/分析类 — 保留原有分隔线
           mergedContent += `\n\n${"=".repeat(60)}\n`;
           mergedContent += `${file.taskSummary}\n`;
           mergedContent += `${"=".repeat(60)}\n\n`;

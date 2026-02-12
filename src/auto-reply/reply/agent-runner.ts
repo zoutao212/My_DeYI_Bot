@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import { lookupContextTokens } from "../../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
+import { resolveContextWindowInfo } from "../../agents/context-window-guard.js";
 import { resolveModelAuthMode } from "../../agents/model-auth.js";
 import { isCliProvider } from "../../agents/model-selection.js";
 import { queueEmbeddedPiMessage } from "../../agents/pi-embedded.js";
@@ -268,10 +269,19 @@ export async function runReplyAgent(params: {
   // isRootTask = true 表示这是根任务（允许分解子任务）
   // 🔧 P12 修复：传入 contextId 防止并行 runner 竞态清空
   const agentRunContextId = crypto.randomUUID();
+  // 🆕 V8 P0: 解析模型 contextWindow 信息，供子任务的 ContextBudgetManager 做预算分配
+  const ctxWindowInfo = resolveContextWindowInfo({
+    cfg: followupRun.run.config,
+    provider: followupRun.run.provider,
+    modelId: followupRun.run.model,
+    defaultTokens: agentCfgContextTokens ?? DEFAULT_CONTEXT_TOKENS,
+  });
   setCurrentFollowupRunContext({ 
     ...followupRun, 
     isQueueTask: false,
-    isRootTask: true  // 🆕 标记为根任务
+    isRootTask: true,  // 🆕 标记为根任务
+    modelContextWindow: ctxWindowInfo.tokens,
+    modelMaxOutputTokens: 4096,  // 子任务的默认 maxTokens（runEmbeddedPiAgent 内部也默认 4096-8192）
   }, agentRunContextId);
 
   activeSessionEntry = await runMemoryFlushIfNeeded({

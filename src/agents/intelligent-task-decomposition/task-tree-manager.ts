@@ -246,6 +246,14 @@ export class TaskTreeManager {
     // 5. local produced output while disk has none
     if (local.output && !disk.output) return true;
 
+    // 6. 🔧 P61b: local has producedFilePaths while disk has none
+    // 根因：followup-runner 先 updateSubTaskStatus("completed") 触发保存（无 paths），
+    // 再设置 producedFilePaths 后再次保存。并行 runner 可能在两次保存之间重新加载，
+    // 拿到无 paths 的版本。此时两边都是 completed，但 local 有 paths 更丰富，应优先。
+    const localPaths = local.metadata?.producedFilePaths;
+    const diskPaths = disk.metadata?.producedFilePaths;
+    if (localPaths && localPaths.length > 0 && (!diskPaths || diskPaths.length === 0)) return true;
+
     return false;
   }
 

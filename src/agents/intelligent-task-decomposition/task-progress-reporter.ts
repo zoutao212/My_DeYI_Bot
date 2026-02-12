@@ -59,6 +59,105 @@ export function getTaskProgressFromTree(
   };
 }
 
+/**
+ * V8 P5: 格式化详细的轮次进度仪表盘
+ *
+ * 输出示例：
+ * 📊 创作进度：4/6 完成 (67%)
+ * ✅ 第1章(3012字) ✅ 第2章(2856字) ✅ 第3章(3201字) ✅ 第4章(2945字)
+ * ⏳ 第5章 执行中 (45s)
+ * ⏸️ 第6章 等待中
+ * ⚠️ 失败: 0 | 预估剩余: ~2 分钟
+ */
+export function formatDetailedProgress(
+  taskTree: TaskTree | null | undefined,
+  rootTaskId?: string,
+): string {
+  if (!taskTree) return "📊 无任务数据";
+
+  const tasks = rootTaskId
+    ? taskTree.subTasks.filter((t) => t.rootTaskId === rootTaskId && !t.waitForChildren)
+    : taskTree.subTasks.filter((t) => !t.waitForChildren);
+
+  if (tasks.length === 0) return "📊 无子任务";
+
+  const completed = tasks.filter((t) => t.status === "completed");
+  const failed = tasks.filter((t) => t.status === "failed");
+  const active = tasks.filter((t) => t.status === "active");
+  const pending = tasks.filter((t) => t.status === "pending");
+  const skipped = tasks.filter((t) => t.status === "skipped");
+
+  const pct = tasks.length > 0 ? Math.round((completed.length / tasks.length) * 100) : 0;
+
+  // 标题行
+  const lines: string[] = [
+    `📊 任务进度：${completed.length}/${tasks.length} 完成 (${pct}%)`,
+  ];
+
+  // 每个子任务的状态行
+  const taskLines: string[] = [];
+  for (const t of tasks) {
+    const label = t.summary?.substring(0, 25) || t.id.substring(0, 8);
+
+    switch (t.status) {
+      case "completed": {
+        // 尝试获取字数信息
+        let charInfo = "";
+        if (t.metadata?.mergeChars) {
+          charInfo = `(${t.metadata.mergeChars}字)`;
+        } else if (t.output && t.output.length > 500) {
+          charInfo = `(~${t.output.length}字)`;
+        }
+        taskLines.push(`✅ ${label}${charInfo}`);
+        break;
+      }
+      case "active": {
+        const elapsed = t.createdAt ? Math.round((Date.now() - t.createdAt) / 1000) : 0;
+        taskLines.push(`⏳ ${label} 执行中${elapsed > 0 ? ` (${formatDuration(elapsed)})` : ""}`);
+        break;
+      }
+      case "failed":
+        taskLines.push(`❌ ${label} 失败`);
+        break;
+      case "pending":
+        taskLines.push(`⏸️ ${label} 等待中`);
+        break;
+      case "skipped":
+        taskLines.push(`⏭️ ${label} 已跳过`);
+        break;
+      default:
+        taskLines.push(`❓ ${label} ${t.status}`);
+    }
+  }
+  lines.push(taskLines.join("  "));
+
+  // 摘要行
+  const summaryParts: string[] = [];
+  if (failed.length > 0) summaryParts.push(`❌ 失败: ${failed.length}`);
+  if (skipped.length > 0) summaryParts.push(`⏭️ 跳过: ${skipped.length}`);
+
+  // 预估剩余时间（基于已完成任务的平均耗时）
+  if (completed.length > 0 && (active.length + pending.length) > 0) {
+    const completedDurations = completed
+      .filter((t) => t.createdAt && t.completedAt)
+      .map((t) => (t.completedAt! - t.createdAt))
+      .filter((d) => d > 0);
+    if (completedDurations.length > 0) {
+      const avgMs = completedDurations.reduce((a, b) => a + b, 0) / completedDurations.length;
+      const remainingCount = active.length + pending.length;
+      const estRemainingMs = avgMs * remainingCount;
+      const estRemainingSec = Math.round(estRemainingMs / 1000);
+      summaryParts.push(`预估剩余: ~${formatDuration(estRemainingSec)}`);
+    }
+  }
+
+  if (summaryParts.length > 0) {
+    lines.push(summaryParts.join(" | "));
+  }
+
+  return lines.join("\n");
+}
+
 /** 格式化秒数为人类友好的时间字符串 */
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;

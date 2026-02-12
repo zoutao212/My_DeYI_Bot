@@ -336,6 +336,9 @@ export interface SubTask {
   
   /** 完成时间戳 */
   completedAt?: number;
+
+  /** 最近一次进入 active 状态的时间戳（用于僵尸检测，替代 createdAt） */
+  lastActiveAt?: number;
   
   // 🆕 递归任务系统新增字段
   
@@ -563,6 +566,10 @@ export interface TaskTreeMetadata {
 
   /** 纲领版本号（每次迭代优化 +1，用于追踪精炼次数） */
   blueprintVersion?: number;
+
+  // 🆕 V8 P3: 经验池摘要（分解前注入）
+  /** 从经验池查询到的历史教训摘要，供 buildDecompositionPrompt 读取 */
+  experienceSummary?: string;
 }
 
 /**
@@ -757,6 +764,57 @@ export interface SubTaskMetadata {
 
   /** 验证失败的策略及原因 */
   failedValidations?: Array<{ strategy: string; reason: string }>;
+
+  // 🆕 P65: 合并质量指标
+
+  /** 章节合并质量评级（由 mergeSegmentsIfComplete 填充） */
+  mergeQuality?: "excellent" | "good" | "degraded" | "failed";
+
+  /** 章节合并后总字数 */
+  mergeChars?: number;
+
+  // 🆕 S1: 输出契约（OutputContract）— 结构化的产出规范
+  // 由系统在任务创建/分解时生成，非 LLM prompt 控制。
+  // 用于：prompt 注入、后验检查、自动修正、上下文继承。
+
+  /**
+   * 输出契约 — 任务执行前确定的结构化产出规范
+   *
+   * 解决"Prompt-as-Contract 反模式"：系统依赖自然语言 prompt 控制文件名/语言/字数，
+   * LLM 不可靠时系统无法兜底。OutputContract 提供程序化的强制执行机制。
+   */
+  outputContract?: OutputContract;
+}
+
+/**
+ * 输出契约 — 结构化的产出规范（S1 增强）
+ *
+ * 生命周期：
+ * 1. 创建时：由 decomposeWritingTaskIntoSegments / decomposeFailedTask / enqueue_task 生成
+ * 2. 继承时：续写/分段子任务从父任务继承（不丢失上下文）
+ * 3. 执行后：followup-runner 用 contract 校验产出文件名，不符时自动重命名
+ */
+export interface OutputContract {
+  /** 期望的输出文件名（不含路径，如 "九天星辰录_第02章_续写2.txt"） */
+  expectedFileName?: string;
+
+  /** 期望的输出语言（"zh" | "en" | "auto"），用于检测 LLM 输出语言偏差 */
+  expectedLanguage?: string;
+
+  /** 期望的最小字数 */
+  minChars?: number;
+
+  /** 期望的最大字数 */
+  maxChars?: number;
+
+  /** 所属书名/项目名（如"九天星辰录"），用于生成标准化文件名 */
+  projectName?: string;
+
+  /** 所属章节号（从 1 开始） */
+  chapterNumber?: number;
+
+  /** 父任务的 chapterFileName（继承用） */
+  parentChapterFileName?: string;
 }
 
 /**

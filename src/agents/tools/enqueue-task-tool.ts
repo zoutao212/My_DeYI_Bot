@@ -382,6 +382,84 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
           : (currentFollowupRun.summaryLine || currentFollowupRun.prompt?.substring(0, 200) || prompt.substring(0, 200));  // 子任务：用原始用户消息
         globalOrchestrator.getOrCreateRound(taskTree, rootTaskId, roundGoal, llmBudget);
 
+        // 🔧 P67: 在入队前检测多章节模式（如"第5-6章"），自动拆分为独立子任务
+        // P40b 只在 decomposeSubTask() 中检测，LLM 直接 enqueue_task 时会完全绕过。
+        // 这里做前置拦截：检测到多章节 → 拆分为多个独立 enqueue，跳过当前合并子任务。
+        const effectiveSummary = summary || prompt;
+        const multiChapterMatch = effectiveSummary.match(/第\s*(\d+)\s*[-–—~～至到]\s*(\d+)\s*章/);
+        if (multiChapterMatch) {
+          const startCh = parseInt(multiChapterMatch[1], 10);
+          const endCh = parseInt(multiChapterMatch[2], 10);
+          if (endCh > startCh && endCh - startCh <= 5) {
+            console.log(
+              `[enqueue_task] 🔧 P67: 检测到多章节「${effectiveSummary}」(第${startCh}-${endCh}章)，自动拆分为 ${endCh - startCh + 1} 个独立子任务`,
+            );
+            // 提取字数要求并平分
+            const wcMatch = prompt.match(/约\s*(\d+)\s*字/);
+            const totalWC = wcMatch ? parseInt(wcMatch[1], 10) : 0;
+            const chapterCount = endCh - startCh + 1;
+            const perChapterWC = totalWC ? Math.ceil(totalWC / chapterCount) : 3000;
+
+            const splitResults: Array<{ id: string; summary: string }> = [];
+            for (let ch = startCh; ch <= endCh; ch++) {
+              const chapterLabel = `第${ch}章`;
+              const newPrompt = prompt
+                .replace(/第\s*\d+\s*[-–—~～至到]\s*\d+\s*章[^。\n]*/g, chapterLabel)
+                .replace(/约\s*\d+\s*字/g, `约 ${perChapterWC} 字`)
+                .replace(/(\d+)\s*字以上/g, `${perChapterWC} 字以上`);
+              const bookPrefix = effectiveSummary.replace(/第\s*\d+.*$/, "").trim();
+              const newSummary = `${bookPrefix}${chapterLabel}`;
+
+              const splitSubTask = await globalOrchestrator.addSubTask(
+                taskTree,
+                newPrompt,
+                newSummary,
+                parentId,
+                waitForChildren,
+                rootTaskId,
+              );
+              splitResults.push({ id: splitSubTask.id, summary: newSummary });
+
+              // 为每个拆分出的子任务构建并入队 FollowupRun
+              const splitFollowupRun: FollowupRun = {
+                prompt: newPrompt,
+                summaryLine: newSummary,
+                enqueuedAt: Date.now(),
+                run: currentFollowupRun.run,
+                isQueueTask: true,
+                isRootTask: false,
+                isNewRootTask: false,
+                taskDepth: splitSubTask.depth ?? 0,
+                subTaskId: splitSubTask.id,
+                rootTaskId,
+                originatingChannel: currentFollowupRun.originatingChannel,
+                originatingTo: currentFollowupRun.originatingTo,
+                originatingAccountId: currentFollowupRun.originatingAccountId,
+                originatingThreadId: currentFollowupRun.originatingThreadId,
+                originatingChatType: currentFollowupRun.originatingChatType,
+              };
+              const splitResolved = resolveQueueSettings({
+                cfg: config ?? ({} as ClawdbotConfig),
+                sessionEntry,
+                inlineMode: "followup",
+              });
+              enqueueFollowupRun(agentSessionKey, splitFollowupRun, splitResolved, "none");
+            }
+            console.log(
+              `[enqueue_task] ✅ P67: 多章节拆分完成，${splitResults.length} 个独立子任务已入队`,
+            );
+            return jsonResult({
+              success: true,
+              message: `✅ 多章节自动拆分：「${effectiveSummary}」→ ${splitResults.map(r => r.summary).join("、")}`,
+              queueKey: agentSessionKey,
+              subTaskId: splitResults[0]?.id,
+              taskTreePath: `~/.clawdbot/tasks/${targetSessionId}/TASK_TREE.json`,
+              isNewRootTask: false,
+              splitCount: splitResults.length,
+            });
+          }
+        }
+
         // 添加子任务到任务树（携带 rootTaskId 实现轮次隔离）
         const subTask = await globalOrchestrator.addSubTask(
           taskTree, 
@@ -416,6 +494,9 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
           originatingAccountId: currentFollowupRun.originatingAccountId,
           originatingThreadId: currentFollowupRun.originatingThreadId,
           originatingChatType: currentFollowupRun.originatingChatType,
+          // 🆕 V8 P0: 继承模型上下文窗口信息（ContextBudgetManager 用）
+          modelContextWindow: currentFollowupRun.modelContextWindow,
+          modelMaxOutputTokens: currentFollowupRun.modelMaxOutputTokens,
         };
 
         // 解析队列设置
