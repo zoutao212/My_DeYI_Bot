@@ -613,6 +613,22 @@ export function createFollowupRunner(params: {
         // 🆕 进度报告：开始等待 LLM 回复
         progressReporter?.onLLMStart();
 
+        // 🆕 Gap2: 经验池注入执行 prompt — 让 LLM 在执行时避免已知错误模式
+        let experienceHint = "";
+        if (subTask?.taskType) {
+          try {
+            const { generateExperienceSummary } = await import(
+              "../../agents/intelligent-task-decomposition/experience-pool.js"
+            );
+            experienceHint = await generateExperienceSummary(subTask.taskType, 3);
+            if (experienceHint) {
+              console.log(`[followup-runner] 📚 经验池注入: ${experienceHint.length} chars (taskType=${subTask.taskType})`);
+            }
+          } catch {
+            // 经验池不可用，不阻塞执行
+          }
+        }
+
         const fallbackResult = await runWithModelFallback({
           cfg: queued.run.config,
           provider: queued.run.provider,
@@ -927,7 +943,26 @@ export function createFollowupRunner(params: {
                   }
                 }
 
-                const combined = [base, siblingCtx, persistInstruction, blueprintCtx, chapterOutlineCtx].filter(Boolean).join("");
+                // 🆕 V9: 父任务目标上下文注入
+                // 让子任务清晰知道整体项目目标，确保产出服务于统一目标
+                let parentGoalCtx = "";
+                if (isSubTask && taskTree?.rootTask) {
+                  // 优先使用已缓存的 parentGoalSummary（由 orchestrator 分解后生成）
+                  const cachedGoal = subTask?.metadata?.parentGoalSummary;
+                  if (cachedGoal && cachedGoal.length > 10) {
+                    parentGoalCtx = `\n\n[🎯 总任务目标]\n${cachedGoal}`;
+                  } else if (taskTree.rootTask.length <= 300) {
+                    // 短目标直接注入
+                    const role = subTask?.summary ? `你当前负责：「${subTask.summary}」` : "";
+                    parentGoalCtx = `\n\n[🎯 总任务目标]\n${taskTree.rootTask}\n${role}`;
+                  } else {
+                    // 长目标截断（LLM 摘要在 orchestrator 分解时异步生成）
+                    const role = subTask?.summary ? `你当前负责：「${subTask.summary}」` : "";
+                    parentGoalCtx = `\n\n[🎯 总任务目标]\n${taskTree.rootTask.substring(0, 300)}...\n${role}`;
+                  }
+                }
+
+                const combined = [base, siblingCtx, parentGoalCtx, persistInstruction, blueprintCtx, chapterOutlineCtx, experienceHint ? `\n\n${experienceHint}` : ""].filter(Boolean).join("");
                 return combined || undefined;
               })(),
               ownerNumbers: queued.run.ownerNumbers,
@@ -1246,6 +1281,43 @@ export function createFollowupRunner(params: {
             }
 
             console.log(`[followup-runner] ✅ Sub task completed: ${subTask.id}`);
+
+            // 🆕 V9: 子任务完成且质检通过后，fire-and-forget 生成智能摘要
+            // 摘要存入 metadata.smartSummary，供后续兄弟/流水线任务的上下文注入使用
+            // 使用 llm_light 策略（低 token、低 timeout），不阻塞主流程
+            if (subTask && taskTree) {
+              // 捕获当前引用到局部常量，避免闭包中 narrowing 丢失
+              const completedSubTask = subTask;
+              const currentTaskTree = taskTree;
+              import("../../agents/intelligent-task-decomposition/smart-summarizer.js").then(async (ss) => {
+                try {
+                  // 读取实际文件内容（优先于 subTask.output）
+                  let fileContent: string | undefined;
+                  const paths = completedSubTask.metadata?.producedFilePaths;
+                  if (paths && paths.length > 0) {
+                    try {
+                      const contents = await Promise.all(
+                        paths.map(p => fs.readFile(p, "utf-8").catch(() => ""))
+                      );
+                      fileContent = contents.filter(c => c.length > 0).join("\n\n");
+                    } catch { /* ignore */ }
+                  }
+                  const summary = await ss.generateSmartSummary(
+                    completedSubTask,
+                    fileContent || undefined,
+                    queued.run.config,
+                  );
+                  if (summary && summary.length > 10) {
+                    if (!completedSubTask.metadata) completedSubTask.metadata = {};
+                    completedSubTask.metadata.smartSummary = summary;
+                    await orchestrator.saveTaskTree(currentTaskTree);
+                    console.log(`[followup-runner] 📝 V9: 智能摘要已生成 (${summary.length} chars): ${completedSubTask.id}`);
+                  }
+                } catch (ssErr) {
+                  console.warn(`[followup-runner] ⚠️ V9: 智能摘要生成失败（不影响主流程）: ${ssErr}`);
+                }
+              }).catch(() => {});
+            }
 
             // 🆕 BUG3 修复：质检 adjust 新增的子任务需要入队到 drain 队列
             if (postResult.newTaskIds && postResult.newTaskIds.length > 0 && taskTree) {

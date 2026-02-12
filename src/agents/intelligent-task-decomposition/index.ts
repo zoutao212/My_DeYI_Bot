@@ -14,8 +14,9 @@ export { validateTaskOutput, shouldRunPreValidation, registerValidationStrategy 
 export type { ValidationResult, AggregatedValidationResult, ValidationContext } from "./task-output-validator.js";
 export { estimateTokens, allocateBudget, truncateToTokenBudget, truncateByAllocation } from "./context-budget-manager.js";
 export type { BudgetSlot, BudgetRequest, BudgetAllocation, TruncateOptions } from "./context-budget-manager.js";
-export { routeStrategy, strategyRequiresLLM, executeSystemStrategy } from "./strategy-router.js";
-export type { ExecutionStrategy, SystemStrategyResult } from "./strategy-router.js";
+export { routeStrategy, strategyRequiresLLM, executeSystemStrategy, isLlmLightStrategy, getLlmLightParams } from "./strategy-router.js";
+export type { ExecutionStrategy, SystemStrategyResult, LlmLightConfig } from "./strategy-router.js";
+export { generateSmartSummary, batchGenerateSummaries, generateParentGoalContext, generatePipelineContext, buildRuleBasedSummary, getLightCaller } from "./smart-summarizer.js";
 export { formatDetailedProgress } from "./task-progress-reporter.js";
 export { recordExperience, queryExperience, generateExperienceSummary } from "./experience-pool.js";
 export type { ExperienceCategory, ExperienceRecord } from "./experience-pool.js";

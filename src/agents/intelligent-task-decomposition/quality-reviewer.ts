@@ -210,8 +210,15 @@ export class QualityReviewer {
         }
       }
 
+      // 🆕 Gap2: 预取经验池摘要（质检时参考已知质量问题模式）
+      let experienceHint = "";
+      try {
+        const { generateExperienceSummary } = await import("./experience-pool.js");
+        experienceHint = await generateExperienceSummary(subTask.taskType, 3);
+      } catch { /* 经验池不可用，不阻塞质检 */ }
+
       // 2. 构建评估提示词（使用轮次根任务描述替代可能过期的 taskTree.rootTask）
-      const prompt = this.buildCompletionReviewPrompt(taskTree, subTask, rootTaskOverride, fileContent);
+      const prompt = this.buildCompletionReviewPrompt(taskTree, subTask, rootTaskOverride, fileContent, experienceHint);
       
       // 3. 调用 LLM 进行评估
       const llmResponse = await this.callLLM(prompt);
@@ -294,7 +301,22 @@ export class QualityReviewer {
         contentSnippet = rawContent.substring(0, 1000) + "\n...[省略]...\n" + rawContent.substring(rawContent.length - 400);
       }
 
-      const focusHint = this.getLightweightReviewFocus(taskType);
+      // 🆕 G3: 策略感知的审查重点（替代纯 taskType 硬编码）
+      const strategies = subTask.metadata?.validationStrategies ?? [];
+      const passed = subTask.metadata?.passedValidations ?? [];
+      const failed = subTask.metadata?.failedValidations ?? [];
+      let focusHint: string;
+      if (strategies.length > 0) {
+        const checkedSet = new Set([...passed, ...failed.map(f => f.strategy)]);
+        const unchecked = strategies.filter(s => !checkedSet.has(s));
+        const parts: string[] = [];
+        if (passed.length > 0) parts.push(`已通过前置: ${passed.join("、")}`);
+        if (failed.length > 0) parts.push(`前置失败: ${failed.map(f => f.strategy).join("、")}`);
+        if (unchecked.length > 0) parts.push(`需评估: ${unchecked.join("、")}`);
+        focusHint = `\n【验证策略】${strategies.join("、")}（${parts.join("；")}）`;
+      } else {
+        focusHint = this.getLightweightReviewFocus(taskType);
+      }
 
       const prompt = `你是任务质检员。请快速评估以下子任务的完成质量。
 
@@ -514,24 +536,73 @@ ${failedCount > 0 ? `【失败子任务数】${failedCount}` : ""}
     }
 
     // 检查 2: 内容存在性
-    if (decision === "continue") {
-      const hasOutput = !!(subTask.output && subTask.output.length > 50);
-      const hasFile = !!(subTask.metadata?.producedFilePaths?.length || subTask.metadata?.fallbackFilePath);
-      const hasContent = hasOutput || hasFile || !!fileContent;
+    const hasOutput = !!(subTask.output && subTask.output.length > 50);
+    const hasFile = !!(subTask.metadata?.producedFilePaths?.length || subTask.metadata?.fallbackFilePath);
+    const hasContent = hasOutput || hasFile || !!fileContent;
 
+    if (decision === "continue") {
       if (!hasContent && wordCountReq) {
-        findings.push(`P44规则检查：无实际内容产出（要求 ${wordCountReq} 字）`);
+        findings.push(`规则检查：无实际内容产出（要求 ${wordCountReq} 字）`);
         decision = "restart";
         status = "needs_restart";
         failureType = "incomplete";
       } else if (!hasContent) {
-        findings.push(`P44规则检查：无内容产出（非写作任务，降级为 warning）`);
+        findings.push(`规则检查：无内容产出（非写作任务，降级为 warning）`);
         suggestions.push("检查任务是否正确执行");
       }
     }
 
+    // 🆕 G4: 策略驱动的规则检查（根据 validationStrategies 扩展检查维度）
+    const strategies = subTask.metadata?.validationStrategies ?? [];
+
+    // 检查 3: file_output 策略 — 要求文件输出的任务必须有文件产出
+    if (decision === "continue" && strategies.includes("file_output")) {
+      if (!hasFile && !fileContent) {
+        findings.push(`规则检查：file_output 策略要求文件输出，但未检测到文件产出`);
+        // 写作/编码类严格要求文件输出，其他类型降级为 warning
+        if (["writing", "coding", "data"].includes(taskType)) {
+          decision = "restart";
+          status = "needs_restart";
+          failureType = "incomplete";
+        } else {
+          suggestions.push("任务可能未正确产出文件");
+        }
+      }
+    }
+
+    // 检查 4: structured_output 策略 — 分析/研究类任务需要结构化输出
+    if (decision === "continue" && strategies.includes("structured_output")) {
+      const content = fileContent ?? subTask.output ?? "";
+      if (content.length > 500) {
+        const structuralSignals = [
+          /^#+\s/m,           // Markdown 标题
+          /^\s*[-*]\s/m,      // 无序列表
+          /^\s*\d+\.\s/m,     // 有序列表
+          /\|.*\|.*\|/m,      // 表格
+        ];
+        const signalCount = structuralSignals.filter(p => p.test(content)).length;
+        if (signalCount < 1) {
+          findings.push(`规则检查：structured_output 策略要求结构化输出，但未检测到标题/列表/表格等结构信号`);
+          suggestions.push("建议使用 Markdown 标题、列表或表格组织内容");
+          // 非致命，不阻塞（结构化是质量维度，不是正确性维度）
+        }
+      }
+    }
+
+    // 检查 5: completeness 策略 — prompt 很长但输出极短（可能 LLM 偷懒）
+    if (decision === "continue" && strategies.includes("completeness")) {
+      const content = fileContent ?? subTask.output ?? "";
+      const promptLen = subTask.prompt.length;
+      if (promptLen > 500 && content.length < 50 && !hasFile) {
+        findings.push(`规则检查：completeness 策略 — prompt ${promptLen} 字符，输出仅 ${content.length} 字符，疑似未完成`);
+        decision = "restart";
+        status = "needs_restart";
+        failureType = "incomplete";
+      }
+    }
+
     console.log(
-      `[QualityReviewer] 🔧 P44 规则验证结果: decision=${decision}, findings=[${findings.join("; ")}]`,
+      `[QualityReviewer] 🔧 规则验证结果: decision=${decision}, strategies=[${strategies.join(",")}], findings=[${findings.join("; ")}]`,
     );
 
     return {
@@ -854,6 +925,7 @@ ${prompts.jsonOnlyReminder}`;
     subTask: SubTask,
     rootTaskOverride?: string,
     fileContent?: string,
+    experienceHint?: string,
   ): string {
     const prompts = getPrompts();
     const aspects = prompts.completionReview.aspects;
@@ -862,9 +934,10 @@ ${prompts.jsonOnlyReminder}`;
     // 🔧 BUG5 修复：优先使用轮次根任务描述，避免跨轮次误判
     const effectiveRootTask = rootTaskOverride || taskTree.rootTask;
 
-    // 🆕 V6: 任务类型感知的审查重点
+    // 🆕 V6→G1+G2: 策略驱动的审查重点（替代纯 taskType 硬编码）
+    // 读取 V6 前置验证结果（passedValidations/failedValidations），让 LLM 跳过已通过的维度
     const taskType = subTask.taskType ?? classifyTaskType(subTask.prompt).type;
-    const taskTypeReviewHint = this.buildTaskTypeReviewHint(taskType);
+    const taskTypeReviewHint = this.buildValidationContextHint(subTask);
 
     // 🔧 P0 修复：提取子任务 prompt 中的字数要求，注入硬性校验规则
     // 🆕 V6: 仅对写作类任务注入字数硬性规则
@@ -965,7 +1038,7 @@ ${blueprintReviewCtx}${chapterOutlineCtx}
 ${prompts.completionReview.aspectsTitle}
 
 ${aspectsStr}
-${taskTypeReviewHint}${wordCountRule}${retryContext}
+${taskTypeReviewHint}${wordCountRule}${retryContext}${experienceHint ? `\n${experienceHint}\n` : ""}
 ⚠️ 决策指引（overthrow vs restart）：
 - "overthrow"（推翻）仅用于任务本身不可能完成的结构性错误（如需求矛盾、技术上不可行）。
 - 如果输出存在风格偏差、逻辑错误、格式问题等，应使用 "restart"（重新执行），因为这类问题在重试时通常可以修正。
@@ -1038,6 +1111,106 @@ ${prompts.jsonOnlyReminder}`;
   }
 
   /**
+   * 🆕 G1+G2: 策略驱动的验证上下文提示（替代纯 taskType 硬编码）
+   *
+   * 从 subTask.metadata 读取：
+   * - validationStrategies：该任务配置的验证策略列表
+   * - passedValidations：V6 前置检查已通过的策略
+   * - failedValidations：V6 前置检查已失败的策略及原因
+   *
+   * 让 LLM 质检员：
+   * 1. 跳过已通过前置检查的维度，避免重复评估浪费 token
+   * 2. 重点关注前置检查失败或未覆盖的维度
+   * 3. 基于具体策略（而非泛化的 taskType）给出精准审查重点
+   *
+   * 无策略配置时回退到原有 buildTaskTypeReviewHint(taskType)。
+   */
+  private buildValidationContextHint(subTask: SubTask): string {
+    const taskType = subTask.taskType ?? "generic";
+    const strategies = subTask.metadata?.validationStrategies ?? [];
+    const passed = subTask.metadata?.passedValidations ?? [];
+    const failed = subTask.metadata?.failedValidations ?? [];
+
+    // 无策略配置：回退到原有类型驱动提示
+    if (strategies.length === 0) {
+      return this.buildTaskTypeReviewHint(taskType);
+    }
+
+    const parts: string[] = [];
+    parts.push(`\n\n🎯 **任务类型：${taskType}**`);
+    parts.push(`📋 **已配置的验证策略**：${strategies.join("、")}`);
+
+    // V6 前置检查已通过的维度
+    if (passed.length > 0) {
+      parts.push(`✅ **已通过前置检查**：${passed.join("、")}（无需重复评估这些维度）`);
+    }
+
+    // V6 前置检查已失败的维度（需重点关注）
+    if (failed.length > 0) {
+      const failedStr = failed.map(f => `${f.strategy}（${f.reason}）`).join("、");
+      parts.push(`❌ **前置检查失败**：${failedStr}（请重点关注这些维度）`);
+    }
+
+    // 计算 LLM 需要评估的维度（未被前置检查覆盖的）
+    const checkedSet = new Set([...passed, ...failed.map(f => f.strategy)]);
+    const unchecked = strategies.filter(s => !checkedSet.has(s));
+    if (unchecked.length > 0) {
+      parts.push(`⏳ **需要你重点评估的维度**：${unchecked.join("、")}`);
+    } else if (passed.length > 0 && failed.length === 0) {
+      parts.push(`💡 所有验证策略已通过前置检查，请从整体质量和任务完成度角度评估。`);
+    }
+
+    // 基于具体策略生成审查说明
+    parts.push(this.getStrategyFocusHints(strategies, passed));
+
+    return parts.join("\n");
+  }
+
+  /**
+   * 🆕 G2: 根据配置的验证策略生成具体审查维度说明
+   *
+   * 与 buildTaskTypeReviewHint 的区别：
+   * - buildTaskTypeReviewHint 按 taskType 输出固定文本（可能包含与实际策略无关的内容）
+   * - getStrategyFocusHints 根据实际配置的策略精准输出，且标注已通过前置检查的维度
+   *
+   * @param strategies 配置的验证策略列表
+   * @param passedStrategies V6 已通过的策略名称
+   */
+  private getStrategyFocusHints(strategies: string[], passedStrategies: string[]): string {
+    const passedSet = new Set(passedStrategies);
+    const hints: string[] = [];
+
+    for (const s of strategies) {
+      const mark = passedSet.has(s) ? "✅" : "🔍";
+      switch (s) {
+        case "word_count":
+          hints.push(`${mark} **字数**：产出篇幅是否达到要求${passedSet.has(s) ? "（已通过）" : ""}`);
+          break;
+        case "file_output":
+          hints.push(`${mark} **文件输出**：是否有实际文件产出${passedSet.has(s) ? "（已通过）" : ""}`);
+          break;
+        case "completeness":
+          hints.push(`${mark} **完成度**：是否覆盖了任务描述中的所有要求，无遗漏`);
+          break;
+        case "structured_output":
+          hints.push(`${mark} **结构化**：输出是否有清晰的标题/列表/表格组织，而非堆砌文字`);
+          break;
+        case "tool_usage":
+          hints.push(`${mark} **工具调用**：是否实际执行了操作而非只生成了描述`);
+          break;
+        default:
+          hints.push(`${mark} **${s}**：请评估此维度`);
+          break;
+      }
+    }
+
+    if (hints.length > 0) {
+      return `\n🔍 **审查维度**：\n${hints.map(h => `- ${h}`).join("\n")}\n`;
+    }
+    return "";
+  }
+
+  /**
    * 🔧 P0: 从 prompt 文本中提取字数要求
    * 支持多种中英文字数表达：3000字、3000 字、3000 words、三千字 等
    * 
@@ -1098,10 +1271,46 @@ ${prompts.jsonOnlyReminder}`;
     const prompts = getPrompts();
     // 🆕 V2: 优先使用 Round.goal 覆盖可能过期的 taskTree.rootTask
     const effectiveRootTask = rootTaskOverride || taskTree.rootTask;
-    const completedTasksStr = taskTree.subTasks
-      .filter(st => st.status === "completed")
+    const completedTasks = taskTree.subTasks.filter(st => st.status === "completed");
+    const completedTasksStr = completedTasks
       .map(st => `- ${st.id}: ${st.summary}\n  ${prompts.labels.output}: ${st.output || prompts.labels.noOutput}`)
       .join("\n");
+
+    // 🆕 G5: 汇总验证指标，让整体质检 LLM 看到全局质量视图
+    let validationSummary = "";
+    {
+      let totalStrategies = 0;
+      let totalPassed = 0;
+      let totalFailed = 0;
+      const failedDimensions = new Map<string, number>();
+
+      for (const st of completedTasks) {
+        const strategies = st.metadata?.validationStrategies ?? [];
+        const passed = st.metadata?.passedValidations ?? [];
+        const failed = st.metadata?.failedValidations ?? [];
+        totalStrategies += strategies.length;
+        totalPassed += passed.length;
+        totalFailed += failed.length;
+        for (const f of failed) {
+          failedDimensions.set(f.strategy, (failedDimensions.get(f.strategy) ?? 0) + 1);
+        }
+      }
+
+      if (totalStrategies > 0) {
+        const parts: string[] = [];
+        parts.push(`📊 **验证指标汇总**：共 ${completedTasks.length} 个子任务，${totalStrategies} 项策略检查，${totalPassed} 项通过，${totalFailed} 项失败`);
+        if (failedDimensions.size > 0) {
+          const dims = [...failedDimensions.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .map(([dim, count]) => `${dim}(${count}次)`)
+            .join("、");
+          parts.push(`⚠️ **失败维度分布**：${dims}`);
+        }
+        validationSummary = `\n${parts.join("\n")}\n`;
+      }
+    }
+
+    const failedCount = taskTree.subTasks.filter(st => st.status === "failed").length;
 
     const aspects = prompts.overallReview.aspects;
     const aspectsStr = Object.values(aspects).map((aspect, index) => `${index + 1}. ${aspect}`).join("\n\n");
@@ -1112,7 +1321,7 @@ ${prompts.labels.rootTask}：${effectiveRootTask}
 
 ${prompts.labels.completedSubTasks}：
 ${completedTasksStr}
-
+${validationSummary}${failedCount > 0 ? `\n⚠️ 失败子任务数：${failedCount}\n` : ""}
 ${prompts.overallReview.aspectsTitle}
 
 ${aspectsStr}

@@ -5,13 +5,16 @@
  * 各种独立关键词匹配逻辑，提供单一入口进行任务类型推导。
  *
  * 设计原则：
- * - 零 LLM 调用：纯规则驱动，轻量快速
+ * - 快速路径：纯规则驱动（零 LLM 调用），用于热路径
+ * - LLM 辅助：低置信度时用轻量 LLM 消歧（异步路径，用于关键决策点）
  * - 多维度匹配：关键词 + 结构信号 + prompt 模式
  * - 可扩展：新增任务类型只需在 TASK_TYPE_RULES 中添加规则
  * - 向后兼容：原有 isWritingPrompt / isAnalysisPrompt 的能力完全覆盖
  */
 
 import type { TaskType, SubTask } from "./types.js";
+import type { LLMCaller } from "./batch-executor.js";
+import { extractJsonFromResponse } from "./json-extractor.js";
 
 // ========================================
 // 任务类型分类规则
@@ -427,4 +430,191 @@ export function isWritingPrompt(prompt: string): boolean {
 export function isAnalysisPrompt(prompt: string): boolean {
   const result = classifyTaskType(prompt);
   return result.type === "analysis" || result.type === "research";
+}
+
+// ========================================
+// 🆕 LLM 辅助分类（低置信度消歧）
+// ========================================
+
+/** LLM 消歧的置信度阈值 — 低于此值触发 LLM 调用 */
+const LLM_DISAMBIGUATION_THRESHOLD = 60;
+
+/** 简单的分类结果缓存（避免对相同 prompt 重复调用 LLM） */
+const classificationCache = new Map<string, TaskTypeClassification>();
+const CACHE_MAX_SIZE = 100;
+
+/**
+ * 🆕 LLM 辅助任务分类 — 低置信度时用轻量 LLM 消歧
+ *
+ * 先走纯规则的快速路径（classifyTaskType），如果置信度 < 60%
+ * 且 LLM 可用，则用极短 prompt 让 LLM 从候选类型中选择。
+ *
+ * 典型场景："写一个 Python 脚本来分析销售数据并生成报告"
+ * → 规则匹配命中 writing(写)/coding(脚本)/data(数据)/analysis(分析)
+ * → 置信度 55%（多类型竞争）
+ * → LLM 消歧 → coding（核心动作是写代码）
+ *
+ * @param prompt 任务 prompt
+ * @param llmCaller 可选的 LLM 调用器（无则退化为纯规则）
+ * @returns 分类结果（可能被 LLM 修正）
+ */
+export async function classifyTaskTypeWithLLM(
+  prompt: string,
+  llmCaller?: LLMCaller | null,
+): Promise<TaskTypeClassification> {
+  // 快速路径：纯规则分类
+  const ruleResult = classifyTaskType(prompt);
+
+  // 高置信度 → 直接返回，不消耗 LLM
+  if (ruleResult.confidence >= LLM_DISAMBIGUATION_THRESHOLD) {
+    return ruleResult;
+  }
+
+  // 无 LLM → 退化为纯规则
+  if (!llmCaller) {
+    return ruleResult;
+  }
+
+  // 检查缓存
+  const cacheKey = prompt.substring(0, 200);
+  const cached = classificationCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  // 收集所有命中的候选类型（包括低分的）
+  const candidates = collectCandidateTypes(prompt);
+  if (candidates.length <= 1) {
+    // 只有一个候选或没有候选，无需消歧
+    return ruleResult;
+  }
+
+  try {
+    const candidateList = candidates
+      .map(c => `- ${c.type}（${c.matchedKeywords.slice(0, 3).join(", ")}）`)
+      .join("\n");
+
+    const llmPrompt = `请判断以下任务的核心类型。
+
+【任务描述】${prompt.substring(0, 500)}
+
+【候选类型】
+${candidateList}
+
+请根据任务的"核心动作"（而非涉及的领域）选择最准确的类型。
+用 JSON 回答（仅此格式）：
+\`\`\`json
+{"type":"选中的类型","reason":"一句话理由"}
+\`\`\``;
+
+    console.log(
+      `[TaskTypeClassifier] 🔄 低置信度 (${ruleResult.confidence}%)，LLM 消歧: ` +
+      `候选=[${candidates.map(c => c.type).join(",")}]`,
+    );
+
+    const response = await llmCaller.call(llmPrompt);
+    const parsed = extractJsonFromResponse(response) as { type?: string; reason?: string } | null;
+
+    if (parsed?.type) {
+      const validTypes: TaskType[] = [
+        "writing", "coding", "analysis", "research", "data",
+        "design", "automation", "planning", "review", "generic",
+      ];
+      const llmType = parsed.type as TaskType;
+      if (validTypes.includes(llmType)) {
+        // 用 LLM 结果覆盖规则结果，但保留规则的验证策略等信息
+        const matchingCandidate = candidates.find(c => c.type === llmType);
+        const enhanced: TaskTypeClassification = {
+          ...ruleResult,
+          type: llmType,
+          confidence: Math.max(ruleResult.confidence + 20, 75),
+          validationStrategies: matchingCandidate?.validationStrategies ?? ruleResult.validationStrategies,
+          shouldAutoDecompose: matchingCandidate?.shouldAutoDecompose ?? ruleResult.shouldAutoDecompose,
+        };
+
+        console.log(
+          `[TaskTypeClassifier] ✅ LLM 消歧完成: ${ruleResult.type} → ${llmType} ` +
+          `(reason: ${parsed.reason ?? "N/A"})`,
+        );
+
+        // 缓存结果
+        if (classificationCache.size >= CACHE_MAX_SIZE) {
+          const firstKey = classificationCache.keys().next().value;
+          if (firstKey !== undefined) classificationCache.delete(firstKey);
+        }
+        classificationCache.set(cacheKey, enhanced);
+
+        return enhanced;
+      }
+    }
+
+    console.warn(`[TaskTypeClassifier] ⚠️ LLM 消歧返回无效类型，保留规则结果: ${ruleResult.type}`);
+  } catch (err) {
+    console.warn(`[TaskTypeClassifier] ⚠️ LLM 消歧失败，保留规则结果:`, err);
+  }
+
+  return ruleResult;
+}
+
+/**
+ * 🆕 异步版 classifyAndEnrich — 关键决策点使用
+ *
+ * 在分解、纲领生成等关键路径调用，低置信度时用 LLM 消歧。
+ * 热路径（shouldAutoDecompose 等频繁调用）仍使用同步版本。
+ */
+export async function classifyAndEnrichWithLLM(
+  subTask: SubTask,
+  llmCaller?: LLMCaller | null,
+): Promise<TaskTypeClassification> {
+  const classification = await classifyTaskTypeWithLLM(subTask.prompt, llmCaller);
+
+  if (!subTask.taskType) {
+    subTask.taskType = classification.type;
+  }
+  if (!subTask.metadata) {
+    subTask.metadata = {};
+  }
+  if (!subTask.metadata.validationStrategies) {
+    subTask.metadata.validationStrategies = classification.validationStrategies;
+  }
+
+  return classification;
+}
+
+/**
+ * 收集所有命中关键词的候选类型（不只是最高分的）
+ *
+ * 用于 LLM 消歧时提供候选列表。
+ */
+function collectCandidateTypes(prompt: string): TaskTypeClassification[] {
+  const lowerPrompt = prompt.toLowerCase();
+  const results: TaskTypeClassification[] = [];
+
+  for (const rule of TASK_TYPE_RULES) {
+    const matchedKeywords = rule.keywords.filter(kw => lowerPrompt.includes(kw.toLowerCase()));
+    if (matchedKeywords.length === 0) continue;
+
+    let structuralMatches = 0;
+    if (rule.structuralPatterns) {
+      structuralMatches = rule.structuralPatterns.filter(p => p.test(prompt)).length;
+    }
+
+    const keywordBonus = Math.min(matchedKeywords.length * 3, 15);
+    const structuralBonus = structuralMatches * 10;
+    const score = rule.weight + keywordBonus + structuralBonus;
+    const confidence = Math.min(100, Math.round(score / 120 * 100));
+
+    results.push({
+      type: rule.type,
+      confidence,
+      weight: score,
+      matchedKeywords,
+      structuralMatches,
+      validationStrategies: rule.validationStrategies,
+      shouldAutoDecompose: rule.autoDecomposeHeuristic(prompt),
+    });
+  }
+
+  // 按得分降序
+  return results.sort((a, b) => b.weight - a.weight);
 }

@@ -28,7 +28,7 @@ import { createSystemLLMCaller, type SystemLLMCallerConfig } from "./system-llm-
 import { classifyTaskIntent, type TaskIntentResult } from "./task-intent-classifier.js";
 import { deriveExecutionRole, createExecutionContext } from "./execution-context.js";
 import { getPrompts } from "./prompts-loader.js";
-import { classifyTaskType, classifyAndEnrich, getBlueprintTypeKey, isWordCountCritical, requiresFileOutput, type TaskTypeClassification } from "./task-type-classifier.js";
+import { classifyTaskType, classifyAndEnrich, classifyTaskTypeWithLLM, getBlueprintTypeKey, isWordCountCritical, requiresFileOutput, type TaskTypeClassification } from "./task-type-classifier.js";
 import type { ClawdbotConfig } from "../../config/config.js";
 
 /**
@@ -1990,8 +1990,8 @@ export class Orchestrator {
       (subTask.depth ?? 0) === 0 &&
       !taskTree.metadata?.masterBlueprint
     ) {
-      // 🆕 V6: 用统一分类器替代散落的关键词匹配
-      const rootClassification = classifyTaskType(taskTree.rootTask);
+      // 🆕 V6+: LLM 辅助分类（低置信度时消歧，提高纲领策略选择准确度）
+      const rootClassification = await classifyTaskTypeWithLLM(taskTree.rootTask, this.systemLLMCaller);
       const taskType = getBlueprintTypeKey(rootClassification.type);
 
       // O1: 按任务类型区分复杂度阈值 — 写作类和设计类对纲领依赖度更高，门槛更低
@@ -2310,6 +2310,28 @@ export class Orchestrator {
       console.error(
         `[Orchestrator] ❌ P6: 分解验证失败！预期 ${finalTasks.length} 个子任务在树中，实际 ${verifyCount} 个`,
       );
+    }
+
+    // 🆕 V9: 为分解后的子任务注入父目标摘要（parentGoalSummary）
+    // 让每个子任务清晰知道整体项目的最终目标，确保产出服务于统一目标
+    // 使用 llm_light 异步生成（fire-and-forget），不阻塞分解流程
+    if (taskTree.rootTask && finalTasks.length > 0) {
+      try {
+        const { generateParentGoalContext } = await import("./smart-summarizer.js");
+        // 对第一个子任务同步生成（因为它可能马上执行），其余子任务复用同一摘要
+        const firstTask = finalTasks[0];
+        const parentCtx = await generateParentGoalContext(taskTree, firstTask, this.config);
+        if (parentCtx && parentCtx.length > 20) {
+          for (const dt of finalTasks) {
+            if (!dt.metadata) dt.metadata = {};
+            dt.metadata.parentGoalSummary = parentCtx;
+          }
+          await this.taskTreeManager.save(taskTree);
+          console.log(`[Orchestrator] 🎯 V9: 父目标摘要已注入 ${finalTasks.length} 个子任务 (${parentCtx.length} chars)`);
+        }
+      } catch (pgErr) {
+        console.warn(`[Orchestrator] ⚠️ V9: 父目标摘要生成失败（不影响分解）: ${pgErr}`);
+      }
     }
 
     console.log(`[Orchestrator] ✅ 子任务 ${subTaskId} 分解完成，生成 ${finalTasks.length} 个子任务`);
@@ -5573,6 +5595,49 @@ ${childOutputs.join("\n\n---\n\n")}
       );
     } catch (err) {
       console.warn(`[Orchestrator] ⚠️ onRoundCompleted: 交付报告生成失败:`, err);
+    }
+
+    // 🆕 V9: 轮次完成后批量补充智能摘要（为 followup-runner 未来得及生成的子任务补齐）
+    // 使用 llm_light 批量调用，单次 LLM 处理多个子任务，最大化效率
+    try {
+      const tasksNeedingSummary = completedTasks.filter(
+        (t) => !t.metadata?.smartSummary || t.metadata.smartSummary.length < 20,
+      );
+      if (tasksNeedingSummary.length > 0) {
+        const { batchGenerateSummaries } = await import("./smart-summarizer.js");
+        const fsSync = await import("node:fs");
+        const batchInput = tasksNeedingSummary.map((t) => {
+          let fileContent: string | undefined;
+          const paths = t.metadata?.producedFilePaths;
+          if (paths && paths.length > 0) {
+            try {
+              fileContent = paths
+                .map((p) => { try { return fsSync.readFileSync(p, "utf-8"); } catch { return ""; } })
+                .filter((c) => c.length > 0)
+                .join("\n\n");
+            } catch { /* ignore */ }
+          }
+          return { subTask: t, fileContent: fileContent || undefined };
+        });
+        const summaries = await batchGenerateSummaries(batchInput, this.config);
+        let updatedCount = 0;
+        for (const [taskId, summary] of summaries) {
+          const task = taskTree.subTasks.find((t) => t.id === taskId);
+          if (task && summary.length > 10) {
+            if (!task.metadata) task.metadata = {};
+            task.metadata.smartSummary = summary;
+            updatedCount++;
+          }
+        }
+        if (updatedCount > 0) {
+          await this.taskTreeManager.save(taskTree);
+          console.log(
+            `[Orchestrator] 📝 V9: 批量智能摘要完成 — ${updatedCount}/${tasksNeedingSummary.length} 个子任务已补齐`,
+          );
+        }
+      }
+    } catch (ssErr) {
+      console.warn(`[Orchestrator] ⚠️ V9: 批量智能摘要失败（不影响交付）: ${ssErr}`);
     }
 
     // 3. 归档标记（实际归档由调用方执行，因为需要 config/sessionId 等上下文）

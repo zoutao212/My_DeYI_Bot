@@ -149,8 +149,17 @@ export function buildSiblingContext(
     // 🔧 修复：续写场景大幅增加上下文到 2000 字符
     const effectiveMaxLen = isContinuation ? 2000 : maxSnippetLen;
 
+    // 🆕 V9: 优先使用智能摘要（smartSummary）— 信息密度高且 token 消耗低
+    // 智能摘要由 llm_light 在子任务完成后生成，包含：
+    // “做了什么 + 关键产出 + 对后续任务的价值”
+    // 非续写场景优先使用 smartSummary，续写场景仍需要实际文件内容衡接
+    const smartSummary = (t as any)?.metadata?.smartSummary as string | undefined;
+    if (!isContinuation && smartSummary && smartSummary.length > 20) {
+      return `- [📝 ${t.summary ?? "子任务"}]: ${smartSummary}`;
+    }
+
     // 🔧 关键修复：优先使用文件内容而非 subTask.output
-    // subTask.output 通常只是 LLM 的确认消息（如"已创作完成"），不是实际产出。
+    // subTask.output 通常只是 LLM 的确认消息（如“已创作完成”），不是实际产出。
     // 对于续写场景，必须看到前一个任务的实际文件内容才能保持连贯。
     let effectiveOutput = t.output ?? "";
     const producedPaths = t.metadata?.producedFilePaths;

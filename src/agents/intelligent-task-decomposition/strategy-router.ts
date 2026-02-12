@@ -12,6 +12,7 @@
  */
 
 import type { SubTask, TaskTree, TaskType } from "./types.js";
+import { LIGHT_CONFIG } from "./smart-summarizer.js";
 
 // ────────────────────────────────────────────────────────────
 // 类型定义
@@ -39,6 +40,58 @@ export interface SystemStrategyResult {
   /** 失败原因 */
   error?: string;
 }
+
+// ────────────────────────────────────────────────────────────
+// llm_light 配置
+// ────────────────────────────────────────────────────────────
+
+/**
+ * llm_light 执行参数 — 比标准 LLM 省 80%+ token
+ *
+ * 使用场景：
+ * 1. 智能摘要生成（子任务完成后、批量摘要）
+ * 2. 简单分类/元数据提取
+ * 3. 短 prompt 的简单任务（如格式转换、简短回复）
+ *
+ * 与标准 LLM 的差异：
+ * - maxTokens: 1024 (vs 8192)
+ * - timeout: 30s (vs 120s)
+ * - temperature: 0.2 (vs 0.3)
+ * - 无 bootstrap context（AGENTS.md 等）
+ * - 无 skills 注入
+ * - 最小工具集（仅 write/read）
+ */
+export interface LlmLightConfig {
+  maxTokens: number;
+  timeoutMs: number;
+  temperature: number;
+}
+
+/** llm_light 的默认参数（来自 smart-summarizer） */
+export const LLM_LIGHT_DEFAULTS: LlmLightConfig = {
+  maxTokens: LIGHT_CONFIG.maxTokens,
+  timeoutMs: LIGHT_CONFIG.timeoutMs,
+  temperature: LIGHT_CONFIG.temperature,
+};
+
+/** llm_light 的工具白名单（最小集，降低 prompt 体积） */
+export const LLM_LIGHT_TOOL_ALLOWLIST = ["write", "read"];
+
+/** llm_light 适用的 prompt 最大长度（超过此长度视为需要标准 LLM） */
+const LLM_LIGHT_MAX_PROMPT_LEN = 500;
+
+/** llm_light 适用的简单任务关键词 */
+const LIGHT_TASK_PATTERNS = [
+  /(?:摘要|总结|概括|归纳|提炼)/,
+  /(?:summarize|summarise|recap|abstract|digest)/i,
+  /(?:分类|归类|识别类型|标注)/,
+  /(?:classify|categorize|label|tag)/i,
+  /(?:格式化|转换格式|重新格式)/,
+  /(?:format|convert|transform).*(?:to|into)/i,
+  /(?:翻译|translate)/i,
+  /(?:提取|抽取).*(?:关键词|标签|要点)/,
+  /(?:extract).*(?:keywords|tags|key\s*points)/i,
+];
 
 // ────────────────────────────────────────────────────────────
 // 策略匹配模式
@@ -111,6 +164,17 @@ export function routeStrategy(subTask: SubTask): ExecutionStrategy {
     }
   }
 
+  // 4. llm_light 检测：短 prompt + 简单任务模式
+  if (promptLen > 0 && promptLen <= LLM_LIGHT_MAX_PROMPT_LEN) {
+    const text = `${subTask.prompt ?? ""} ${subTask.summary ?? ""}`;
+    for (const pattern of LIGHT_TASK_PATTERNS) {
+      if (pattern.test(text)) {
+        console.log(`[strategy-router] 💡 关键词匹配到 llm_light 策略: "${subTask.summary?.substring(0, 40)}"`);
+        return "llm_light";
+      }
+    }
+  }
+
   // 默认走标准 LLM
   return "llm";
 }
@@ -131,6 +195,39 @@ export function strategyRequiresLLM(strategy: ExecutionStrategy): boolean {
  *
  * @returns 执行结果
  */
+/**
+ * 判断策略是否为 llm_light
+ */
+export function isLlmLightStrategy(strategy: ExecutionStrategy): boolean {
+  return strategy === "llm_light";
+}
+
+/**
+ * 获取 llm_light 的执行参数
+ *
+ * followup-runner 根据此参数调整：
+ * - 降低 maxTokens / timeout
+ * - 跳过 bootstrap context 和 skills
+ * - 使用最小工具集
+ */
+export function getLlmLightParams(): {
+  toolAllowlist: string[];
+  skipBootstrapContext: boolean;
+  skipSkills: boolean;
+  maxTokens: number;
+  timeoutMs: number;
+  temperature: number;
+} {
+  return {
+    toolAllowlist: LLM_LIGHT_TOOL_ALLOWLIST,
+    skipBootstrapContext: true,
+    skipSkills: true,
+    maxTokens: LLM_LIGHT_DEFAULTS.maxTokens,
+    timeoutMs: LLM_LIGHT_DEFAULTS.timeoutMs,
+    temperature: LLM_LIGHT_DEFAULTS.temperature,
+  };
+}
+
 export function executeSystemStrategy(
   strategy: ExecutionStrategy,
   subTask: SubTask,

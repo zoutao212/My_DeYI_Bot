@@ -773,6 +773,14 @@ export interface SubTaskMetadata {
   /** 章节合并后总字数 */
   mergeChars?: number;
 
+  // 🆕 V9: 智能摘要字段（由 smart-summarizer.ts llm_light 生成）
+
+  /** AI 生成的任务产出智能摘要（比截断原文信息密度高 5-10 倍） */
+  smartSummary?: string;
+
+  /** 父任务目标的精炼摘要（让子任务清晰知道整体目标） */
+  parentGoalSummary?: string;
+
   // 🆕 S1: 输出契约（OutputContract）— 结构化的产出规范
   // 由系统在任务创建/分解时生成，非 LLM prompt 控制。
   // 用于：prompt 注入、后验检查、自动修正、上下文继承。
