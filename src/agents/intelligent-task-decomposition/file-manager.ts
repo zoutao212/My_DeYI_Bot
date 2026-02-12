@@ -590,6 +590,25 @@ export class FileManager {
         }
       }
 
+      // 🔧 P91 修复：跳过 V5 Map-Reduce chunk map/reduce 中间产物
+      // 根因：chunk 分析文件是中间产物，最终输出由 finalize 任务产出。
+      // 如果同时合并 chunk 的 LLM 确认消息和 finalize 产出，会导致内容混乱。
+      // finalize 任务和有 producedFilePaths 的父任务不跳过。
+      if (subTask.metadata?.isChunkTask && subTask.metadata.chunkPhase !== "finalize") {
+        console.log(`[FileManager] ⏭️ P91: 跳过 chunk ${subTask.metadata.chunkPhase} 中间产物: ${subTask.id} (${subTask.summary})`);
+        continue;
+      }
+
+      // 🔧 P91b 修复：跳过 chunk 任务的续写子任务
+      // 根因：P84 修复前创建的 chunk 续写任务，其 output 是无意义的分析碎片。
+      if (subTask.metadata?.isContinuation && subTask.metadata.continuationOf) {
+        const contParent = taskTree.subTasks.find(t => t.id === subTask.metadata!.continuationOf);
+        if (contParent?.metadata?.isChunkTask) {
+          console.log(`[FileManager] ⏭️ P91b: 跳过 chunk 续写任务: ${subTask.id} (${subTask.summary})`);
+          continue;
+        }
+      }
+
       // 🔧 问题 W 修复：跳过被 decompose 标记为 completed 的原始子任务
       // 原因：decomposeFailedTask 把原始子任务标记为 completed，但其输出是不完整的。
       // 续写子任务会包含完整的后续内容，如果同时合并原始子任务的不完整输出，

@@ -255,9 +255,17 @@ export class Orchestrator {
     // ── 0b. V5: chunk 子任务完成后检查 Map-Reduce 进度 ──
     if (subTask.metadata?.isChunkTask) {
       try {
-        const completedPath = await this.checkChunkProgress(taskTree, subTask);
-        if (completedPath) {
-          console.log(`[Orchestrator] 🗺️ V5: Map-Reduce 最终产出: ${completedPath}`);
+        const chunkResult = await this.checkChunkProgress(taskTree, subTask);
+        if (chunkResult?.completedPath) {
+          console.log(`[Orchestrator] 🗺️ V5: Map-Reduce 最终产出: ${chunkResult.completedPath}`);
+        }
+        // 🔧 P88: 所有 map/reduce 完成后，主动调度 finalize 任务
+        // 根因：finalize 依赖已满足但无人创建 FollowupRun，drain orphan recovery 不可靠。
+        // 修复：将 finalize ID 加入 decomposedTaskIds，followup-runner 据此入队。
+        if (chunkResult?.readyFinalizeId) {
+          if (!result.decomposedTaskIds) result.decomposedTaskIds = [];
+          result.decomposedTaskIds.push(chunkResult.readyFinalizeId);
+          console.log(`[Orchestrator] 🚀 P88: 主动调度 finalize 任务: ${chunkResult.readyFinalizeId}`);
         }
       } catch (chunkErr) {
         console.warn(`[Orchestrator] ⚠️ V5: chunk 进度检查失败: ${chunkErr}`);
@@ -266,6 +274,21 @@ export class Orchestrator {
 
     // ── 1. 质量评估及决策 ──
     if (taskTree.qualityReviewEnabled !== false) {
+      // 🔧 P84 修复：V5 Map-Reduce chunk 任务跳过字数前置检查和 LLM 质检
+      // 根因：chunk 任务的 prompt 继承了父任务的总字数要求（如"不少于 3 万字"），
+      // 但每个 chunk 只分析源文件的一段，产出 3000-5000 字是正确行为。
+      // extractWordCountRequirement 提取到 30000 → 实际 4000 字 < 12000 阈值 → 触发 decomposeFailedTask
+      // → 每个 chunk 被创建 5 个无意义续写任务（7 chunks × 5 = 35 个），浪费 35+ 次 LLM 调用。
+      // 修复：chunk 任务（map/reduce phase）的质量由 checkChunkProgress 管理，跳过通用质检流程。
+      // finalize 任务保留质检（它的产出是最终交付物，需要质量保证）。
+      const isChunkMapOrReduce = subTask.metadata?.isChunkTask
+        && subTask.metadata.chunkPhase !== "finalize";
+      if (isChunkMapOrReduce) {
+        console.log(
+          `[Orchestrator] 🗺️ P84: chunk 任务 (${subTask.metadata?.chunkPhase} #${subTask.metadata?.chunkIndex}) 跳过字数前置检查和 LLM 质检`,
+        );
+        // 直接跳到后续的文件验证和保存步骤
+      } else {
       try {
         console.log(`[Orchestrator] 🔍 开始质量评估：${subTask.id}`);
 
@@ -963,7 +986,8 @@ export class Orchestrator {
           console.warn(`[Orchestrator] ⚠️ P57: 质检异常（未知类型或重试耗尽），降级通过: ${errMsg.substring(0, 120)}`);
         }
       }
-    }
+    } // end P84 else (非 chunk map/reduce 任务)
+    } // end qualityReviewEnabled
 
     // 如果决策是 restart 或 overthrow，跳过后续处理
     if (result.needsRequeue || result.markedFailed) {
@@ -1883,6 +1907,23 @@ export class Orchestrator {
           gate.status = "skipped";
           gate.error = "自动跳过：waitForChildren=true 但无实际子任务（children=[]），所有兄弟任务已完成";
           gate.completedAt = now;
+        }
+      }
+    }
+
+    // 🔧 P90 修复：自动跳过 chunk 任务的无意义续写
+    // 根因：P84 修复前，chunk map 任务的字数检查误触发 decomposeFailedTask，
+    // 每个 chunk 创建 5 个续写任务（7 chunks × 5 = 35 个），这些续写 pending 永远阻塞轮次完成。
+    // 修复：当 chunk 父任务已完成时，其续写任务自动标记 skipped。
+    for (const t of roundTasks) {
+      if (t.status === "pending" && t.metadata?.isContinuation && t.metadata.continuationOf) {
+        const contParent = taskTree.subTasks.find(st => st.id === t.metadata!.continuationOf);
+        // 父任务是 chunk 任务且已完成 → 续写无意义
+        if (contParent?.metadata?.isChunkTask && contParent.status === "completed") {
+          t.status = "skipped";
+          t.error = "P90: chunk 任务的续写自动跳过（chunk 已完成，续写无意义）";
+          t.completedAt = now;
+          console.log(`[Orchestrator] 🗺️ P90: 自动跳过 chunk 续写: ${t.id}`);
         }
       }
     }
@@ -3382,12 +3423,12 @@ export class Orchestrator {
    * 
    * @param taskTree 任务树
    * @param completedChunk 刚完成的 chunk 子任务
-   * @returns finalize 产出的文件路径（如果触发），否则 undefined
+   * @returns 包含 completedPath（finalize 产出路径）和 readyFinalizeId（就绪的 finalize 任务 ID）
    */
   async checkChunkProgress(
     taskTree: TaskTree,
     completedChunk: SubTask,
-  ): Promise<string | undefined> {
+  ): Promise<{ completedPath?: string; readyFinalizeId?: string } | undefined> {
     const meta = completedChunk.metadata;
     if (!meta?.isChunkTask || !meta.chunkOf) return undefined;
 
@@ -3411,6 +3452,82 @@ export class Orchestrator {
       console.log(
         `[Orchestrator] 📊 V5: Map 进度 ${mapCompleted}/${mapTasks.length} (${parentId})`,
       );
+
+      // 🔧 P87b: 所有 map 任务完成后，用实际 producedFilePaths 更新 finalize 的 chunkInputFiles
+      // 根因：decomposeIntoMapReduce 在分解时硬编码 tasks/{sessionId}/ 路径作为 chunkInputFiles，
+      // 但 followup-runner 注入的落盘指令让 LLM 写到 workspace/{rootTaskId}/，
+      // 导致 finalize 的 prompt 中引用的文件路径可能与实际落盘路径不一致（chunk-2/chunk-5 缺失）。
+      // 修复：当所有 map 完成时，从每个 map 的 producedFilePaths 收集实际路径，更新 finalize 的输入。
+      if (mapCompleted === mapTasks.length && finalizeTask && finalizeTask.status === "pending") {
+        // 🔧 P88: 所有 map 完成，主动返回 finalize 就绪信号
+        // 根因：finalize 依赖全部满足但无人主动入队，只靠 drain orphan recovery 被动发现，
+        // 在 drain 繁忙（处理续写任务）或 session 结束前可能永远不触发。
+        const p88FinalizeReady = finalizeTask.id;
+
+        const actualInputFiles: string[] = [];
+        let anyMismatch = false;
+        const originalInputFiles = finalizeTask.metadata?.chunkInputFiles ?? [];
+
+        for (const mt of mapTasks.sort((a, b) => (a.metadata?.chunkIndex ?? 0) - (b.metadata?.chunkIndex ?? 0))) {
+          const actualPath = mt.metadata?.producedFilePaths?.[0];
+          if (actualPath) {
+            actualInputFiles.push(actualPath);
+            const chunkIdx = mt.metadata?.chunkIndex ?? 0;
+            const expectedPath = originalInputFiles[chunkIdx - 1];
+            // 标准化路径比较（统一分隔符）
+            if (expectedPath && path.normalize(actualPath) !== path.normalize(expectedPath)) {
+              anyMismatch = true;
+            }
+          } else {
+            // 没有 producedFilePaths，回退到原始预期路径
+            const chunkIdx = mt.metadata?.chunkIndex ?? 0;
+            const fallbackPath = originalInputFiles[chunkIdx - 1];
+            if (fallbackPath) {
+              actualInputFiles.push(fallbackPath);
+            }
+            console.warn(
+              `[Orchestrator] ⚠️ P87b: chunk-${mt.metadata?.chunkIndex} 缺少 producedFilePaths，使用预期路径`,
+            );
+          }
+        }
+
+        if (anyMismatch && actualInputFiles.length > 0) {
+          // 更新 finalize 的 metadata.chunkInputFiles
+          if (!finalizeTask.metadata) finalizeTask.metadata = {};
+          finalizeTask.metadata.chunkInputFiles = actualInputFiles;
+
+          // 更新 finalize 的 prompt 中的文件路径
+          const newFileList = actualInputFiles.map((f, i) => `${i + 1}. ${f}`).join("\n");
+          // 替换 prompt 中的文件列表（在"请读取以下分段分析结果"之后的编号列表）
+          const promptLines = finalizeTask.prompt.split("\n");
+          const newPromptLines: string[] = [];
+          let inFileList = false;
+          let fileListReplaced = false;
+          for (const line of promptLines) {
+            if (!fileListReplaced && /^\d+\.\s/.test(line.trim()) && line.includes("chunk_") || line.includes("reduce_")) {
+              if (!inFileList) {
+                inFileList = true;
+                newPromptLines.push(newFileList);
+                fileListReplaced = true;
+              }
+              // 跳过旧的文件列表行
+              continue;
+            }
+            inFileList = false;
+            newPromptLines.push(line);
+          }
+          finalizeTask.prompt = newPromptLines.join("\n");
+
+          await this.taskTreeManager.save(taskTree);
+          console.log(
+            `[Orchestrator] 🔧 P87b: finalize 输入路径已更新 (${actualInputFiles.length} 个文件)\n` +
+            `  路径修正: ${actualInputFiles.map(p => path.basename(p)).join(", ")}`,
+          );
+        }
+
+        // P88: 返回 finalize 就绪信号
+        return { readyFinalizeId: p88FinalizeReady };
+      }
     } else if (phase === "reduce") {
       console.log(
         `[Orchestrator] 📊 V5: Reduce 进度 ${reduceCompleted}/${reduceTasks.length}, Map ${mapCompleted}/${mapTasks.length} (${parentId})`,
@@ -3441,7 +3558,7 @@ export class Orchestrator {
           `  最终产出: ${finalOutputPath ?? "(无文件)"}`,
         );
 
-        return finalOutputPath;
+        return { completedPath: finalOutputPath };
       }
     }
 
@@ -3460,6 +3577,18 @@ export class Orchestrator {
     taskTree: TaskTree,
     subTask: SubTask,
   ): Promise<SubTask[]> {
+    // 🔧 P89 修复：chunk map/reduce 任务不创建续写
+    // 根因：chunk 任务的 prompt 继承父任务的字数要求（如"不少于3万字"），
+    // 但每个 chunk 只分析源文件的一段，产出 3000-5000 字是正确行为。
+    // 即使 P84 跳过了质检，其他代码路径（V6 前置验证、onTaskFailed）仍可能调用此方法。
+    // 修复：chunk map/reduce 直接返回空数组，finalize 保留续写能力。
+    if (subTask.metadata?.isChunkTask && subTask.metadata.chunkPhase !== "finalize") {
+      console.log(
+        `[Orchestrator] 🗺️ P89: chunk 任务 (${subTask.metadata.chunkPhase} #${subTask.metadata.chunkIndex}) 不创建续写: ${subTask.id}`,
+      );
+      return [];
+    }
+
     // 🔧 P0-A 修复：续写深度上限，防止 cont-2 → cont-2-cont-2 无限递归
     // 根因：续写子任务字数不达标时会再次触发 decomposeFailedTask，创建更深层的续写，
     // 导致产出文件碎片化（如 第03章_完结篇.txt、第03章_终章续写.txt、第03章_终篇补完...）

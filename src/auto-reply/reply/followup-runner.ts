@@ -46,7 +46,7 @@ import { estimateTokens, allocateBudget, truncateToTokenBudget, type BudgetReque
 
 // ── P10: 输出验证门（OutputValidator）──
 // 规则驱动，零 LLM 调用。在标记 completed 之前拦截明显无效输出。
-type OutputFailureCode = "hallucinated_tool_calls" | "output_too_short" | "context_overflow_signal" | "llm_refusal" | "excessive_repetition" | "delegation_attempt";
+type OutputFailureCode = "hallucinated_tool_calls" | "output_too_short" | "context_overflow_signal" | "llm_refusal" | "excessive_repetition" | "delegation_attempt" | "api_content_block";
 interface OutputValidationResult {
   valid: boolean;
   failureCode?: OutputFailureCode;
@@ -166,6 +166,35 @@ function validateSubTaskOutput(
         suggestedAction: "retry",
       };
     }
+  }
+
+  // 规则 5：🔧 P85 检测 API 错误/内容审查退回
+  // 根因：LLM API 返回 PROHIBITED_CONTENT/SAFETY 等错误时，错误消息作为 outputText 传入，
+  // 但前面的规则都不匹配（有文件工具调用 → 跳过规则2，不是拒绝模式 → 跳过规则3）。
+  // 结果：错误输出被标记为 completed，任务看似成功但产出内容是错误消息。
+  const apiErrorPatterns = [
+    /PROHIBITED_CONTENT/i,
+    /SAFETY.*block/i,
+    /blocked\s+by\s+(?:Google|Gemini|OpenAI|Anthropic|content\s+filter)/i,
+    /content.*(?:policy|moderation).*(?:violation|block|reject)/i,
+    /LLM\s+error:\s*\{/i,
+    /RECITATION/i,
+  ];
+  if (apiErrorPatterns.some((p) => p.test(outputText))) {
+    // 如果有实际的文件工具调用，说明 LLM 在报错前已产出有效内容，降级放行
+    const hasWriteTool = toolMetas.some((m) => m.toolName === "write");
+    if (!hasWriteTool) {
+      return {
+        valid: false,
+        failureCode: "api_content_block",
+        failureReason: `检测到 API 内容审查/错误: "${outputText.substring(0, 120)}"`,
+        suggestedAction: "retry",
+      };
+    }
+    // 有 write 工具调用 → LLM 在报错前已写入文件，降级放行但记录警告
+    console.warn(
+      `[OutputValidator] ⚠️ P85: API 错误但有文件产出，降级放行: ${outputText.substring(0, 100)}`,
+    );
   }
 
   return { valid: true };
@@ -753,7 +782,15 @@ export function createFollowupRunner(params: {
                   const isChunkTask = subTask?.metadata?.isChunkTask ?? false;
                   const mrPrompts = getPrompts().mapReduce;
                   const fileTypeHint = isChunkTask ? mrPrompts.chunkFileTypeHint : mrPrompts.defaultFileTypeHint;
-                  return `[⚠️ 强制规则] 你必须亲自使用 write 工具将生成内容写入${fileTypeHint}，保存到 ${taskOutputDir}/ 目录下（文件名含任务摘要）。然后在聊天中仅回复简短确认。禁止将完整内容直接输出到聊天。\n[🚫 禁止委派] 严禁调用 enqueue_task、sessions_spawn、batch_enqueue_tasks。你必须自己直接完成任务，不能把任务交给任何人。${iterationHint}\n\n${queued.prompt}`;
+                  // 🔧 P87a: chunk 任务不注入冲突的写入目录指令
+                  // 根因：decomposeIntoMapReduce 的 chunk prompt 已指定精确路径（~/.clawdbot/tasks/{sessionId}/chunk_XXX.md），
+                  // 但此处注入的 "保存到 workspace/{rootTaskId}/" 与之冲突，LLM 有时遵循这里的指令写到 workspace 目录，
+                  // 导致文件不在 finalize 预期的路径下（chunk-2/chunk-5 缺失问题）。
+                  // 修复：chunk 任务跳过目录指定（chunk prompt 已有精确路径），只保留"必须用 write 工具"和"禁止委派"。
+                  const dirHint = isChunkTask
+                    ? "（请严格按照任务描述中指定的路径和文件名保存）"
+                    : `，保存到 ${taskOutputDir}/ 目录下（文件名含任务摘要）`;
+                  return `[⚠️ 强制规则] 你必须亲自使用 write 工具将生成内容写入${fileTypeHint}${dirHint}。然后在聊天中仅回复简短确认。禁止将完整内容直接输出到聊天。\n[🚫 禁止委派] 严禁调用 enqueue_task、sessions_spawn、batch_enqueue_tasks。你必须自己直接完成任务，不能把任务交给任何人。${iterationHint}\n\n${queued.prompt}`;
                 }
                 return queued.prompt;
               })(),
@@ -1255,6 +1292,31 @@ export function createFollowupRunner(params: {
               return;
             }
 
+            // 🔧 P88: 非 decompose 决策但有新任务需要调度（如 chunk map 完成后的 finalize）
+            // 根因：checkChunkProgress 发现所有 map 完成时，将 finalize ID 加入 decomposedTaskIds，
+            // 但 P84 跳过质检导致 decision="continue"，不会走上面的 decompose 分支。
+            // 修复：独立检查 decomposedTaskIds，入队但不 return（当前任务已正常完成，继续后续流程）。
+            if (postResult.decision !== "decompose" && postResult.decomposedTaskIds && postResult.decomposedTaskIds.length > 0 && taskTree) {
+              console.log(
+                `[followup-runner] 🚀 P88: ${postResult.decomposedTaskIds.length} 个后续任务需要调度（decision=${postResult.decision}）`,
+              );
+              for (const newId of postResult.decomposedTaskIds) {
+                const newSubTask = taskTree.subTasks.find(t => t.id === newId);
+                if (newSubTask && newSubTask.status === "pending") {
+                  const newFollowupRun = buildFollowupRun(queued, newSubTask);
+                  if (queued.run.sessionKey) {
+                    const resolvedQueue = resolveQueueSettings({
+                      cfg: queued.run.config ?? ({} as any),
+                      inlineMode: "followup",
+                    });
+                    enqueueFollowupRun(queued.run.sessionKey, newFollowupRun, resolvedQueue, "none");
+                    console.log(`[followup-runner] 🚀 P88: 后续任务已入队: ${newId} (${newSubTask.summary})`);
+                  }
+                }
+              }
+              // 不 return — 当前任务已正常完成，继续后续流程（进度报告、轮次检查等）
+            }
+
             if (postResult.markedFailed) {
               progressReporter?.onQualityReviewComplete(false);
               progressReporter?.onTaskFailed("质量严重不通过 (overthrow)");
@@ -1306,6 +1368,8 @@ export function createFollowupRunner(params: {
                     completedSubTask,
                     fileContent || undefined,
                     queued.run.config,
+                    fallbackProvider,
+                    fallbackModel,
                   );
                   if (summary && summary.length > 10) {
                     if (!completedSubTask.metadata) completedSubTask.metadata = {};
@@ -1356,13 +1420,41 @@ export function createFollowupRunner(params: {
                       ? path.join(wsDir, "workspace", queued.rootTaskId)
                       : path.join(wsDir, "workspace");
                     await fs.mkdir(taskOutputDir, { recursive: true });
-                    // 🔧 P38 修复：从任务树目标提取作品名称（而非用户 prompt 片段）
-                    // 尝试提取书名号《》中的内容作为文件名，回退到 rootTask 前30字
+                    // 🔧 P38+P83: 多层回退提取合理的完整版文件名
                     const rootTaskStr = taskTree.rootTask ?? "";
+                    const sanitize = (s: string) => s.replace(/[\\/:*?"<>|\n\r\s]+/g, "_").replace(/^_+|_+$/g, "");
+                    let rootGoal = "";
+                    // 层1：《》书名号
                     const bookMatch = rootTaskStr.match(/[《\u300A]([^》\u300B]+)[》\u300B]/);
-                    const rootGoal = bookMatch
-                      ? bookMatch[1].replace(/[\\/:*?"<>|\n\r]/g, "_")
-                      : (rootTaskStr.substring(0, 30).replace(/[\\/:*?"<>|\n\r]/g, "_") || "output");
+                    if (bookMatch) {
+                      rootGoal = sanitize(bookMatch[1]);
+                    }
+                    // 层2：子任务 summary 中提取核心名词（取最短且有意义的 summary）
+                    if (!rootGoal && taskTree.subTasks) {
+                      const summaries = taskTree.subTasks
+                        .filter(t => t.summary && t.summary.length > 4 && t.summary.length < 60 && !t.metadata?.isRootTask)
+                        .map(t => t.summary!);
+                      if (summaries.length > 0) {
+                        // 从 summary 中提取《》或引号中的名称
+                        for (const s of summaries) {
+                          const m = s.match(/[《\u300A]([^》\u300B]+)[》\u300B]/) || s.match(/[「""]([^」""]+)[」""]/);
+                          if (m) { rootGoal = sanitize(m[1]); break; }
+                        }
+                        // 回退：取第一个 summary 的前20字
+                        if (!rootGoal) {
+                          rootGoal = sanitize(summaries[0].substring(0, 20));
+                        }
+                      }
+                    }
+                    // 层3：rootTask 中提取文件路径里的文件名
+                    if (!rootGoal) {
+                      const fileMatch = rootTaskStr.match(/[\\\/]([^\s\\\/]+?)\.(?:txt|md)\b/);
+                      if (fileMatch) rootGoal = sanitize(fileMatch[1]);
+                    }
+                    // 层4：rootTask 前20字清洗
+                    if (!rootGoal) {
+                      rootGoal = sanitize(rootTaskStr.substring(0, 20)) || "output";
+                    }
                     const copyName = `${rootGoal}_完整版.txt`;
                     userCopyPath = path.join(taskOutputDir, copyName);
                     await fs.copyFile(roundResult.mergedFilePath, userCopyPath);

@@ -93,6 +93,13 @@ const LIGHT_TASK_PATTERNS = [
   /(?:extract).*(?:keywords|tags|key\s*points)/i,
 ];
 
+/** P82: llm_light 排除词——含这些关键词说明是实质性任务，不应走轻量策略 */
+const LIGHT_EXCLUSION_PATTERNS = [
+  /(?:深度|详细|长篇|全面|全方位|完整|深入|精细|彻底)/,
+  /(?:in[\s-]?depth|detailed|comprehensive|thorough|exhaustive)/i,
+  /(?:分析|研究|调研).*(?:报告|文本|文件|内容)/,
+];
+
 // ────────────────────────────────────────────────────────────
 // 策略匹配模式
 // ────────────────────────────────────────────────────────────
@@ -167,10 +174,14 @@ export function routeStrategy(subTask: SubTask): ExecutionStrategy {
   // 4. llm_light 检测：短 prompt + 简单任务模式
   if (promptLen > 0 && promptLen <= LLM_LIGHT_MAX_PROMPT_LEN) {
     const text = `${subTask.prompt ?? ""} ${subTask.summary ?? ""}`;
-    for (const pattern of LIGHT_TASK_PATTERNS) {
-      if (pattern.test(text)) {
-        console.log(`[strategy-router] 💡 关键词匹配到 llm_light 策略: "${subTask.summary?.substring(0, 40)}"`);
-        return "llm_light";
+    // P82: 排除词检测——含深度/详细/长篇等关键词说明是实质性任务
+    const hasExclusion = LIGHT_EXCLUSION_PATTERNS.some(p => p.test(text));
+    if (!hasExclusion) {
+      for (const pattern of LIGHT_TASK_PATTERNS) {
+        if (pattern.test(text)) {
+          console.log(`[strategy-router] 💡 关键词匹配到 llm_light 策略: "${subTask.summary?.substring(0, 40)}"`);
+          return "llm_light";
+        }
       }
     }
   }

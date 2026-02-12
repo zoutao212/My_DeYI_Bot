@@ -179,7 +179,32 @@ export async function runPreparedReply(
       })
     : "";
   const groupSystemPrompt = sessionCtx.GroupSystemPrompt?.trim() ?? "";
-  const extraSystemPrompt = [groupIntro, groupSystemPrompt].filter(Boolean).join("\n\n");
+
+  // P89: 检测用户消息中的"记忆写入"意图，注入记忆目录路径引导
+  // 根因：用户说"写入记忆库"时，LLM 不知道记忆目录结构，倾向输出纯文本而非使用 write/edit 工具
+  const _p89Body = (ctx.CommandBody ?? ctx.RawBody ?? ctx.Body ?? "").toLowerCase();
+  const _p89HasMemoryWriteIntent =
+    /(?:写入|保存|整理|归档|更新|同步).{0,8}(?:记忆|memory|记忆库|记忆文件)/i.test(_p89Body) ||
+    /(?:记忆|memory).{0,8}(?:写入|保存|整理|归档|更新|同步)/i.test(_p89Body);
+  let memoryWriteHint = "";
+  if (_p89HasMemoryWriteIntent && workspaceDir) {
+    const p = (s: string) => `${workspaceDir}/${s}`.replace(/\//g, "\\");
+    memoryWriteHint = [
+      "[📝 记忆写入指引]",
+      "用户要求将内容写入记忆库。你**必须使用 write 或 edit 工具实际写入文件**，不要只输出纯文本。",
+      "记忆目录结构：",
+      `- 全局记忆：${p("memory/")}`,
+      `- 角色记忆：${p("characters/lina/memory/")}（含 core-memories.md 核心记忆文件）`,
+      `- 任务产出：${p("workspace/")}（各轮任务的产出文件）`,
+      "操作要求：",
+      "1. 先用 exec/read 检查目标目录和现有文件",
+      "2. 整理内容后用 write 工具写入目标路径（绝对路径）",
+      "3. 如需更新已有文件，用 edit 工具精确修改",
+      "4. 写入完成后确认文件路径",
+    ].join("\n");
+  }
+
+  const extraSystemPrompt = [groupIntro, groupSystemPrompt, memoryWriteHint].filter(Boolean).join("\n\n");
   const baseBody = sessionCtx.BodyStripped ?? sessionCtx.Body ?? "";
   // Use CommandBody/RawBody for bare reset detection (clean message without structural context).
   const rawBodyTrimmed = (ctx.CommandBody ?? ctx.RawBody ?? ctx.Body ?? "").trim();

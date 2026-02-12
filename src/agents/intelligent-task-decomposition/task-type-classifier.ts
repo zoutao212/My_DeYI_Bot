@@ -55,8 +55,10 @@ const TASK_TYPE_RULES: TaskTypeRule[] = [
     keywords: [
       "写", "创作", "撰写", "小说", "文章", "故事", "章节", "散文", "诗", "剧本",
       "续写", "改写", "仿写", "翻译", "论文", "报告", "文案", "博客", "日记",
+      "角色卡", "人物卡", "人设", "世界观", "设定集",
       "write", "novel", "story", "chapter", "essay", "article", "blog",
       "translate", "script", "poem", "draft", "compose", "author",
+      "character card", "character sheet",
     ],
     structuralPatterns: [
       /(?:写|创作|撰写)\s*(?:\d+|[一二三四五六七八九十百千万]+)\s*(?:字|章|篇)/,
@@ -78,7 +80,7 @@ const TASK_TYPE_RULES: TaskTypeRule[] = [
     type: "coding",
     weight: 85,
     keywords: [
-      "代码", "编程", "实现", "开发", "修复", "重构", "优化", "bug", "特性",
+      "代码", "编程", "实现", "开发", "修复", "bug", "特性",
       "函数", "类", "接口", "API", "模块", "组件", "测试", "单元测试",
       "code", "program", "implement", "develop", "fix", "refactor",
       "function", "class", "interface", "module", "component", "test",
@@ -89,6 +91,9 @@ const TASK_TYPE_RULES: TaskTypeRule[] = [
       /(?:import|require|from)\s+['"][^'"]+['"]/,
       /(?:function|class|interface|type|const|let|var)\s+\w+/,
       /\.(?:ts|js|py|java|go|rs|cpp|rb|swift|kt)(?:\s|$)/,
+      // P80: 「重构/优化/注入」只有在代码上下文中才加分
+      /(?:重构|优化|注入)\s*(?:代码|函数|类|接口|模块|组件|系统|服务|架构)/,
+      /(?:refactor|optimize|inject)\s+(?:code|function|class|module|service)/i,
     ],
     validationStrategies: ["file_output", "completeness"],
     autoDecomposeHeuristic: (prompt) => {
@@ -184,7 +189,7 @@ const TASK_TYPE_RULES: TaskTypeRule[] = [
       /(?:分析|学习|提取)\s*(?:以下|这个|这篇|该)/,
       /(?:analyze|extract|summarize)\s+(?:the|this|these)/i,
     ],
-    validationStrategies: ["completeness", "structured_output"],
+    validationStrategies: ["completeness", "structured_output", "file_output"],
     autoDecomposeHeuristic: (prompt) => {
       // 分析类：大文件或多文件输入
       const filePattern = /(?:[A-Za-z]:[\\\/][^\s]+|\/[^\s]+|\.\/[^\s]+)\.(?:txt|md|csv|json)/i;

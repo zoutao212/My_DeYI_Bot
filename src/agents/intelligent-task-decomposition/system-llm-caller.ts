@@ -70,13 +70,42 @@ function extractText(res: { content: Array<{ type: string; text?: string; thinki
  * @param params 配置参数
  * @returns LLMCaller 实例
  */
+/**
+ * P79: 从 config 中自动检测可用的 provider/model
+ * 当未显式指定 provider 时，从 config.models.providers 中查找第一个有配置的 provider，
+ * 避免回退到硬编码的 DEFAULT_PROVIDER（anthropic）导致 "No API key found" 错误。
+ */
+function autoDetectProviderFromConfig(config?: ClawdbotConfig): { provider?: string; modelId?: string } {
+  if (!config) return {};
+  const providers = config.models?.providers;
+  if (!providers || typeof providers !== "object") return {};
+  for (const [providerKey, providerCfg] of Object.entries(providers)) {
+    const trimmed = providerKey.trim();
+    if (!trimmed) continue;
+    // 有 models 配置的 provider 视为可用
+    const models = (providerCfg as { models?: Array<{ id?: string }> })?.models;
+    if (models && models.length > 0 && models[0]?.id) {
+      return { provider: trimmed, modelId: models[0].id };
+    }
+  }
+  return {};
+}
+
 export function createSystemLLMCaller(params?: SystemLLMCallerConfig): LLMCaller {
-  const provider = params?.provider ?? DEFAULT_PROVIDER;
-  const modelId = params?.modelId ?? DEFAULT_MODEL;
+  // P79: 未显式指定 provider 时，从 config 中自动检测
+  const autoDetected = (!params?.provider && params?.config)
+    ? autoDetectProviderFromConfig(params.config)
+    : {};
+  const provider = params?.provider ?? autoDetected.provider ?? DEFAULT_PROVIDER;
+  const modelId = params?.modelId ?? autoDetected.modelId ?? DEFAULT_MODEL;
   const config = params?.config;
   const maxTokens = params?.maxTokens ?? 8192;
   const temperature = params?.temperature ?? 0.3;
   const timeoutMs = params?.timeoutMs ?? 120_000;
+
+  if (autoDetected.provider) {
+    console.log(`[SystemLLMCaller] P79: 自动检测到 provider=${autoDetected.provider}, model=${autoDetected.modelId}`);
+  }
 
   return {
     async call(prompt: string): Promise<string> {
@@ -132,6 +161,33 @@ export function createSystemLLMCaller(params?: SystemLLMCallerConfig): LLMCaller
         console.log(`[SystemLLMCaller] LLM 响应长度: ${text.length}`);
 
         if (!text) {
+          // P81: 空响应时，如果模型有 reasoning=true，关闭 reasoning 重试一次
+          // Gemini flash 等模型可能不兼容 thinking mode，导致空 text + 空 thinking
+          if ((model as any).reasoning) {
+            console.warn("[SystemLLMCaller] ⚠️ LLM 返回空响应（reasoning=true），关闭 reasoning 重试一次");
+            const noReasoningModel = { ...model, reasoning: false } as typeof model;
+            const retryRes = await completeSimple(
+              noReasoningModel,
+              {
+                messages: [
+                  {
+                    role: "user" as const,
+                    content: prompt,
+                    timestamp: Date.now(),
+                  },
+                ],
+              },
+              {
+                apiKey,
+                maxTokens,
+                temperature,
+                signal: controller.signal,
+              },
+            );
+            const retryText = extractText(retryRes as { content: Array<{ type: string; text?: string; thinking?: string }> });
+            console.log(`[SystemLLMCaller] P81 重试响应长度: ${retryText.length}`);
+            if (retryText) return retryText;
+          }
           console.warn("[SystemLLMCaller] ⚠️ LLM 返回空响应，使用默认降级");
           throw new Error("LLM 返回空响应");
         }

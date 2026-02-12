@@ -154,6 +154,14 @@ export function detectToolCallIntentInText(text: string): boolean {
   // 模式4: 明确提及无法使用函数调用的文本
   if (/(?:cannot|can't|无法|不能)\s*(?:use|call|invoke|使用|调用)\s*(?:function|tool|函数|工具)/i.test(text)) return true;
 
+  // P88 模式5: LLM 输出 [Historical context: ... called tool "xxx" with arguments: {...}] 格式的幻觉工具调用
+  // Gemini 偶尔在同一 session 中对特定请求输出此格式（function calling 偶发失败）
+  if (/\[Historical context:.*?called tool ["']\w+["'].*?with arguments/i.test(text)) return true;
+
+  // P88 模式6: LLM 直接在文本中输出 JSON 格式的工具调用（无代码块包裹）
+  // 例如: I'll call write({"content": "...", "path": "..."})
+  if (/\bcalled?\s+(?:tool\s+)?["']?(read|write|edit|exec|process)["']?\s*(?:with|\()/i.test(text)) return true;
+
   return false;
 }
 
@@ -436,6 +444,75 @@ function tryParseFunctionCallSyntax(raw: string): TextToolCall | null {
   }
 
   return { tool: toolName, args, raw };
+}
+
+// ─── P88: 单次幻觉工具调用解析（Spot Recovery）──────────────
+
+/**
+ * P88: 从非标准格式文本中解析工具调用（单次幻觉回退）。
+ *
+ * 当 provider 正常支持 function calling（hadPriorToolCalls=true），
+ * 但当前回复偶发性地将工具调用输出为纯文本时，使用此函数解析。
+ *
+ * 支持格式：
+ *   1. 标准 ```tool 代码块（委托给 parseTextToolCalls）
+ *   2. [Historical context: ... called tool "xxx" with arguments: {...}] 格式
+ *   3. 裸 JSON 格式 {"tool": "xxx", "args": {...}} 在文本中
+ */
+export function parseSpotToolCallsFromText(text: string): TextToolCall[] {
+  // 策略1: 优先尝试标准 ```tool 代码块
+  const standard = parseTextToolCalls(text);
+  if (standard.length > 0) return standard;
+
+  const results: TextToolCall[] = [];
+
+  // 策略2: [Historical context: ... called tool "xxx" with arguments: {...}. Do not mimic...]
+  // Gemini 偶发输出此格式来表达工具调用意图
+  const historicalPattern = /called tool ["'](\w+)["']\s+with arguments:\s*(\{[\s\S]*?\})\s*\.\s*Do not mimic/g;
+  let match: RegExpExecArray | null;
+  while ((match = historicalPattern.exec(text)) !== null) {
+    const toolName = match[1];
+    const argsStr = match[2];
+    try {
+      const args = JSON.parse(argsStr);
+      if (args && typeof args === "object") {
+        results.push({ tool: toolName, args, raw: match[0] });
+      }
+    } catch {
+      // JSON 中可能含换行的字符串值，尝试清理后重新解析
+      try {
+        const cleaned = argsStr.replace(/\n/g, "\\n");
+        const args = JSON.parse(cleaned);
+        if (args && typeof args === "object") {
+          results.push({ tool: toolName, args, raw: match[0] });
+        }
+      } catch {
+        // 彻底无法解析，跳过
+        console.warn(
+          `[text-tool-fallback] ⚠️ P88: 无法解析 Historical context 工具调用: ${argsStr.slice(0, 200)}`,
+        );
+      }
+    }
+  }
+
+  if (results.length > 0) return results.slice(0, MAX_CALLS_PER_ITERATION);
+
+  // 策略3: 裸 JSON {"tool": "xxx", "args": {...}} 嵌入在文本中（无代码块）
+  const bareJsonPattern = /\{\s*["']tool["']\s*:\s*["'](\w+)["']\s*,\s*["']args["']\s*:\s*(\{[\s\S]*?\})\s*\}/g;
+  while ((match = bareJsonPattern.exec(text)) !== null) {
+    const toolName = match[1];
+    const argsStr = match[2];
+    try {
+      const args = JSON.parse(argsStr);
+      if (args && typeof args === "object") {
+        results.push({ tool: toolName, args, raw: match[0] });
+      }
+    } catch {
+      // 跳过
+    }
+  }
+
+  return results.slice(0, MAX_CALLS_PER_ITERATION);
 }
 
 // ─── 工具执行 ──────────────────────────────────────────────

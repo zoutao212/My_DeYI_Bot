@@ -3,10 +3,44 @@ import { describe, expect, it } from "vitest";
 import { bm25RankToScore, buildFtsQuery, mergeHybridResults } from "./hybrid.js";
 
 describe("memory hybrid helpers", () => {
-  it("buildFtsQuery tokenizes and AND-joins", () => {
+  it("buildFtsQuery tokenizes and AND-joins (English)", () => {
     expect(buildFtsQuery("hello world")).toBe('"hello" AND "world"');
     expect(buildFtsQuery("FOO_bar baz-1")).toBe('"FOO_bar" AND "baz" AND "1"');
     expect(buildFtsQuery("   ")).toBeNull();
+  });
+
+  it("buildFtsQuery handles Chinese via bigram (CJK)", () => {
+    // 纯中文：2字 bigram + 完整片段（>2字时）
+    const result = buildFtsQuery("琳娜喜欢什么");
+    expect(result).not.toBeNull();
+    // "琳娜喜欢什么" → bigrams: 琳娜, 娜喜, 喜欢, 欢什, 什么 + 完整: 琳娜喜欢什么
+    expect(result).toContain('"琳娜"');
+    expect(result).toContain('"喜欢"');
+    expect(result).toContain('"什么"');
+    // CJK tokens 之间用 OR 连接
+    expect(result).toContain(" OR ");
+    expect(result).not.toContain(" AND ");
+  });
+
+  it("buildFtsQuery handles mixed Chinese+English", () => {
+    const result = buildFtsQuery("API 密钥配置");
+    expect(result).not.toBeNull();
+    // 英文 AND 组 + CJK OR 组
+    expect(result).toContain('"API"');
+    expect(result).toContain('"密钥"');
+    expect(result).toContain('"配置"');
+  });
+
+  it("buildFtsQuery returns null for single CJK character", () => {
+    // 单字中文噪音太大，不生成 token
+    expect(buildFtsQuery("我")).toBeNull();
+  });
+
+  it("buildFtsQuery handles 2-char CJK without duplication", () => {
+    const result = buildFtsQuery("记忆");
+    expect(result).not.toBeNull();
+    // 2字片段只有一个 bigram "记忆"，不重复加完整片段
+    expect(result).toBe('"记忆"');
   });
 
   it("bm25RankToScore is monotonic and clamped", () => {

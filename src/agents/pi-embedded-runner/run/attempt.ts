@@ -1306,6 +1306,63 @@ export async function runEmbeddedAttempt(
               );
             }
           }
+
+          // ═════════════════════════════════════════════════════════════
+          // P88: 单次幻觉回退（Spot Recovery）
+          // 当 provider 正常（hadPriorToolCalls=true）但当前回复偶发性地将
+          // 工具调用输出为纯文本时（如 Gemini 偶发 function calling 失败），
+          // 解析并执行文本中的工具调用，但不标记 provider 为降级。
+          // ═════════════════════════════════════════════════════════════
+          if (
+            !promptError &&
+            !aborted &&
+            !_ttfWasDegraded &&
+            !_ttfNewlyDetected &&
+            !_ttfHasNativeToolCalls &&
+            _ttfResponseText.length > 50
+          ) {
+            const {
+              detectToolCallIntentInText: _ttfDetectIntent,
+              parseSpotToolCallsFromText: _ttfParseSpot,
+            } = await import("../../text-tool-fallback.js");
+
+            if (_ttfDetectIntent(_ttfResponseText)) {
+              const _ttfSpotCalls = _ttfParseSpot(_ttfResponseText);
+              if (_ttfSpotCalls.length > 0) {
+                log.warn(
+                  `[attempt] ⚠️ P88: provider 正常但当前回复含文本格式工具调用 ` +
+                    `(${_ttfSpotCalls.length} 个: ${_ttfSpotCalls.map((c) => c.tool).join(", ")}), ` +
+                    `执行单次回退恢复（不标记降级）`,
+                );
+
+                // 执行工具调用
+                const _ttfSpotResults = await _ttfExecute(_ttfSpotCalls, tools);
+
+                // 记录工具元数据（与原生 tool call 统一追踪）
+                for (const r of _ttfSpotResults) {
+                  toolMetas.push({
+                    toolName: r.tool,
+                    meta: r.success
+                      ? r.result.slice(0, 500)
+                      : `ERROR: ${r.error}`,
+                  });
+                }
+
+                // 注入结果并重新请求 LLM 继续
+                const _ttfSpotResultPrompt = _ttfFormatResults(_ttfSpotResults);
+                try {
+                  await abortable(activeSession.prompt(_ttfSpotResultPrompt));
+                  messagesSnapshot = activeSession.messages.slice();
+                } catch (err) {
+                  promptError = err;
+                }
+
+                log.info(
+                  `[attempt] ✅ P88 单次回退完成: ${_ttfSpotCalls.length} 个工具调用已执行`,
+                );
+              }
+            }
+          }
         }
         // ═══════════════════════════════════════════════════════════════
 

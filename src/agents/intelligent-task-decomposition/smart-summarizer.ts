@@ -52,20 +52,30 @@ const RULE_BASED_TRUNCATE_LEN = 250;
 // ────────────────────────────────────────────────────────────
 
 let _lightCaller: ReturnType<typeof createSystemLLMCaller> | null = null;
-let _lightCallerConfig: ClawdbotConfig | undefined;
+let _lightCallerCacheKey: string | undefined;
 
 /**
  * 获取或创建 llm_light 调用器（单例复用）
+ *
+ * P79: 增加 provider/modelId 参数，从运行时上下文继承实际使用的 provider，
+ * 避免回退到硬编码的 DEFAULT_PROVIDER（anthropic）导致 "No API key found" 错误。
  */
-export function getLightCaller(config?: ClawdbotConfig): ReturnType<typeof createSystemLLMCaller> {
-  if (_lightCaller && _lightCallerConfig === config) return _lightCaller;
+export function getLightCaller(
+  config?: ClawdbotConfig,
+  provider?: string,
+  modelId?: string,
+): ReturnType<typeof createSystemLLMCaller> {
+  const cacheKey = `${provider ?? ""}_${modelId ?? ""}_${config ? "cfg" : "nocfg"}`;
+  if (_lightCaller && _lightCallerCacheKey === cacheKey) return _lightCaller;
   _lightCaller = createSystemLLMCaller({
     config,
+    provider,
+    modelId,
     maxTokens: LIGHT_MAX_TOKENS,
     temperature: LIGHT_TEMPERATURE,
     timeoutMs: LIGHT_TIMEOUT_MS,
   });
-  _lightCallerConfig = config;
+  _lightCallerCacheKey = cacheKey;
   return _lightCaller;
 }
 
@@ -88,6 +98,8 @@ export async function generateSmartSummary(
   subTask: SubTask,
   fileContent?: string,
   config?: ClawdbotConfig,
+  provider?: string,
+  modelId?: string,
 ): Promise<string> {
   const effectiveContent = fileContent || subTask.output || "";
   if (!effectiveContent || effectiveContent.length < 50) {
@@ -95,7 +107,7 @@ export async function generateSmartSummary(
   }
 
   try {
-    const caller = getLightCaller(config);
+    const caller = getLightCaller(config, provider, modelId);
     const taskType = subTask.taskType ?? "generic";
     const prompt = buildSummaryPrompt(subTask, effectiveContent, taskType);
     const result = await caller.call(prompt);
@@ -136,6 +148,8 @@ export async function generateSmartSummary(
 export async function batchGenerateSummaries(
   tasks: Array<{ subTask: SubTask; fileContent?: string }>,
   config?: ClawdbotConfig,
+  provider?: string,
+  modelId?: string,
 ): Promise<Map<string, string>> {
   const result = new Map<string, string>();
   if (tasks.length === 0) return result;
@@ -143,7 +157,7 @@ export async function batchGenerateSummaries(
   // 小批量直接逐个处理
   if (tasks.length <= 2) {
     for (const { subTask, fileContent } of tasks) {
-      const summary = await generateSmartSummary(subTask, fileContent, config);
+      const summary = await generateSmartSummary(subTask, fileContent, config, provider, modelId);
       result.set(subTask.id, summary);
     }
     return result;
@@ -152,7 +166,7 @@ export async function batchGenerateSummaries(
   // 大批量：单次 LLM 调用批量处理
   const batch = tasks.slice(0, BATCH_SUMMARY_MAX_TASKS);
   try {
-    const caller = getLightCaller(config);
+    const caller = getLightCaller(config, provider, modelId);
     const prompt = buildBatchSummaryPrompt(batch);
     const llmResult = await caller.call(prompt);
     const parsed = parseBatchSummaryResponse(llmResult, batch);

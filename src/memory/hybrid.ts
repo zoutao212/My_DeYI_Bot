@@ -21,14 +21,47 @@ export type HybridKeywordResult = {
 };
 
 export function buildFtsQuery(raw: string): string | null {
-  const tokens =
+  // 英文/数字 token（保持原有逻辑）
+  const alphaTokens =
     raw
       .match(/[A-Za-z0-9_]+/g)
       ?.map((t) => t.trim())
       .filter(Boolean) ?? [];
-  if (tokens.length === 0) return null;
-  const quoted = tokens.map((t) => `"${t.replaceAll('"', "")}"`);
-  return quoted.join(" AND ");
+
+  // CJK 字符 bigram 切分（中日韩统一表意文字）
+  const cjkSegments = raw.match(/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]+/g) ?? [];
+  const cjkTokens: string[] = [];
+  for (const segment of cjkSegments) {
+    // 2字及以上：按 bigram（2字滑动窗口）切分
+    if (segment.length >= 2) {
+      for (let i = 0; i <= segment.length - 2; i++) {
+        cjkTokens.push(segment.substring(i, i + 2));
+      }
+      // 完整片段也加入（提升精确匹配权重）
+      if (segment.length > 2) {
+        cjkTokens.push(segment);
+      }
+    }
+    // 单字不加入（噪音太大）
+  }
+
+  const allTokens = [...alphaTokens, ...cjkTokens];
+  if (allTokens.length === 0) return null;
+
+  const quoted = allTokens.map((t) => `"${t.replaceAll('"', "")}"`);
+  // 英文用 AND（精确匹配），CJK bigram 用 OR（部分命中也有价值）
+  if (alphaTokens.length > 0 && cjkTokens.length === 0) {
+    return quoted.join(" AND ");
+  }
+  if (alphaTokens.length === 0 && cjkTokens.length > 0) {
+    return quoted.join(" OR ");
+  }
+  // 混合查询：英文 AND 组 + CJK OR 组，两组之间用 OR 连接
+  const alphaQuoted = alphaTokens.map((t) => `"${t.replaceAll('"', "")}"`);
+  const cjkQuoted = cjkTokens.map((t) => `"${t.replaceAll('"', "")}"`);
+  const alphaPart = alphaQuoted.join(" AND ");
+  const cjkPart = cjkQuoted.join(" OR ");
+  return `(${alphaPart}) OR (${cjkPart})`;
 }
 
 export function bm25RankToScore(rank: number): number {
