@@ -144,6 +144,8 @@ export const SYSTEM_PROMPT_L10N_MINIMAL_ZH: SystemPromptL10n = {
   skillsConstraintsLine: "最多只读取一个技能。",
   memoryRecallTitle: "## 记忆回溯",
   memoryRecallLine: "回答既往问题前：先 memory_search，再 memory_get。",
+  memoryCrudTitle: "",
+  memoryCrudLine: "",
   selfUpdateTitle: "",
   selfUpdateOnlyWhenAskedLine: "",
   selfUpdateDoNotRunLine: "",

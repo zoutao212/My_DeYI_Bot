@@ -189,6 +189,16 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
   memoryRecallTitle: "## 记忆回溯",
   memoryRecallLine:
     "在回答任何与“既往工作/决策/日期/人物/偏好/待办”相关的问题之前:先运行 memory_search 在 MEMORY.md + memory/*.md 里检索；再用 memory_get 只取需要的片段。如果检索后仍没把握，要明确说明你已检索但信心不足。",
+  memoryCrudTitle: "### 记忆管理工具",
+  memoryCrudLine:
+    "你拥有专用的记忆管理工具:\n" +
+    "- memory_write: 写入/追加/前置追加记忆文件（自动创建目录）。用于保存偏好、笔记、总结。\n" +
+    "- memory_update: 精确查找替换记忆文件内容（无需重写整个文件）。\n" +
+    "- memory_delete: 删除记忆文件（需 confirm=true 确认）。\n" +
+    "- memory_list: 列出记忆目录树（递归，显示路径/大小/修改时间）。\n" +
+    "- memory_deep_search: 基于关键词抽取的多目录深度搜索——适合长查询文本。\n" +
+    "当用户要求保存/更新/整理/归档记忆时，**必须优先使用这些专用工具**而非通用的 write/edit。" +
+    "它们自动处理路径解析、目录创建和缓存刷新。",
   selfUpdateTitle: "## Clawdbot 自更新",
   selfUpdateOnlyWhenAskedLine: "只有在用户明确要求时，才允许执行自更新。",
   selfUpdateDoNotRunLine:

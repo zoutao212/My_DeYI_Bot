@@ -93,11 +93,17 @@ function buildMemorySection(params: {
   if (!params.availableTools.has("memory_search") && !params.availableTools.has("memory_get")) {
     return [];
   }
-  return [
+  const lines = [
     params.l10n.memoryRecallTitle,
     params.l10n.memoryRecallLine,
     "",
   ];
+  // 当 CRUD 工具可用时，注入使用提示
+  const hasCrud = params.availableTools.has("memory_write") || params.availableTools.has("memory_list");
+  if (hasCrud && params.l10n.memoryCrudTitle) {
+    lines.push(params.l10n.memoryCrudTitle, params.l10n.memoryCrudLine, "");
+  }
+  return lines;
 }
 
 function buildUserIdentitySection(params: {

@@ -181,7 +181,7 @@ export async function runPreparedReply(
   const groupSystemPrompt = sessionCtx.GroupSystemPrompt?.trim() ?? "";
 
   // P89: 检测用户消息中的"记忆写入"意图，注入记忆目录路径引导
-  // 根因：用户说"写入记忆库"时，LLM 不知道记忆目录结构，倾向输出纯文本而非使用 write/edit 工具
+  // 升级版：优先推荐专用 CRUD 工具（memory_write/memory_update/memory_list）
   const _p89Body = (ctx.CommandBody ?? ctx.RawBody ?? ctx.Body ?? "").toLowerCase();
   const _p89HasMemoryWriteIntent =
     /(?:写入|保存|整理|归档|更新|同步).{0,8}(?:记忆|memory|记忆库|记忆文件)/i.test(_p89Body) ||
@@ -191,16 +191,24 @@ export async function runPreparedReply(
     const p = (s: string) => `${workspaceDir}/${s}`.replace(/\//g, "\\");
     memoryWriteHint = [
       "[📝 记忆写入指引]",
-      "用户要求将内容写入记忆库。你**必须使用 write 或 edit 工具实际写入文件**，不要只输出纯文本。",
-      "记忆目录结构：",
-      `- 全局记忆：${p("memory/")}`,
-      `- 角色记忆：${p("characters/lina/memory/")}（含 core-memories.md 核心记忆文件）`,
-      `- 任务产出：${p("workspace/")}（各轮任务的产出文件）`,
-      "操作要求：",
-      "1. 先用 exec/read 检查目标目录和现有文件",
-      "2. 整理内容后用 write 工具写入目标路径（绝对路径）",
-      "3. 如需更新已有文件，用 edit 工具精确修改",
-      "4. 写入完成后确认文件路径",
+      "用户要求操作记忆库。你**必须使用专用记忆工具实际写入文件**，不要只输出纯文本。",
+      "",
+      "🔧 **优先使用专用记忆工具**（自动处理路径、目录创建、缓存刷新）：",
+      "- memory_write(filePath, content, mode): 写入/追加/前置追加记忆文件",
+      "- memory_update(filePath, oldText, newText): 精确查找替换已有记忆文件内容",
+      "- memory_list(directory): 列出记忆目录树（确认现有文件结构）",
+      "- memory_deep_search(query): 在所有记忆目录中深度搜索相关内容",
+      "",
+      "📂 记忆目录结构（filePath 使用相对路径即可）：",
+      `- 全局记忆：memory/（绝对路径：${p("memory/")}）`,
+      `- 角色记忆：characters/lina/memory/（含 core-memories.md）`,
+      `- 任务产出：workspace/`,
+      "",
+      "📋 操作流程：",
+      "1. 先用 memory_list 查看目标目录和现有文件",
+      "2. 整理内容后用 memory_write 写入（新建用 overwrite，追加用 append）",
+      "3. 更新已有文件用 memory_update 精确替换",
+      "4. 写入完成后确认文件路径和内容",
     ].join("\n");
   }
 

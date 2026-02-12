@@ -24,6 +24,18 @@ const memoryCorePlugin = {
       { names: ["memory_search", "memory_get"] },
     );
 
+    // 记忆 CRUD 工具集（零外部依赖，不需要 embedding 配置）
+    api.registerTool(
+      (ctx) => {
+        const crudTools = api.runtime.tools.createAllMemoryCrudTools({
+          config: ctx.config,
+          agentSessionKey: ctx.sessionKey,
+        });
+        return crudTools.length > 0 ? crudTools : null;
+      },
+      { names: ["memory_write", "memory_update", "memory_delete", "memory_list", "memory_deep_search"] },
+    );
+
     api.registerCli(
       ({ program }) => {
         api.runtime.tools.registerMemoryCli(program);

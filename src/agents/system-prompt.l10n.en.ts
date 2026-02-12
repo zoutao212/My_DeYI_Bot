@@ -103,6 +103,8 @@ export type SystemPromptL10n = {
   skillsConstraintsLine: string;
   memoryRecallTitle: string;
   memoryRecallLine: string;
+  memoryCrudTitle: string;
+  memoryCrudLine: string;
   selfUpdateTitle: string;
   selfUpdateOnlyWhenAskedLine: string;
   selfUpdateDoNotRunLine: string;
@@ -381,6 +383,16 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
   memoryRecallTitle: "## Memory Recall",
   memoryRecallLine:
     "Before answering anything about prior work, decisions, dates, people, preferences, or todos: run memory_search on MEMORY.md + memory/*.md; then use memory_get to pull only the needed lines. If low confidence after search, say you checked.",
+  memoryCrudTitle: "### Memory CRUD Tools",
+  memoryCrudLine:
+    "You have dedicated memory management tools:\n" +
+    "- memory_write: Write/append/prepend content to memory files (auto-creates dirs). Use for saving preferences, notes, summaries.\n" +
+    "- memory_update: Find-and-replace inside a memory file (precise edits without rewriting the whole file).\n" +
+    "- memory_delete: Delete a memory file (requires confirm=true).\n" +
+    "- memory_list: List memory directory tree (recursive, shows path/size/modified time).\n" +
+    "- memory_deep_search: Deep search across all memory dirs using keyword extraction — ideal for long queries.\n" +
+    "When the user asks to save/update/organize memories, **always prefer these dedicated tools** over generic write/edit. " +
+    "They handle path resolution, directory creation, and cache invalidation automatically.",
   selfUpdateTitle: "## Clawdbot Self-Update",
   selfUpdateOnlyWhenAskedLine: "Get Updates (self-update) is ONLY allowed when the user explicitly asks for it.",
   selfUpdateDoNotRunLine:
