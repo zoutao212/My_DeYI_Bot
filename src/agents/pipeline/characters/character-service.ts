@@ -139,6 +139,8 @@ export class CharacterService {
   private charactersDir: string;
   private templatesDir: string;
   private loadedCharacters = new Map<string, LoadedCharacter>();
+  /** P78: 惰性解析后的实际角色目录（避免双重 clawd 嵌套） */
+  private _resolvedCharactersDir: string | null = null;
 
   constructor(
     private readonly basePath: string = process.cwd(),
@@ -148,6 +150,47 @@ export class CharacterService {
     // 模板目录在代码中
     const currentDir = dirname(fileURLToPath(import.meta.url));
     this.templatesDir = join(currentDir, "templates");
+    log.debug(`[CharacterService] primaryCharactersDir=${this.charactersDir}, basePath=${basePath}, clawdDir=${clawdDir}`);
+  }
+
+  /**
+   * P78: 惰性解析实际的角色目录路径。
+   * 当 basePath 已包含 clawdDir 时（如 process.cwd() = ~/clawd），
+   * join(basePath, "clawd", "characters") 产生双重嵌套。
+   * 此方法检测并回退到 basePath/characters。
+   */
+  private async resolveCharactersDir(): Promise<string> {
+    if (this._resolvedCharactersDir) return this._resolvedCharactersDir;
+
+    // 主路径：basePath/clawdDir/characters
+    if (await this.directoryExists(this.charactersDir)) {
+      this._resolvedCharactersDir = this.charactersDir;
+      return this.charactersDir;
+    }
+
+    // 回退1：basePath/characters（basePath 已包含 clawdDir 的情况）
+    const fallback1 = join(this.basePath, "characters");
+    if (await this.directoryExists(fallback1)) {
+      log.info(`[CharacterService] P78 路径回退: ${this.charactersDir} → ${fallback1}`);
+      this._resolvedCharactersDir = fallback1;
+      this.charactersDir = fallback1;
+      return fallback1;
+    }
+
+    // 回退2：basePath 的父目录/clawdDir/characters（basePath 可能是子目录）
+    const parentPath = dirname(this.basePath);
+    const fallback2 = join(parentPath, this.clawdDir, "characters");
+    if (parentPath !== this.basePath && await this.directoryExists(fallback2)) {
+      log.info(`[CharacterService] P78 路径回退: ${this.charactersDir} → ${fallback2}`);
+      this._resolvedCharactersDir = fallback2;
+      this.charactersDir = fallback2;
+      return fallback2;
+    }
+
+    // 均不存在，保留主路径（initializeCharacter 会尝试创建）
+    log.warn(`[CharacterService] P78 角色目录不存在: ${this.charactersDir} (回退路径也不存在: ${fallback1})`);
+    this._resolvedCharactersDir = this.charactersDir;
+    return this.charactersDir;
   }
 
   /**
@@ -159,7 +202,9 @@ export class CharacterService {
       return this.loadedCharacters.get(characterId)!;
     }
 
-    const characterDir = join(this.charactersDir, characterId);
+    // P78: 惰性解析正确的角色目录路径
+    const resolvedDir = await this.resolveCharactersDir();
+    const characterDir = join(resolvedDir, characterId);
 
     // 检查角色目录是否存在，不存在则尝试初始化
     if (!(await this.directoryExists(characterDir))) {
@@ -241,7 +286,9 @@ export class CharacterService {
     const configs: CharacterRecognitionConfig[] = [];
 
     try {
-      const entries = await readdir(this.charactersDir).catch(() => []);
+      // P78: 使用解析后的路径
+      const resolvedDir = await this.resolveCharactersDir();
+      const entries = await readdir(resolvedDir).catch(() => []);
       
       for (const entry of entries) {
         const characterDir = join(this.charactersDir, entry);

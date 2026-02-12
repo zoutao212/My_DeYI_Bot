@@ -3269,6 +3269,49 @@ export class Orchestrator {
       } else {
         console.warn(`[Orchestrator] ⚠️ V4: 分段 ${seg.id} 无可用内容`);
       }
+
+      // 🔧 P73 修复：查找该分段的续写任务（isContinuation + continuationOf === seg.id），
+      // 按 continuationPart 排序，读取内容追加到该分段后面。
+      // 原因：续写任务是对分段的补充内容，不是独立分段，应合并到所属分段中。
+      const continuations = taskTree.subTasks
+        .filter(t =>
+          t.status === "completed" &&
+          t.metadata?.isContinuation &&
+          t.metadata.continuationOf === seg.id,
+        )
+        .sort((a, b) => (a.metadata?.continuationPart ?? 0) - (b.metadata?.continuationPart ?? 0));
+
+      for (const cont of continuations) {
+        let contContent = "";
+        // 优先读取 producedFilePaths
+        for (const rawPath of cont.metadata?.producedFilePaths ?? []) {
+          try {
+            let filePath = rawPath;
+            if (!path.isAbsolute(filePath)) {
+              filePath = path.join(os.homedir(), "clawd", filePath);
+            }
+            const content = await fsModule.readFile(filePath, "utf-8");
+            if (content && content.trim().length > 0 && tryAcceptContent(content, "producedFilePaths", cont.id)) {
+              contContent = content;
+              break;
+            }
+          } catch { /* 文件读取失败 */ }
+        }
+        // 回退到 output
+        if (!contContent && cont.output) {
+          const detection = detectConfirmationMessage(cont.output);
+          if (!detection.isConfirmation || detection.confidence === "low") {
+            contContent = cont.output;
+          }
+        }
+        if (contContent && contContent.trim().length > 0) {
+          mergedParts.push(contContent.trim());
+          metrics.successfulReads++;
+          console.log(
+            `[Orchestrator] 🔧 P73: 续写任务 ${cont.id} 内容已追加到分段 ${seg.id} (${contContent.length} 字)`,
+          );
+        }
+      }
     }
 
     // 合并写入章节文件
@@ -3296,8 +3339,12 @@ export class Orchestrator {
     }
 
     // 写入到 workspace 目录
+    // 🔧 P71 修复：使用 rootTaskId 而非 taskTree.id，保持与 LLM 写入路径一致
+    // 原因：LLM 写分段文件到 ~/clawd/workspace/{rootTaskId}/，
+    // 但此处合并章节文件到 ~/clawd/workspace/{taskTree.id}/，造成两个目录。
     const parentTask = taskTree.subTasks.find(t => t.id === parentId);
-    const clawdWorkspaceDir = path.join(os.homedir(), "clawd", "workspace", taskTree.id);
+    const workspaceId = completedSegment.rootTaskId ?? taskTree.id;
+    const clawdWorkspaceDir = path.join(os.homedir(), "clawd", "workspace", workspaceId);
     await fsModule.mkdir(clawdWorkspaceDir, { recursive: true });
     const mergedFilePath = path.join(clawdWorkspaceDir, chapterFileName);
 

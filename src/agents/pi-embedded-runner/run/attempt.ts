@@ -1159,6 +1159,13 @@ export async function runEmbeddedAttempt(
             _ttfClearDegraded(params.provider, params.modelId);
           }
 
+          // P76: 检查 session 历史中是否有过 function call（toolResult 消息）
+          // 如果之前轮次有成功的 function call，说明 provider 支持 function calling
+          const _ttfHadPriorToolCalls = _ttfHasNativeToolCalls ||
+            messagesSnapshot.some(
+              (m) => (m.role as string) === "toolResult" || (m.role as string) === "tool",
+            );
+
           // 检测是否应标记为降级
           const _ttfWasDegraded = _ttfIsDegraded(params.provider, params.modelId);
           const _ttfNewlyDetected =
@@ -1168,6 +1175,8 @@ export async function runEmbeddedAttempt(
               hasToolCalls: _ttfHasNativeToolCalls,
               hasTextResponse: _ttfResponseText.length > 0,
               textLength: _ttfResponseText.length,
+              hadPriorToolCalls: _ttfHadPriorToolCalls,
+              responseText: _ttfResponseText,
             });
 
           // 首次降级时引导 prompt 前的文本基线（用于循环中定位新文本）

@@ -574,6 +574,22 @@ export class FileManager {
         }
       }
 
+      // 🔧 P72 修复：跳过续写子任务（isContinuation），如果其所属分段的父章节已合并
+      // 原因：P73 已将续写内容纳入 mergeSegmentsIfComplete 的章节合并，
+      // 如果 mergeTaskOutputs 再次包含续写文件，会导致内容重复或错序。
+      if (subTask.metadata?.isContinuation && subTask.metadata.continuationOf) {
+        // 找到续写所属的分段任务
+        const segTask = taskTree.subTasks.find(t => t.id === subTask.metadata!.continuationOf);
+        if (segTask?.metadata?.isSegment && segTask.metadata.segmentOf) {
+          // 找到分段所属的父章节任务
+          const chapterTask = taskTree.subTasks.find(t => t.id === segTask!.metadata!.segmentOf);
+          if (chapterTask?.status === "completed" && chapterTask.metadata?.producedFilePaths?.length) {
+            console.log(`[FileManager] ⏭️ P72: 跳过已合并到章节的续写子任务: ${subTask.id} (${subTask.summary})`);
+            continue;
+          }
+        }
+      }
+
       // 🔧 问题 W 修复：跳过被 decompose 标记为 completed 的原始子任务
       // 原因：decomposeFailedTask 把原始子任务标记为 completed，但其输出是不完整的。
       // 续写子任务会包含完整的后续内容，如果同时合并原始子任务的不完整输出，

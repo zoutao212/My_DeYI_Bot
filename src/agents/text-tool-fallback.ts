@@ -135,25 +135,71 @@ export function initDegradedFromConfig(config: {
 // ─── 降级检测 ──────────────────────────────────────────────
 
 /**
+ * 检测 LLM 文本中是否包含工具调用意图的痕迹。
+ * 当 provider 不支持 function calling 时，LLM 会在纯文本中输出类似函数调用的格式。
+ */
+export function detectToolCallIntentInText(text: string): boolean {
+  if (!text || text.length < 20) return false;
+
+  // 模式1: ```tool 代码块（标准文本工具格式）
+  if (/```tool\s*\n/i.test(text)) return true;
+
+  // 模式2: 函数调用语法 — toolName(param="value") 或 toolName(param=value)
+  // 匹配常见工具名：read, write, edit, exec, process, memory_search 等
+  if (/\b(?:read|write|edit|exec|process|memory_search|memory_get|web_search|web_fetch|enqueue_task|browser|send_file|message)\s*\([^)]*[=:][^)]+\)/i.test(text)) return true;
+
+  // 模式3: JSON 工具调用格式在文本中 — {"tool": "...", "args": ...}
+  if (/\{\s*["']tool["']\s*:\s*["']\w+["']/.test(text)) return true;
+
+  // 模式4: 明确提及无法使用函数调用的文本
+  if (/(?:cannot|can't|无法|不能)\s*(?:use|call|invoke|使用|调用)\s*(?:function|tool|函数|工具)/i.test(text)) return true;
+
+  return false;
+}
+
+/**
  * 检测 LLM 响应是否表明 function calling 失效。
  *
  * 判定条件（全部满足才触发）：
  *   1. 工具已注册（不是 disableTools 模式）
  *   2. LLM 没有发起任何 function call
  *   3. LLM 返回了较长的文本回复（>200字符，排除简短对话）
+ *   4. [P76] 同一 session 中之前没有成功的原生 function call（排除 LLM 主动选择不用工具）
+ *   5. [P76] LLM 文本中包含工具调用意图痕迹（排除纯聊天回复）
  */
 export function shouldDetectDegraded(params: {
   toolsRegistered: boolean;
   hasToolCalls: boolean;
   hasTextResponse: boolean;
   textLength: number;
+  /** [P76] 同一 session 中是否曾有过成功的原生 function call */
+  hadPriorToolCalls?: boolean;
+  /** [P76] LLM 响应的原始文本，用于检测工具调用意图 */
+  responseText?: string;
 }): boolean {
-  return (
-    params.toolsRegistered &&
-    !params.hasToolCalls &&
-    params.hasTextResponse &&
-    params.textLength > 200
-  );
+  // 基础门槛检查
+  if (
+    !params.toolsRegistered ||
+    params.hasToolCalls ||
+    !params.hasTextResponse ||
+    params.textLength <= 200
+  ) {
+    return false;
+  }
+
+  // P76: 同一 session 中曾有原生 function call → provider 正常，LLM 只是选择不用工具
+  if (params.hadPriorToolCalls) {
+    return false;
+  }
+
+  // P76: 检查文本中是否有工具调用意图痕迹
+  // 如果 LLM 只是在正常聊天（无工具调用痕迹），不应判定为降级
+  if (params.responseText) {
+    return detectToolCallIntentInText(params.responseText);
+  }
+
+  // 无 responseText 时回退到旧逻辑（向后兼容）
+  return true;
 }
 
 // ─── 文本模式工具描述生成 ──────────────────────────────────────
@@ -324,6 +370,7 @@ export function parseTextToolCalls(text: string): TextToolCall[] {
  * 尝试从 JSON 文本解析出工具调用
  */
 function tryParseToolCallJson(raw: string): TextToolCall | null {
+  // 策略1: 标准 JSON 格式 {"tool": "name", "args": {...}}
   try {
     const parsed = JSON.parse(raw);
     if (
@@ -340,12 +387,55 @@ function tryParseToolCallJson(raw: string): TextToolCall | null {
       };
     }
   } catch {
-    // JSON 解析失败
-    console.warn(
-      `[text-tool-fallback] ⚠️ 无法解析工具调用 JSON: ${raw.slice(0, 200)}`,
-    );
+    // JSON 解析失败，尝试函数调用语法回退
   }
+
+  // P77 策略2: 函数调用语法 — toolName(param="value", param2=value2)
+  // LLM 在降级模式下常输出此格式而非 JSON
+  const funcCallParsed = tryParseFunctionCallSyntax(raw);
+  if (funcCallParsed) return funcCallParsed;
+
+  // 所有策略失败
+  console.warn(
+    `[text-tool-fallback] ⚠️ 无法解析工具调用: ${raw.slice(0, 200)}`,
+  );
   return null;
+}
+
+/**
+ * [P77] 解析函数调用语法的工具调用
+ * 支持格式：
+ *   toolName(key="value")
+ *   toolName(key='value')
+ *   toolName(key=value)
+ *   toolName(key: "value", key2: value2)
+ */
+function tryParseFunctionCallSyntax(raw: string): TextToolCall | null {
+  // 匹配 toolName(...) 格式
+  const funcMatch = raw.match(/^(\w+)\s*\(([\s\S]*)\)\s*$/);
+  if (!funcMatch) return null;
+
+  const toolName = funcMatch[1].trim();
+  const argsStr = funcMatch[2].trim();
+
+  if (!toolName) return null;
+
+  const args: Record<string, unknown> = {};
+
+  if (argsStr) {
+    // 解析参数列表：key="value" 或 key='value' 或 key=value 或 key: "value"
+    // 使用正则逐个匹配 key=value 对
+    const paramRegex = /(\w+)\s*[=:]\s*(?:"([^"]*?)"|'([^']*?)'|(\S+?))\s*(?:,|$)/g;
+    let paramMatch: RegExpExecArray | null;
+    while ((paramMatch = paramRegex.exec(argsStr)) !== null) {
+      const key = paramMatch[1];
+      // 优先取引号内的值，回退到无引号值
+      const value = paramMatch[2] ?? paramMatch[3] ?? paramMatch[4] ?? "";
+      args[key] = value;
+    }
+  }
+
+  return { tool: toolName, args, raw };
 }
 
 // ─── 工具执行 ──────────────────────────────────────────────

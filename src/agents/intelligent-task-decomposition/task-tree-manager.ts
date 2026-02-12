@@ -285,6 +285,17 @@ export class TaskTreeManager {
         (r: { id: string }) => r.id === localRound.id,
       );
       if (mergedRound) {
+        // 🔧 P75 修复：合并 round.status — 取更终态的值
+        // 原因：异步智能摘要 fire-and-forget 可能在 markRoundCompleted 之前保存，
+        // 导致 disk 上的 round.status 被覆盖为 "active"，后续 merge 以 disk 为基准保留了错误状态。
+        const ROUND_ORD: Record<string, number> = { active: 0, completed: 1, failed: 1, cancelled: 2 };
+        if ((ROUND_ORD[localRound.status] ?? 0) > (ROUND_ORD[mergedRound.status] ?? 0)) {
+          mergedRound.status = localRound.status;
+          if (localRound.completedAt) mergedRound.completedAt = localRound.completedAt;
+        }
+        if (localRound.hasOverthrow && !mergedRound.hasOverthrow) {
+          mergedRound.hasOverthrow = true;
+        }
         for (const id of localRound.subTaskIds) {
           if (!mergedRound.subTaskIds.includes(id)) {
             mergedRound.subTaskIds.push(id);
