@@ -43,6 +43,7 @@ import type { SubTask, TaskTree, ExecutionContext } from "../../agents/intellige
 import type { Orchestrator } from "../../agents/intelligent-task-decomposition/orchestrator.js";
 import { TaskProgressReporter, getTaskProgressFromTree, formatDetailedProgress } from "../../agents/intelligent-task-decomposition/task-progress-reporter.js";
 import { estimateTokens, allocateBudget, truncateToTokenBudget, type BudgetRequest } from "../../agents/intelligent-task-decomposition/context-budget-manager.js";
+import { localGrepSearch, getDefaultMemoryDirs } from "../../memory/local-search.js";
 
 // ── P10: 输出验证门（OutputValidator）──
 // 规则驱动，零 LLM 调用。在标记 completed 之前拦截明显无效输出。
@@ -658,6 +659,43 @@ export function createFollowupRunner(params: {
           }
         }
 
+        // 🆕 M10: 子任务记忆注入 — 用轻量本地搜索为子任务注入相关记忆
+        // 仅对 writing/research/analysis/design 类型启用，零远程 API 调用
+        let subTaskMemoryCtx = "";
+        const isSubTaskForMemory = Boolean(queued.subTaskId) && !queued.isRootTask && !queued.isNewRootTask;
+        if (isSubTaskForMemory && queued.run.workspaceDir) {
+          const memTaskType = subTask?.taskType ?? "generic";
+          const MEMORY_TASK_TYPES = ["writing", "research", "analysis", "design"];
+          if (MEMORY_TASK_TYPES.includes(memTaskType)) {
+            try {
+              const searchQuery = subTask?.summary || queued.prompt.substring(0, 200);
+              const memDirs = getDefaultMemoryDirs(queued.run.workspaceDir);
+              const memResults = await localGrepSearch(searchQuery, {
+                dirs: memDirs,
+                maxResults: 5,
+                contextLines: 3,
+                workspaceDir: queued.run.workspaceDir,
+              });
+              if (memResults.length > 0) {
+                const MAX_MEMORY_CHARS = 2000;
+                let memText = "";
+                for (const r of memResults) {
+                  if (r.score < 0.15) continue;
+                  const entry = `[${r.path}:${r.startLine}-${r.endLine}] (score=${r.score.toFixed(2)})\n${r.snippet}`;
+                  if (memText.length + entry.length > MAX_MEMORY_CHARS) break;
+                  memText += (memText ? "\n---\n" : "") + entry;
+                }
+                if (memText) {
+                  subTaskMemoryCtx = `\n\n[📚 相关记忆]\n以下是从记忆库中检索到的与当前任务相关的信息片段，供参考：\n${memText}`;
+                  console.log(`[followup-runner] 📚 M10 子任务记忆注入: ${memResults.length} results, ${subTaskMemoryCtx.length} chars (taskType=${memTaskType})`);
+                }
+              }
+            } catch {
+              // 记忆检索失败不阻塞任务执行
+            }
+          }
+        }
+
         const fallbackResult = await runWithModelFallback({
           cfg: queued.run.config,
           provider: queued.run.provider,
@@ -999,7 +1037,7 @@ export function createFollowupRunner(params: {
                   }
                 }
 
-                const combined = [base, siblingCtx, parentGoalCtx, persistInstruction, blueprintCtx, chapterOutlineCtx, experienceHint ? `\n\n${experienceHint}` : ""].filter(Boolean).join("");
+                const combined = [base, siblingCtx, parentGoalCtx, subTaskMemoryCtx, persistInstruction, blueprintCtx, chapterOutlineCtx, experienceHint ? `\n\n${experienceHint}` : ""].filter(Boolean).join("");
                 return combined || undefined;
               })(),
               ownerNumbers: queued.run.ownerNumbers,

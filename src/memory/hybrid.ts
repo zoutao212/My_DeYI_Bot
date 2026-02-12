@@ -20,6 +20,15 @@ export type HybridKeywordResult = {
   textScore: number;
 };
 
+export type HybridGrepResult = {
+  path: string;
+  startLine: number;
+  endLine: number;
+  source: HybridSource;
+  snippet: string;
+  grepScore: number;
+};
+
 export function buildFtsQuery(raw: string): string | null {
   // 英文/数字 token（保持原有逻辑）
   const alphaTokens =
@@ -72,8 +81,10 @@ export function bm25RankToScore(rank: number): number {
 export function mergeHybridResults(params: {
   vector: HybridVectorResult[];
   keyword: HybridKeywordResult[];
+  grep?: HybridGrepResult[];
   vectorWeight: number;
   textWeight: number;
+  grepWeight?: number;
 }): Array<{
   path: string;
   startLine: number;
@@ -82,19 +93,19 @@ export function mergeHybridResults(params: {
   snippet: string;
   source: HybridSource;
 }> {
-  const byId = new Map<
-    string,
-    {
-      id: string;
-      path: string;
-      startLine: number;
-      endLine: number;
-      source: HybridSource;
-      snippet: string;
-      vectorScore: number;
-      textScore: number;
-    }
-  >();
+  type MergedEntry = {
+    id: string;
+    path: string;
+    startLine: number;
+    endLine: number;
+    source: HybridSource;
+    snippet: string;
+    vectorScore: number;
+    textScore: number;
+    grepScore: number;
+  };
+
+  const byId = new Map<string, MergedEntry>();
 
   for (const r of params.vector) {
     byId.set(r.id, {
@@ -106,6 +117,7 @@ export function mergeHybridResults(params: {
       snippet: r.snippet,
       vectorScore: r.vectorScore,
       textScore: 0,
+      grepScore: 0,
     });
   }
 
@@ -124,12 +136,55 @@ export function mergeHybridResults(params: {
         snippet: r.snippet,
         vectorScore: 0,
         textScore: r.textScore,
+        grepScore: 0,
       });
     }
   }
 
+  // M6: 三路融合 — localGrep 结果按 path+lineRange 去重合并
+  const grepWeight = params.grepWeight ?? 0;
+  if (params.grep && params.grep.length > 0 && grepWeight > 0) {
+    for (const r of params.grep) {
+      // grep 结果没有 chunk id，用 path+startLine 构造合成 key
+      const syntheticId = `grep:${r.path}:${r.startLine}-${r.endLine}`;
+      const existing = byId.get(syntheticId);
+      if (existing) {
+        existing.grepScore = Math.max(existing.grepScore, r.grepScore);
+        if (r.snippet && r.snippet.length > existing.snippet.length) {
+          existing.snippet = r.snippet;
+        }
+      } else {
+        // 尝试按 path + 行范围重叠匹配已有条目
+        let matched = false;
+        for (const [, entry] of byId) {
+          if (entry.path === r.path && overlaps(entry.startLine, entry.endLine, r.startLine, r.endLine)) {
+            entry.grepScore = Math.max(entry.grepScore, r.grepScore);
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) {
+          byId.set(syntheticId, {
+            id: syntheticId,
+            path: r.path,
+            startLine: r.startLine,
+            endLine: r.endLine,
+            source: r.source,
+            snippet: r.snippet,
+            vectorScore: 0,
+            textScore: 0,
+            grepScore: r.grepScore,
+          });
+        }
+      }
+    }
+  }
+
   const merged = Array.from(byId.values()).map((entry) => {
-    const score = params.vectorWeight * entry.vectorScore + params.textWeight * entry.textScore;
+    const score =
+      params.vectorWeight * entry.vectorScore +
+      params.textWeight * entry.textScore +
+      grepWeight * entry.grepScore;
     return {
       path: entry.path,
       startLine: entry.startLine,
@@ -141,4 +196,9 @@ export function mergeHybridResults(params: {
   });
 
   return merged.sort((a, b) => b.score - a.score);
+}
+
+/** 判断两个行范围是否有重叠 */
+function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
+  return aStart <= bEnd && bStart <= aEnd;
 }

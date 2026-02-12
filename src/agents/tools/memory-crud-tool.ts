@@ -18,6 +18,7 @@ import {
   listMemoryTree,
   getDefaultMemoryDirs,
 } from "../../memory/local-search.js";
+import { getMemorySearchManager } from "../../memory/search-manager.js";
 import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "../agent-scope.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readStringParam, readNumberParam } from "./common.js";
@@ -145,6 +146,8 @@ export function createMemoryWriteTool(options: MemoryCrudToolOptions): AnyAgentT
 
         // 刷新搜索缓存
         invalidateFileCache(absPath);
+        // M7: 即时索引 — 触发 SQLite/FTS/向量索引增量更新（fire-and-forget）
+        void triggerImmediateIndex(cfg, agentId, absPath);
 
         const stat = await fs.stat(absPath);
         return jsonResult({
@@ -219,6 +222,8 @@ export function createMemoryUpdateTool(options: MemoryCrudToolOptions): AnyAgent
 
         await fs.writeFile(absPath, updated, "utf-8");
         invalidateFileCache(absPath);
+        // M7: 即时索引
+        void triggerImmediateIndex(cfg, agentId, absPath);
 
         return jsonResult({
           success: true,
@@ -434,6 +439,24 @@ export function createMemoryDeepSearchTool(options: MemoryCrudToolOptions): AnyA
       }
     },
   };
+}
+
+// ─── M7: 即时索引辅助函数 ───────────────────────────────────────────────────────
+
+/**
+ * M7: 写入后即时触发 SQLite/FTS/向量索引增量更新
+ * fire-and-forget，不阻塞 CRUD 工具响应返回。
+ * 如果索引管理器不可用（无 embedding 配置等），静默降级。
+ */
+async function triggerImmediateIndex(cfg: ClawdbotConfig, agentId: string, absPath: string): Promise<void> {
+  try {
+    const result = await getMemorySearchManager({ cfg, agentId });
+    if (result.manager) {
+      await result.manager.notifyFileChanged(absPath);
+    }
+  } catch {
+    // 索引管理器不可用（无 embedding 配置等），静默降级
+  }
 }
 
 // ─── 辅助函数 ──────────────────────────────────────────────────

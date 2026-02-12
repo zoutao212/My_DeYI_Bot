@@ -40,7 +40,8 @@ import {
   normalizeRelPath,
   parseEmbedding,
 } from "./internal.js";
-import { bm25RankToScore, buildFtsQuery, mergeHybridResults } from "./hybrid.js";
+import { bm25RankToScore, buildFtsQuery, mergeHybridResults, type HybridGrepResult } from "./hybrid.js";
+import { localGrepSearch, getDefaultMemoryDirs } from "./local-search.js";
 import { searchKeyword, searchVector } from "./manager-search.js";
 import { ensureMemoryIndexSchema } from "./memory-schema.js";
 import { requireNodeSqlite } from "./sqlite.js";
@@ -282,28 +283,65 @@ export class MemoryIndexManager {
       Math.max(1, Math.floor(maxResults * hybrid.candidateMultiplier)),
     );
 
-    const keywordResults = hybrid.enabled
-      ? await this.searchKeyword(cleaned, candidates).catch(() => [])
-      : [];
-
-    const queryVec = await this.embedQueryWithTimeout(cleaned);
-    const hasVector = queryVec.some((v) => v !== 0);
-    const vectorResults = hasVector
-      ? await this.searchVector(queryVec, candidates).catch(() => [])
-      : [];
+    // M6: 三路并行搜索（vector + keyword/FTS + localGrep）
+    const [keywordResults, vectorResults, grepResults] = await Promise.all([
+      hybrid.enabled
+        ? this.searchKeyword(cleaned, candidates).catch(() => [])
+        : Promise.resolve([]),
+      (async () => {
+        const queryVec = await this.embedQueryWithTimeout(cleaned);
+        const hasVector = queryVec.some((v) => v !== 0);
+        return hasVector
+          ? this.searchVector(queryVec, candidates).catch(() => [])
+          : [];
+      })(),
+      hybrid.enabled
+        ? this.searchLocalGrep(cleaned, candidates).catch(() => [])
+        : Promise.resolve([]),
+    ]);
 
     if (!hybrid.enabled) {
       return vectorResults.filter((entry) => entry.score >= minScore).slice(0, maxResults);
     }
 
+    const GREP_WEIGHT = 0.3;
     const merged = this.mergeHybridResults({
       vector: vectorResults,
       keyword: keywordResults,
+      grep: grepResults.length > 0 ? grepResults : undefined,
       vectorWeight: hybrid.vectorWeight,
       textWeight: hybrid.textWeight,
+      grepWeight: grepResults.length > 0 ? GREP_WEIGHT : 0,
     });
 
     return merged.filter((entry) => entry.score >= minScore).slice(0, maxResults);
+  }
+
+  /**
+   * M7: 写入后即时索引 — 立即对指定文件执行增量索引（跳过 debounce）
+   *
+   * 用于 memory_write / memory_update 等 CRUD 工具写入后主动调用，
+   * 确保紧接着的 memory_search 能搜到最新内容。
+   * 如果文件不在记忆路径下或索引失败，静默降级（不抛出异常）。
+   */
+  async notifyFileChanged(absPath: string): Promise<void> {
+    try {
+      const relPath = path.relative(this.workspaceDir, absPath).replace(/\\/g, "/");
+      // 仅索引记忆相关文件（memory/ 或 characters/*/memory/ 下的文件）
+      const isMemory = isMemoryPath(relPath)
+        || relPath.startsWith("characters/")
+        || relPath === "MEMORY.md"
+        || relPath === "memory.md";
+      if (!isMemory) {
+        log.debug(`notifyFileChanged: skipping non-memory path: ${relPath}`);
+        return;
+      }
+      const entry = await buildFileEntry(absPath, this.workspaceDir);
+      await this.indexFile(entry, { source: "memory" });
+      log.info(`notifyFileChanged: indexed ${relPath} (${entry.size} bytes)`);
+    } catch (err) {
+      log.warn(`notifyFileChanged failed for ${absPath}: ${String(err)}`);
+    }
   }
 
   private async searchVector(
@@ -348,11 +386,37 @@ export class MemoryIndexManager {
     return results.map((entry) => entry as MemorySearchResult & { id: string; textScore: number });
   }
 
+  /**
+   * M6: 本地 grep 搜索通道 — 零远程依赖的关键词匹配
+   */
+  private async searchLocalGrep(
+    query: string,
+    limit: number,
+  ): Promise<HybridGrepResult[]> {
+    const dirs = getDefaultMemoryDirs(this.workspaceDir);
+    const results = await localGrepSearch(query, {
+      dirs,
+      maxResults: limit,
+      contextLines: 3,
+      workspaceDir: this.workspaceDir,
+    });
+    return results.map((r) => ({
+      path: r.path,
+      startLine: r.startLine,
+      endLine: r.endLine,
+      source: r.source as string,
+      snippet: r.snippet,
+      grepScore: r.score,
+    }));
+  }
+
   private mergeHybridResults(params: {
     vector: Array<MemorySearchResult & { id: string }>;
     keyword: Array<MemorySearchResult & { id: string; textScore: number }>;
+    grep?: HybridGrepResult[];
     vectorWeight: number;
     textWeight: number;
+    grepWeight?: number;
   }): MemorySearchResult[] {
     const merged = mergeHybridResults({
       vector: params.vector.map((r) => ({
@@ -373,8 +437,10 @@ export class MemoryIndexManager {
         snippet: r.snippet,
         textScore: r.textScore,
       })),
+      grep: params.grep,
       vectorWeight: params.vectorWeight,
       textWeight: params.textWeight,
+      grepWeight: params.grepWeight,
     });
     return merged.map((entry) => entry as MemorySearchResult);
   }
