@@ -10,6 +10,7 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
+import { extractSearchTerms } from "./keyword-extractor.js";
 
 // ─── 类型定义 ───────────────────────────────────────────────
 
@@ -334,4 +335,362 @@ export async function localGrepSearch(
   // 按分数降序排序，截断到 maxResults
   allResults.sort((a, b) => b.score - a.score);
   return allResults.slice(0, maxResults);
+}
+
+// ─── 深度搜索（关键词抽取驱动）─────────────────────────────
+
+export interface DeepSearchOptions extends LocalSearchOptions {
+  /** 是否从查询中自动提取关键词扩展搜索（默认 true） */
+  autoExtractKeywords?: boolean;
+  /** 自动提取的关键词最大数量（默认 15） */
+  maxExtractedTerms?: number;
+  /** 额外的搜索关键词（手动指定） */
+  extraTerms?: string[];
+  /** 支持 .json / .jsonl 文件（默认 false） */
+  includeJson?: boolean;
+}
+
+export interface DeepSearchResult extends LocalSearchResult {
+  /** 匹配到的关键词列表 */
+  matchedTerms: string[];
+  /** 文件总行数 */
+  fileTotalLines?: number;
+}
+
+/**
+ * 深度搜索：从大段文本/查询中自动提取关键词，并行在多层级目录中全面检索
+ *
+ * 与 localGrepSearch 的区别：
+ * - 自动从查询中提取高价值关键词（TF-IDF），扩展搜索面
+ * - 返回每个结果匹配到的具体关键词
+ * - 支持 .json/.jsonl 文件
+ * - 分数算法更精细（考虑关键词覆盖率 + 密度）
+ */
+export async function deepGrepSearch(
+  query: string,
+  options: DeepSearchOptions,
+): Promise<DeepSearchResult[]> {
+  clearExpiredCache();
+
+  const autoExtract = options.autoExtractKeywords ?? true;
+  const maxExtracted = options.maxExtractedTerms ?? 15;
+  const extraTerms = options.extraTerms ?? [];
+  const includeJson = options.includeJson ?? false;
+
+  // Step 1: 基础分词
+  const baseTokens = tokenizeQuery(query);
+
+  // Step 2: 自动关键词抽取（对长查询特别有效）
+  let expandedTokens: string[] = [...baseTokens];
+  if (autoExtract && query.length > 50) {
+    const extracted = extractSearchTerms(query, maxExtracted);
+    for (const term of extracted) {
+      const lower = term.toLowerCase();
+      if (!expandedTokens.includes(lower)) {
+        expandedTokens.push(lower);
+      }
+    }
+  }
+
+  // Step 3: 合并额外关键词
+  for (const term of extraTerms) {
+    const lower = term.toLowerCase();
+    if (!expandedTokens.includes(lower)) {
+      expandedTokens.push(lower);
+    }
+  }
+
+  if (expandedTokens.length === 0) return [];
+
+  const extensions = options.extensions ?? DEFAULT_EXTENSIONS;
+  const allExtensions = includeJson
+    ? [...new Set([...extensions, ".json", ".jsonl"])]
+    : extensions;
+  const recursive = options.recursive ?? true;
+  const contextLines = options.contextLines ?? DEFAULT_CONTEXT_LINES;
+  const maxResults = options.maxResults ?? DEFAULT_MAX_RESULTS;
+  const maxFileSize = options.maxFileSize ?? DEFAULT_MAX_FILE_SIZE;
+  const workspaceDir = options.workspaceDir;
+
+  // Step 4: 并行收集所有目录的文件
+  const fileListPromises = options.dirs.map(dir =>
+    walkDirectory(dir, allExtensions, recursive),
+  );
+  const fileLists = await Promise.all(fileListPromises);
+  const allFiles = fileLists.flat();
+
+  // Step 5: 并行搜索所有文件（分批避免打开过多文件句柄）
+  const BATCH_SIZE = 50;
+  const allResults: DeepSearchResult[] = [];
+
+  for (let i = 0; i < allFiles.length; i += BATCH_SIZE) {
+    const batch = allFiles.slice(i, i + BATCH_SIZE);
+    const batchResults = await Promise.all(
+      batch.map(absPath => searchFileDeep(absPath, expandedTokens, contextLines, maxFileSize, workspaceDir)),
+    );
+    for (const results of batchResults) {
+      allResults.push(...results);
+    }
+  }
+
+  // Step 6: 按分数排序 + 截断
+  allResults.sort((a, b) => b.score - a.score);
+  return allResults.slice(0, maxResults);
+}
+
+/**
+ * 对单个文件执行深度搜索，返回匹配结果
+ */
+async function searchFileDeep(
+  absPath: string,
+  tokens: string[],
+  contextLines: number,
+  maxFileSize: number,
+  workspaceDir?: string,
+): Promise<DeepSearchResult[]> {
+  const cached = await readFileWithCache(absPath, maxFileSize);
+  if (!cached) return [];
+
+  const matches = searchInLines(cached.lines, tokens);
+  if (matches.length === 0) return [];
+
+  const windows = mergeMatchWindows(matches, cached.lines.length, contextLines);
+  const results: DeepSearchResult[] = [];
+
+  for (const window of windows) {
+    const snippet = cached.lines.slice(window.start, window.end + 1).join("\n");
+
+    // 精确记录匹配到了哪些关键词
+    const snippetLower = snippet.toLowerCase();
+    const matchedTerms = tokens.filter(t => snippetLower.includes(t.toLowerCase()));
+
+    // 综合分数：覆盖率(匹配词数/总词数) × 密度(匹配行数/窗口行数) + 标题加权
+    const coverage = matchedTerms.length / tokens.length;
+    const windowSize = window.end - window.start + 1;
+    const density = Math.min(1, window.totalMatches / windowSize);
+    const titleBonus = window.hasTitle ? TITLE_WEIGHT_BONUS : 0;
+    const score = Math.min(1, coverage * 0.6 + density * 0.3 + titleBonus + 0.1);
+
+    const relPath = workspaceDir
+      ? path.relative(workspaceDir, absPath).replace(/\\/g, "/")
+      : path.basename(absPath);
+
+    results.push({
+      path: relPath,
+      absPath,
+      startLine: window.start + 1,
+      endLine: window.end + 1,
+      score,
+      snippet,
+      source: "grep",
+      matchedTerms,
+      fileTotalLines: cached.lines.length,
+    });
+  }
+
+  return results;
+}
+
+// ─── 批量搜索 ───────────────────────────────────────────────
+
+export interface BatchSearchQuery {
+  /** 查询标识（用于关联结果） */
+  id: string;
+  /** 查询文本 */
+  query: string;
+  /** 每个查询的最大结果数（默认 5） */
+  maxResults?: number;
+}
+
+export interface BatchSearchResult {
+  id: string;
+  results: LocalSearchResult[];
+}
+
+/**
+ * 批量搜索：一次性对多个查询在相同目录集执行搜索
+ *
+ * 优化：共享文件缓存，只遍历一次目录树
+ */
+export async function batchGrepSearch(
+  queries: BatchSearchQuery[],
+  options: LocalSearchOptions,
+): Promise<BatchSearchResult[]> {
+  clearExpiredCache();
+
+  if (queries.length === 0) return [];
+
+  const extensions = options.extensions ?? DEFAULT_EXTENSIONS;
+  const recursive = options.recursive ?? true;
+  const contextLines = options.contextLines ?? DEFAULT_CONTEXT_LINES;
+  const maxFileSize = options.maxFileSize ?? DEFAULT_MAX_FILE_SIZE;
+  const workspaceDir = options.workspaceDir;
+
+  // 只遍历一次目录树
+  const allFiles: string[] = [];
+  for (const dir of options.dirs) {
+    const files = await walkDirectory(dir, extensions, recursive);
+    allFiles.push(...files);
+  }
+
+  // 预加载所有文件到缓存
+  const loadPromises = allFiles.map(f => readFileWithCache(f, maxFileSize));
+  await Promise.all(loadPromises);
+
+  // 对每个查询复用缓存执行搜索
+  const batchResults: BatchSearchResult[] = [];
+  for (const q of queries) {
+    const tokens = tokenizeQuery(q.query);
+    if (tokens.length === 0) {
+      batchResults.push({ id: q.id, results: [] });
+      continue;
+    }
+
+    const maxR = q.maxResults ?? 5;
+    const queryResults: LocalSearchResult[] = [];
+
+    for (const absPath of allFiles) {
+      const cached = fileCache.get(absPath);
+      if (!cached) continue;
+
+      const matches = searchInLines(cached.lines, tokens);
+      if (matches.length === 0) continue;
+
+      const windows = mergeMatchWindows(matches, cached.lines.length, contextLines);
+      for (const window of windows) {
+        const snippet = cached.lines.slice(window.start, window.end + 1).join("\n");
+        const matchRatio = Math.min(1, window.totalMatches / tokens.length);
+        const titleBonus = window.hasTitle ? TITLE_WEIGHT_BONUS : 0;
+        const score = Math.min(1, matchRatio + titleBonus);
+        const relPath = workspaceDir
+          ? path.relative(workspaceDir, absPath).replace(/\\/g, "/")
+          : path.basename(absPath);
+
+        queryResults.push({
+          path: relPath,
+          absPath,
+          startLine: window.start + 1,
+          endLine: window.end + 1,
+          score,
+          snippet,
+          source: "grep",
+        });
+      }
+    }
+
+    queryResults.sort((a, b) => b.score - a.score);
+    batchResults.push({ id: q.id, results: queryResults.slice(0, maxR) });
+  }
+
+  return batchResults;
+}
+
+// ─── 文件树索引 ─────────────────────────────────────────────
+
+export interface MemoryFileInfo {
+  /** 相对路径 */
+  path: string;
+  /** 绝对路径 */
+  absPath: string;
+  /** 文件大小（字节） */
+  size: number;
+  /** 最后修改时间 */
+  modifiedAt: number;
+  /** 行数（按需加载） */
+  lineCount?: number;
+  /** 文件类型 */
+  extension: string;
+}
+
+/**
+ * 列出记忆目录树中的所有文件（多层级递归）
+ *
+ * 用于 memory_list 工具，让 LLM 知道记忆库中有哪些文件。
+ */
+export async function listMemoryTree(
+  dirs: string[],
+  options?: {
+    extensions?: string[];
+    workspaceDir?: string;
+    maxDepth?: number;
+    includeLineCount?: boolean;
+  },
+): Promise<MemoryFileInfo[]> {
+  const extensions = options?.extensions ?? [".md", ".txt", ".json"];
+  const workspaceDir = options?.workspaceDir;
+  const includeLineCount = options?.includeLineCount ?? false;
+  const maxDepth = options?.maxDepth;
+
+  const results: MemoryFileInfo[] = [];
+
+  async function walk(dir: string, depth: number): Promise<void> {
+    if (maxDepth !== undefined && depth > maxDepth) return;
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isFile()) {
+          const ext = path.extname(entry.name).toLowerCase();
+          if (!extensions.includes(ext)) continue;
+          try {
+            const stat = await fs.stat(fullPath);
+            const relPath = workspaceDir
+              ? path.relative(workspaceDir, fullPath).replace(/\\/g, "/")
+              : path.basename(fullPath);
+            const info: MemoryFileInfo = {
+              path: relPath,
+              absPath: fullPath,
+              size: stat.size,
+              modifiedAt: stat.mtimeMs,
+              extension: ext,
+            };
+            if (includeLineCount && stat.size < DEFAULT_MAX_FILE_SIZE) {
+              const cached = await readFileWithCache(fullPath, DEFAULT_MAX_FILE_SIZE);
+              if (cached) info.lineCount = cached.lines.length;
+            }
+            results.push(info);
+          } catch {
+            // stat 失败，跳过
+          }
+        } else if (entry.isDirectory()) {
+          if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+          await walk(fullPath, depth + 1);
+        }
+      }
+    } catch {
+      // 目录不存在或无权限
+    }
+  }
+
+  await Promise.all(dirs.map(dir => walk(dir, 0)));
+  results.sort((a, b) => a.path.localeCompare(b.path));
+  return results;
+}
+
+// ─── 预设搜索目录 ───────────────────────────────────────────
+
+/**
+ * 获取标准记忆搜索目录列表
+ *
+ * 默认覆盖：memory/ + characters/ + MEMORY.md
+ */
+export function getDefaultMemoryDirs(workspaceDir: string): string[] {
+  return [
+    path.join(workspaceDir, "memory"),
+    path.join(workspaceDir, "characters"),
+    path.join(workspaceDir, "MEMORY.md"),
+  ].filter(Boolean);
+}
+
+/**
+ * 获取扩展记忆搜索目录列表（包含经验教训、任务产出等）
+ */
+export function getExtendedMemoryDirs(workspaceDir: string, projectDir?: string): string[] {
+  const dirs = getDefaultMemoryDirs(workspaceDir);
+  if (projectDir) {
+    // 项目目录下的经验教训和记忆文件
+    dirs.push(path.join(projectDir, ".kiro", "lessons-learned"));
+    dirs.push(path.join(projectDir, "ProjectMemory"));
+  }
+  return dirs;
 }

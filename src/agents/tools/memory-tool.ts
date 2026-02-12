@@ -3,7 +3,7 @@ import * as path from "node:path";
 
 import type { ClawdbotConfig } from "../../config/config.js";
 import { getMemorySearchManager } from "../../memory/index.js";
-import { localGrepSearch } from "../../memory/local-search.js";
+import { localGrepSearch, deepGrepSearch, getDefaultMemoryDirs } from "../../memory/local-search.js";
 import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "../agent-scope.js";
 import { resolveMemorySearchConfig } from "../memory-search.js";
 import type { AnyAgentTool } from "./common.js";
@@ -69,32 +69,38 @@ export function createMemorySearchTool(options: {
         }
       }
       
-      // Step 2: Fallback to localGrepSearch（本地快速文本搜索）
+      // Step 2: Fallback to deepGrepSearch（关键词抽取驱动的深度搜索）
       const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
       try {
-        const memoryDir = path.join(workspaceDir, "memory");
-        const characterMemoryDirs = [
-          path.join(workspaceDir, "characters"),
-        ];
-        const grepResults = await localGrepSearch(query, {
-          dirs: [memoryDir, ...characterMemoryDirs],
+        const dirs = getDefaultMemoryDirs(workspaceDir);
+        const deepResults = await deepGrepSearch(query, {
+          dirs,
           extensions: [".md", ".txt"],
           maxResults: maxResults ?? 10,
           workspaceDir,
+          autoExtractKeywords: true,
         });
 
-        if (grepResults.length > 0) {
+        if (deepResults.length > 0) {
           return jsonResult({
-            results: grepResults,
-            provider: "local-grep",
+            results: deepResults.map(r => ({
+              path: r.path,
+              startLine: r.startLine,
+              endLine: r.endLine,
+              score: r.score,
+              snippet: r.snippet,
+              matchedTerms: r.matchedTerms,
+              source: r.source,
+            })),
+            provider: "local-deep-grep",
             fallback: true,
             warning: error
-              ? `Embedding search unavailable (${error}), using local grep search`
-              : "Using local grep search as fallback",
+              ? `Embedding search unavailable (${error}), using local deep grep search`
+              : "Using local deep grep search as fallback",
           });
         }
       } catch {
-        // localGrep 失败，继续 fallback
+        // deepGrep 失败，继续 fallback
       }
 
       // Step 3: 最终兜底 — 简单关键词搜索
