@@ -18,6 +18,7 @@ import {
   listMemoryTree,
   getDefaultMemoryDirs,
 } from "../../memory/local-search.js";
+import { invalidateSearchCache } from "../../memory/query-router.js";
 import { getMemorySearchManager } from "../../memory/search-manager.js";
 import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "../agent-scope.js";
 import type { AnyAgentTool } from "./common.js";
@@ -146,6 +147,7 @@ export function createMemoryWriteTool(options: MemoryCrudToolOptions): AnyAgentT
 
         // 刷新搜索缓存
         invalidateFileCache(absPath);
+        invalidateSearchCache();
         // M7: 即时索引 — 触发 SQLite/FTS/向量索引增量更新（fire-and-forget）
         void triggerImmediateIndex(cfg, agentId, absPath);
 
@@ -222,6 +224,7 @@ export function createMemoryUpdateTool(options: MemoryCrudToolOptions): AnyAgent
 
         await fs.writeFile(absPath, updated, "utf-8");
         invalidateFileCache(absPath);
+        invalidateSearchCache();
         // M7: 即时索引
         void triggerImmediateIndex(cfg, agentId, absPath);
 
@@ -289,6 +292,7 @@ export function createMemoryDeleteTool(options: MemoryCrudToolOptions): AnyAgent
 
         await fs.unlink(absPath);
         invalidateFileCache(absPath);
+        invalidateSearchCache();
 
         return jsonResult({
           success: true,

@@ -4,6 +4,13 @@ import * as path from "node:path";
 import type { ClawdbotConfig } from "../../config/config.js";
 import { getMemorySearchManager } from "../../memory/index.js";
 import { localGrepSearch, deepGrepSearch, getDefaultMemoryDirs } from "../../memory/local-search.js";
+import {
+  routeQuery,
+  getSearchCacheKey,
+  getCachedSearchResult,
+  cacheSearchResult,
+  type SearchChannel,
+} from "../../memory/query-router.js";
 import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "../agent-scope.js";
 import { resolveMemorySearchConfig } from "../memory-search.js";
 import type { AnyAgentTool } from "./common.js";
@@ -41,93 +48,179 @@ export function createMemorySearchTool(options: {
     parameters: MemorySearchSchema,
     execute: async (_toolCallId, params) => {
       const query = readStringParam(params, "query", { required: true });
-      const maxResults = readNumberParam(params, "maxResults");
-      const minScore = readNumberParam(params, "minScore");
-      
-      // Step 1: Try embedding search first
-      const { manager, error } = await getMemorySearchManager({
-        cfg,
-        agentId,
-      });
-      
-      if (manager) {
-        try {
-          const results = await manager.search(query, {
-            maxResults,
-            minScore,
-            sessionKey: options.agentSessionKey,
-          });
-          const status = manager.status();
-          return jsonResult({
-            results,
-            provider: status.provider,
-            model: status.model,
-            fallback: status.fallback,
-          });
-        } catch (err) {
-          console.warn("Embedding search failed, falling back to keyword search:", err);
-        }
+      const maxResults = readNumberParam(params, "maxResults") ?? 10;
+      const minScore = readNumberParam(params, "minScore") ?? 0;
+
+      // M5: 搜索结果短缓存（30s TTL，避免重复查询）
+      const cacheKey = getSearchCacheKey(query, maxResults);
+      const cached = getCachedSearchResult<{ path: string; score: number }>(cacheKey);
+      if (cached) {
+        return jsonResult({ results: cached, provider: "cache", cached: true });
       }
-      
-      // Step 2: Fallback to deepGrepSearch（关键词抽取驱动的深度搜索）
+
+      // 检测可用通道
+      const { manager, error } = await getMemorySearchManager({ cfg, agentId });
+      const embeddingAvailable = !!manager;
+      const ftsAvailable = embeddingAvailable && (manager!.status().fts?.available ?? false);
       const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
-      try {
-        const dirs = getDefaultMemoryDirs(workspaceDir);
-        const deepResults = await deepGrepSearch(query, {
-          dirs,
-          extensions: [".md", ".txt"],
-          maxResults: maxResults ?? 10,
-          workspaceDir,
-          autoExtractKeywords: true,
-        });
+      const dirs = getDefaultMemoryDirs(workspaceDir);
 
-        if (deepResults.length > 0) {
-          return jsonResult({
-            results: deepResults.map(r => ({
-              path: r.path,
-              startLine: r.startLine,
-              endLine: r.endLine,
-              score: r.score,
-              snippet: r.snippet,
-              matchedTerms: r.matchedTerms,
-              source: r.source,
-            })),
-            provider: "local-deep-grep",
-            fallback: true,
-            warning: error
-              ? `Embedding search unavailable (${error}), using local deep grep search`
-              : "Using local deep grep search as fallback",
-          });
+      // M5: 智能路由 — 根据查询特征选择最优通道
+      const decision = routeQuery(query, {
+        embedding: embeddingAvailable,
+        fts: ftsAvailable,
+        grep: true, // grep 始终可用
+      });
+
+      const allChannels: SearchChannel[] = [decision.primary, ...decision.secondary];
+
+      // 并行执行所有选中通道
+      type ChannelResult = { channel: SearchChannel; results: Array<{ path: string; startLine: number; endLine: number; score: number; snippet: string; source?: string; matchedTerms?: string[] }> };
+
+      const channelPromises: Promise<ChannelResult>[] = allChannels.map(async (channel): Promise<ChannelResult> => {
+        try {
+          switch (channel) {
+            case "embedding": {
+              if (!manager) return { channel, results: [] };
+              const results = await manager.search(query, {
+                maxResults,
+                minScore,
+                sessionKey: options.agentSessionKey,
+              });
+              return { channel, results };
+            }
+            case "grep": {
+              const results = await localGrepSearch(query, {
+                dirs,
+                extensions: [".md", ".txt"],
+                maxResults: maxResults * 2,
+                workspaceDir,
+              });
+              return {
+                channel,
+                results: results.map(r => ({
+                  path: r.path,
+                  startLine: r.startLine,
+                  endLine: r.endLine,
+                  score: r.score,
+                  snippet: r.snippet,
+                  source: r.source,
+                })),
+              };
+            }
+            case "deepGrep": {
+              const results = await deepGrepSearch(query, {
+                dirs,
+                extensions: [".md", ".txt"],
+                maxResults: maxResults * 2,
+                workspaceDir,
+                autoExtractKeywords: true,
+              });
+              return {
+                channel,
+                results: results.map(r => ({
+                  path: r.path,
+                  startLine: r.startLine,
+                  endLine: r.endLine,
+                  score: r.score,
+                  snippet: r.snippet,
+                  source: r.source,
+                  matchedTerms: r.matchedTerms,
+                })),
+              };
+            }
+            case "keyword":
+            case "fts": {
+              const memoryDir = path.join(workspaceDir, "memory");
+              const results = await keywordSearch({
+                query,
+                memoryDir,
+                maxResults: maxResults * 2,
+              });
+              return {
+                channel,
+                results: results.map(r => ({
+                  path: r.path,
+                  startLine: r.lineStart,
+                  endLine: r.lineEnd,
+                  score: r.score,
+                  snippet: r.text,
+                  source: "keyword",
+                })),
+              };
+            }
+            default:
+              return { channel, results: [] };
+          }
+        } catch {
+          return { channel, results: [] };
         }
-      } catch {
-        // deepGrep 失败，继续 fallback
+      });
+
+      const channelResults = await Promise.all(channelPromises);
+
+      // 合并+去重+加权排序
+      const seen = new Map<string, { path: string; startLine: number; endLine: number; score: number; snippet: string; source?: string; matchedTerms?: string[]; channels: string[] }>();
+
+      for (const cr of channelResults) {
+        const weight = decision.weights[cr.channel] ?? 0.3;
+        for (const r of cr.results) {
+          const key = `${r.path}:${r.startLine}-${r.endLine}`;
+          const existing = seen.get(key);
+          if (existing) {
+            // 已有：取加权最高分
+            existing.score = Math.max(existing.score, r.score * weight);
+            existing.channels.push(cr.channel);
+            if (r.snippet.length > (existing.snippet?.length ?? 0)) {
+              existing.snippet = r.snippet;
+            }
+          } else {
+            seen.set(key, {
+              ...r,
+              score: r.score * weight,
+              channels: [cr.channel],
+            });
+          }
+        }
       }
 
-      // Step 3: 最终兜底 — 简单关键词搜索
-      try {
-        const memoryDir = path.join(workspaceDir, "memory");
-        const keywordResults = await keywordSearch({
-          query,
-          memoryDir,
-          maxResults: maxResults ?? 10,
-        });
-        
-        return jsonResult({
-          results: keywordResults,
-          provider: "keyword",
-          fallback: true,
-          warning: error 
-            ? `Embedding search unavailable (${error}), using keyword search`
-            : "Using keyword search as final fallback",
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return jsonResult({ 
-          results: [], 
-          disabled: true, 
-          error: `All search methods failed: ${message}` 
-        });
+      // 多通道命中加分（在多个通道中都出现的结果更可信）
+      for (const entry of seen.values()) {
+        if (entry.channels.length > 1) {
+          entry.score *= 1 + 0.15 * (entry.channels.length - 1);
+          entry.score = Math.min(1, entry.score);
+        }
       }
+
+      const merged = Array.from(seen.values())
+        .filter(r => r.score >= minScore)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, maxResults);
+
+      // 缓存结果
+      cacheSearchResult(cacheKey, merged);
+
+      const activeChannels = channelResults.filter(cr => cr.results.length > 0).map(cr => cr.channel);
+
+      return jsonResult({
+        results: merged.map(r => ({
+          path: r.path,
+          startLine: r.startLine,
+          endLine: r.endLine,
+          score: Math.round(r.score * 100) / 100,
+          snippet: r.snippet,
+          source: r.source,
+          matchedTerms: r.matchedTerms,
+          channels: r.channels,
+        })),
+        routing: {
+          intent: decision.profile.intent,
+          primary: decision.primary,
+          activeChannels,
+          reason: decision.reason,
+        },
+        ...(error ? { embeddingWarning: `Embedding unavailable: ${error}` } : {}),
+      });
     },
   };
 }

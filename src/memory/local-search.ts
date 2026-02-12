@@ -297,10 +297,16 @@ export async function localGrepSearch(
     allFiles.push(...files);
   }
 
-  // 搜索每个文件
+  // 搜索每个文件（支持早期截断：高分结果足够时停止扫描）
   const allResults: LocalSearchResult[] = [];
+  const EARLY_STOP_MULTIPLIER = 3; // 收集到 maxResults * 3 个结果后停止
+  const earlyStopThreshold = maxResults * EARLY_STOP_MULTIPLIER;
+  let highScoreCount = 0; // score >= 0.5 的结果数
 
   for (const absPath of allFiles) {
+    // 早期截断：已有足够多高分结果
+    if (highScoreCount >= maxResults && allResults.length >= earlyStopThreshold) break;
+
     const cached = await readFileWithCache(absPath, maxFileSize);
     if (!cached) continue;
 
@@ -329,6 +335,8 @@ export async function localGrepSearch(
         snippet,
         source: "grep",
       });
+
+      if (score >= 0.5) highScoreCount++;
     }
   }
 
@@ -412,12 +420,12 @@ export async function deepGrepSearch(
   const maxFileSize = options.maxFileSize ?? DEFAULT_MAX_FILE_SIZE;
   const workspaceDir = options.workspaceDir;
 
-  // Step 4: 并行收集所有目录的文件
+  // Step 4: 并行收集所有目录的文件（去重，多目录可能重叠）
   const fileListPromises = options.dirs.map(dir =>
     walkDirectory(dir, allExtensions, recursive),
   );
   const fileLists = await Promise.all(fileListPromises);
-  const allFiles = fileLists.flat();
+  const allFiles = [...new Set(fileLists.flat())];
 
   // Step 5: 并行搜索所有文件（分批避免打开过多文件句柄）
   const BATCH_SIZE = 50;
@@ -627,11 +635,26 @@ export async function listMemoryTree(
     if (maxDepth !== undefined && depth > maxDepth) return;
     try {
       const entries = await fs.readdir(dir, { withFileTypes: true });
+      // 收集文件和目录分开处理
+      const filePaths: Array<{ fullPath: string; ext: string }> = [];
+      const subDirs: string[] = [];
+
       for (const entry of entries) {
         const fullPath = path.join(dir, entry.name);
         if (entry.isFile()) {
           const ext = path.extname(entry.name).toLowerCase();
-          if (!extensions.includes(ext)) continue;
+          if (extensions.includes(ext)) {
+            filePaths.push({ fullPath, ext });
+          }
+        } else if (entry.isDirectory()) {
+          if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+          subDirs.push(fullPath);
+        }
+      }
+
+      // 并行 stat 所有文件（替代串行，显著减少 I/O 等待）
+      const statResults = await Promise.all(
+        filePaths.map(async ({ fullPath, ext }) => {
           try {
             const stat = await fs.stat(fullPath);
             const relPath = workspaceDir
@@ -648,15 +671,18 @@ export async function listMemoryTree(
               const cached = await readFileWithCache(fullPath, DEFAULT_MAX_FILE_SIZE);
               if (cached) info.lineCount = cached.lines.length;
             }
-            results.push(info);
+            return info;
           } catch {
-            // stat 失败，跳过
+            return null;
           }
-        } else if (entry.isDirectory()) {
-          if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
-          await walk(fullPath, depth + 1);
-        }
+        }),
+      );
+      for (const info of statResults) {
+        if (info) results.push(info);
       }
+
+      // 递归子目录
+      await Promise.all(subDirs.map(subDir => walk(subDir, depth + 1)));
     } catch {
       // 目录不存在或无权限
     }
