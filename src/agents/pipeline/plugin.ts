@@ -23,6 +23,7 @@ import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { createDefaultCapabilityPool } from "./capability-pool.js";
 import { createIntentAnalyzer } from "./intent-analyzer.js";
 import type { CapabilityExecuteParams, PipelineContext, PipelineState } from "./types.js";
+import { detectChatRoomIntent, handleChatRoomMessage, closeChatRoom, hasActiveSession } from "../chatroom/index.js";
 
 const log = createSubsystemLogger("pipeline:plugin");
 
@@ -112,6 +113,51 @@ export async function onBeforeAgentStart(
       log.info(
         `[Pipeline] Detected character: ${detectedCharacter.name} (${detectedCharacter.id})`,
       );
+    }
+
+    // 3.5 🆕 聊天室检测：检查是否触发多角色聊天室模式
+    const characterConfigs = intentAnalyzer.getCharacterConfigs();
+    if (characterConfigs) {
+      const sessionActive = hasActiveSession(stateKey);
+      const chatRoomResult = detectChatRoomIntent(event.prompt, characterConfigs, sessionActive);
+
+      if (chatRoomResult.triggerType === "exit" && sessionActive) {
+        // 退出聊天室
+        const messages: string[] = [];
+        await closeChatRoom(stateKey, async (text) => { messages.push(text); });
+        log.info(`[Pipeline] 聊天室已关闭: ${stateKey}`);
+        return {
+          chatRoomHandled: { responseText: messages.join("\n\n") },
+        };
+      }
+
+      if (chatRoomResult.isChatRoomMode) {
+        // 进入聊天室模式：运行编排器，收集所有输出
+        const messages: string[] = [];
+        const collectReply = async (text: string) => { messages.push(text); };
+
+        await handleChatRoomMessage(
+          {
+            userMessage: event.prompt,
+            participants: chatRoomResult.participants,
+            sessionKey: stateKey,
+            sendReply: collectReply,
+            callStrategy: "staggered",
+            interactionMode: chatRoomResult.interactionMode ?? null,
+            agentSessionKey: ctx.sessionKey,
+          },
+          config,
+        );
+
+        log.info(
+          `[Pipeline] 聊天室响应完成: participants=${chatRoomResult.participants.join(",")}, ` +
+          `messages=${messages.length}, triggerType=${chatRoomResult.triggerType}`,
+        );
+
+        return {
+          chatRoomHandled: { responseText: messages.join("\n\n") },
+        };
+      }
     }
 
     // 4. 执行前置处理（记忆检索等，但不加载人格 - 让 buildEmbeddedSystemPrompt 处理）

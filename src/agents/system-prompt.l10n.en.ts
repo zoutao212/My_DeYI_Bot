@@ -190,6 +190,17 @@ export type SystemPromptL10n = {
   reasoningFormatTitle: string;
   extraContextSubagentTitle: string;
   extraContextGroupTitle: string;
+  // P89: Memory write hint (injected when user intent to write memory is detected)
+  memoryWriteHintTitle: string;
+  memoryWriteHintIntro: string;
+  memoryWriteHintToolsSection: string;
+  memoryWriteHintDirsTitle: string;
+  memoryWriteHintDirGlobalTemplate: string;
+  memoryWriteHintDirCharLina: string;
+  memoryWriteHintDirCharDemerzel: string;
+  memoryWriteHintDirCharDolores: string;
+  memoryWriteHintDirWorkspace: string;
+  memoryWriteHintWorkflowSection: string;
 };
 
 export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
@@ -198,7 +209,7 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
   toolingAvailability: "Tool availability (filtered by policy):",
   toolingCaseSensitive: "Tool names are case-sensitive. Call tools exactly as listed.",
   toolSummaries: {
-    read: "Read file contents (supports local file paths like C:\\Users\\...\\file.txt; use offset/limit for large files)",
+    read: "Read file contents (supports local file paths like C:\\Users\\...\\file.txt; use offset/limit for large files. ⚠️ **Auto-truncation**: files >80K chars are truncated; MUST use offset/limit for segmented reading, or use novel_reference_search/memory_deep_search to retrieve relevant passages)",
     write: "**Write content to files** (4 modes: 1️⃣ overwrite - replace entire file (default), 2️⃣ append - add to end, 3️⃣ insert - insert at line (requires position param), 4️⃣ replace - replace line range (requires startLine & endLine params). ✅ Auto-creates parent dirs, ✅ Supports multiple encodings: utf-8/gbk/gb2312/etc)",
     edit: "**Replace exact text in a file** (recommended for appending: add new content at file end)",
     apply_patch: "Apply multi-file patches",
@@ -343,6 +354,16 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
 - **read(path, [offset], [limit])**: path=file path (supports absolute paths like C:\\Users\\...\\file.txt), offset=start line (optional), limit=line count (optional)
 - **exec(command, [workdir], [background])**: command=shell command, workdir=working dir (optional), background=run async (optional)
 
+## ⚠️ Large File Reading Limits (Important)
+The system has automatic truncation mechanisms to prevent token explosion:
+- **read tool**: When offset/limit not specified, files exceeding **80K characters** (~40-50K tokens) are auto-truncated (keeps first 70% + last 20%, middle omitted)
+- **All tool results**: When stored in session history, tool returns exceeding **30K characters** (~15-20K tokens) are auto-truncated
+- **Correct approach**:
+  1. Large files (novels, logs, data files) **MUST** use offset and limit parameters for segmented reading
+  2. For novel/literary content retrieval, use novel_reference_search tool for paragraph-level precision
+  3. For memory file retrieval, use memory_search or memory_deep_search
+  4. **NEVER** read entire files larger than 50KB in one call — this wastes tokens and content will be truncated
+
 ## ⚠️ File Writing Best Practices
 **To append content to a file**:
 1. ✅ **Recommended Method 1 (using edit)**:
@@ -411,7 +432,7 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
   fileAccessLine1: "You can use the `read` tool to read any file in the local file system (within the workspace or user-specified paths).",
   fileAccessLine2: "- ✅ Supports absolute paths: `C:\\Users\\zouta\\clawd\\memory\\file.txt`",
   fileAccessLine3: "- ✅ Supports relative paths: `./memory/file.txt`",
-  fileAccessLine4: "- ✅ Supports large file segmented reading: use `offset` and `limit` parameters",
+  fileAccessLine4: "- ✅ Supports large file segmented reading: use `offset` and `limit` parameters\n- ⚠️ **Auto-truncation for large files**: Files exceeding 80K characters (~40-50K tokens) are automatically truncated (keeps head+tail, middle omitted). **MUST use offset/limit for segmented reading of large files**, or use `novel_reference_search`/`memory_deep_search` to retrieve relevant passages. Additionally, all tool results exceeding 30K characters are truncated when stored in session history.",
   fileAccessLine5: "- ✅ Supports multiple encodings: use `encoding` parameter (utf-8, gbk, gb2312, auto)",
   fileAccessExample: "**Example**: `read(path=\"C:\\Users\\zouta\\clawd\\memory\\file.txt\", offset=0, limit=1000, encoding=\"auto\")`",
   injectedFilesTitle: "## Workspace Files (injected)",
@@ -499,4 +520,28 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
   reasoningFormatTitle: "## Reasoning Format",
   extraContextSubagentTitle: "## Subagent Context",
   extraContextGroupTitle: "## Group Chat Context",
+  // P89: Memory write hint
+  memoryWriteHintTitle: "[📝 Memory Write Guide]",
+  memoryWriteHintIntro:
+    "User wants to operate on the memory store. You **MUST use dedicated memory tools to actually write files**, do NOT just output plain text.",
+  memoryWriteHintToolsSection: [
+    "🔧 **Prefer dedicated memory tools** (auto-handle paths, directory creation, cache refresh):",
+    "- memory_write(filePath, content, mode): Write/append/prepend memory files",
+    "- memory_update(filePath, oldText, newText): Find-and-replace in existing memory files",
+    "- memory_list(directory): List memory directory tree (check existing file structure)",
+    "- memory_deep_search(query): Deep search across all memory directories",
+  ].join("\n"),
+  memoryWriteHintDirsTitle: "📂 Memory directory structure (use relative paths for filePath):",
+  memoryWriteHintDirGlobalTemplate: "- Global memory: memory/ (absolute: {absPath})",
+  memoryWriteHintDirCharLina: "- Character memory: characters/lina/memory/ (Lina, includes core-memories.md)",
+  memoryWriteHintDirCharDemerzel: "- Character memory: characters/demerzel/memory/ (Demerzel, includes core-memories.md)",
+  memoryWriteHintDirCharDolores: "- Character memory: characters/dolores/memory/ (Dolores, includes core-memories.md)",
+  memoryWriteHintDirWorkspace: "- Task output: workspace/",
+  memoryWriteHintWorkflowSection: [
+    "📋 Workflow:",
+    "1. Use memory_list to inspect target directory and existing files",
+    "2. Organize content then use memory_write (overwrite for new, append for additions)",
+    "3. Use memory_update for precise replacements in existing files",
+    "4. Confirm file path and content after writing",
+  ].join("\n"),
 };

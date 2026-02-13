@@ -326,27 +326,45 @@ export class IntentAnalyzer {
       this.characterConfigs = [
         {
           id: "lina",
-          displayName: "栗娜",
+          displayName: "琳娜",
           isSystemPersona: true,
           recognition: {
-            names: ["栗娜", "lina", "莉娜", "管家"],
+            names: ["栗娜", "lina", "linna", "莉娜", "琳娜", "管家"],
             triggers: ["帮我", "安排", "提醒", "记住", "日程", "待办", "任务"],
             contexts: ["任务", "日程", "待办", "记忆", "提醒"],
           },
         },
         {
-          id: "lisi",
-          displayName: "丽丝",
+          id: "demerzel",
+          displayName: "德默泽尔",
           isSystemPersona: false,
           recognition: {
-            names: ["丽丝", "lisi", "莉丝"],
-            triggers: [],
-            contexts: [],
+            names: ["德默泽尔", "德姨", "demerzel", "爱姬01号", "爱姬", "机械姬"],
+            triggers: ["德默泽尔", "爱姬", "01号"],
+            contexts: ["爱姬", "资产", "克隆", "丝袜", "泌乳", "场景"],
           },
         },
+        {
+          id: "dolores",
+          displayName: "德洛丽丝",
+          isSystemPersona: false,
+          recognition: {
+            names: ["德洛丽丝", "dolores", "爱姬03号", "多莉", "Dolly", "德妹", "Lola"],
+            triggers: ["德洛丽丝", "多莉", "03号"],
+            contexts: ["爱姬", "资产", "克隆", "丝袜", "泌乳", "场景", "西部世界", "接待员"],
+          },
+        }
       ];
     }
 
+    return this.characterConfigs;
+  }
+
+  /**
+   * 获取已加载的角色识别配置（供聊天室检测器等外部模块使用）
+   * 必须在 analyze() 之后调用（analyze 会触发加载）
+   */
+  getCharacterConfigs(): CharacterRecognitionConfig[] | null {
     return this.characterConfigs;
   }
 

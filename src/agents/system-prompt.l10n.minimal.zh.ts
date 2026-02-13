@@ -16,7 +16,7 @@ export const SYSTEM_PROMPT_L10N_MINIMAL_ZH: SystemPromptL10n = {
   toolingAvailability: "可用工具：",
   toolingCaseSensitive: "工具名区分大小写。",
   toolSummaries: {
-    read: "读取文件",
+    read: "读取文件（⚠️ 超过80K字符自动截断，大文件必须用offset/limit分段读取）",
     write: "写入文件（支持 overwrite/append/insert/replace 四种模式）",
     edit: "精确替换文件中的文本",
     apply_patch: "应用多文件补丁",
@@ -231,4 +231,15 @@ export const SYSTEM_PROMPT_L10N_MINIMAL_ZH: SystemPromptL10n = {
   reasoningFormatTitle: "",
   extraContextSubagentTitle: "## 子代理上下文",
   extraContextGroupTitle: "## 群聊上下文",
+  // P89: 记忆写入指引（精简版不需要）
+  memoryWriteHintTitle: "",
+  memoryWriteHintIntro: "",
+  memoryWriteHintToolsSection: "",
+  memoryWriteHintDirsTitle: "",
+  memoryWriteHintDirGlobalTemplate: "",
+  memoryWriteHintDirCharLina: "",
+  memoryWriteHintDirCharDemerzel: "",
+  memoryWriteHintDirCharDolores: "",
+  memoryWriteHintDirWorkspace: "",
+  memoryWriteHintWorkflowSection: "",
 };

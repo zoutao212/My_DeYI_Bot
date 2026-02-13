@@ -538,6 +538,19 @@ export function buildAgentSystemPrompt(params: {
     l10n.workspaceDirGuidance,
     ...workspaceNotes,
     "",
+    // P116: File access capabilities (truncation warnings for large files)
+    ...(l10n.fileAccessTitle
+      ? [
+          l10n.fileAccessTitle,
+          l10n.fileAccessLine1,
+          l10n.fileAccessLine2,
+          l10n.fileAccessLine3,
+          l10n.fileAccessLine4,
+          l10n.fileAccessLine5,
+          l10n.fileAccessExample,
+          "",
+        ].filter(Boolean)
+      : []),
     ...docsSection,
     params.sandboxInfo?.enabled ? l10n.sandboxTitle : "",
     params.sandboxInfo?.enabled
@@ -783,4 +796,33 @@ export function buildRuntimeLine(
   ]
     .filter(Boolean)
     .join(" | ")}`;
+}
+
+/**
+ * P89: 构建记忆写入引导提示（当检测到用户有记忆写入意图时注入 extraSystemPrompt）。
+ * @param l10n  当前语言的 l10n 对象
+ * @param workspaceDir  工作区目录绝对路径
+ * @returns 完整的记忆写入引导字符串，若 l10n 未提供标题则返回空字符串
+ */
+export function buildMemoryWriteHint(
+  l10n: typeof SYSTEM_PROMPT_L10N_EN,
+  workspaceDir: string,
+): string {
+  if (!l10n.memoryWriteHintTitle) return "";
+  const absPath = `${workspaceDir}/memory/`.replace(/\//g, "\\");
+  return [
+    l10n.memoryWriteHintTitle,
+    l10n.memoryWriteHintIntro,
+    "",
+    l10n.memoryWriteHintToolsSection,
+    "",
+    l10n.memoryWriteHintDirsTitle,
+    formatTemplate(l10n.memoryWriteHintDirGlobalTemplate, { absPath }),
+    l10n.memoryWriteHintDirCharLina,
+    l10n.memoryWriteHintDirCharDemerzel,
+    l10n.memoryWriteHintDirCharDolores,
+    l10n.memoryWriteHintDirWorkspace,
+    "",
+    l10n.memoryWriteHintWorkflowSection,
+  ].join("\n");
 }

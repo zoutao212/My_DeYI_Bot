@@ -59,6 +59,7 @@ import { generateSessionSummary, formatSessionSummary } from "../../session-summ
 import { retrieveMemoryContext } from "../../memory/pipeline-integration.js";
 import { resolvePersonaPrompt, renderPersonaWithContext } from "../../persona-injector.js";
 
+import { emitAgentEvent } from "../../../infra/agent-events.js";
 import { isAbortError } from "../abort.js";
 import { buildEmbeddedExtensionPaths } from "../extensions.js";
 import { applyExtraParamsToAgent } from "../extra-params.js";
@@ -465,6 +466,39 @@ export async function runEmbeddedAttempt(
             hookPrependContext = hookResult.prependContext;
             log.debug(`hooks: prepended context (${hookResult.prependContext.length} chars)`);
           }
+          // 🆕 聊天室短路：chatRoomHandled 表示聊天室编排器已生成完整回复
+          if (hookResult?.chatRoomHandled) {
+            const chatText = hookResult.chatRoomHandled.responseText;
+            log.info(`[attempt] 🏠 聊天室模式短路: ${chatText.length} 字符`);
+            // P122: 发出 agent events 让 Web UI 的 server-chat agent event handler 能接收
+            // 没有这些事件，Web 网关永远不会调用 emitChatDelta/emitChatFinal
+            if (params.runId) {
+              emitAgentEvent({
+                runId: params.runId,
+                stream: "assistant",
+                data: { text: chatText },
+              });
+              emitAgentEvent({
+                runId: params.runId,
+                stream: "lifecycle",
+                data: { phase: "end", endedAt: Date.now() },
+              });
+            }
+            return {
+              aborted: false,
+              timedOut: false,
+              promptError: null,
+              sessionIdUsed: params.sessionId,
+              messagesSnapshot: [],
+              assistantTexts: [chatText],
+              toolMetas: [],
+              lastAssistant: undefined,
+              didSendViaMessagingTool: false,
+              messagingToolSentTexts: [],
+              messagingToolSentTargets: [],
+              cloudCodeAssistFormatError: false,
+            };
+          }
         } catch (hookErr) {
           log.warn(`before_agent_start hook failed: ${String(hookErr)}`);
         }
@@ -527,6 +561,37 @@ export async function runEmbeddedAttempt(
           enhancedExtraSystemPrompt = enhancedExtraSystemPrompt
             ? `${enhancedExtraSystemPrompt}\n\n${relevantMemories}`
             : relevantMemories;
+        }
+      }
+
+      // Step 3.8: P118 — 输出 token 限制感知 + continue_generation 引导
+      // 告知 LLM 其 maxOutputTokens 限制，并指导使用 continue_generation 工具分批输出
+      // 🔧 P118a: 修复 maxTokens 为 undefined 时静默跳过的致命 BUG
+      //   - 使用 DEFAULT_MAX_OUTPUT_TOKENS 回退，确保提示始终注入
+      //   - 仅在 maxTokens ≤ 16384 时注入详细提示（大模型不需要）
+      //   - 系数从 0.7 修正为 0.6（更保守准确：中文约 1.5 tokens/字符）
+      //   - 新增策略4：提前续传引导（60-70% 用量时主动续传）
+      {
+        const _P118A_DEFAULT_MAX_OUTPUT = 4096;
+        const modelMaxTokens = params.model?.maxTokens || _P118A_DEFAULT_MAX_OUTPUT;
+        // 仅在输出限制较紧时注入详细提示（大 maxTokens 模型几乎不会被截断）
+        if (modelMaxTokens <= 16384) {
+          const approxChars = Math.round(modelMaxTokens * 0.6);
+          const tokenLimitHint = [
+            `\n## ⚠️ 输出长度限制`,
+            `你的单次回复上限约为 **${modelMaxTokens} tokens**（约 ${approxChars} 个中文字符）。`,
+            `当你的回复内容较多时（如需要多次调用工具、生成长文本），务必遵循以下策略：`,
+            `1. **优先行动，后描述**：先调用工具（如 enqueue_task、write），再做简要说明。不要用大段文字描述计划后再调用工具。`,
+            `2. **分批输出**：如果一次回复无法完成所有工作，先完成当前能做的部分，然后调用 \`continue_generation\` 工具请求续传。`,
+            `3. **禁止纯文本计划**：当任务需要调用工具时，绝对不要只输出文字计划而不调用任何工具。每次回复必须至少执行一个实际操作。`,
+            `4. **提前续传**：当你感觉已使用约 60-70% 的输出空间时，如果还有未完成的工作，请立即调用 \`continue_generation\`，不要等到被截断。`,
+          ].join("\n");
+          enhancedExtraSystemPrompt = enhancedExtraSystemPrompt
+            ? `${enhancedExtraSystemPrompt}\n${tokenLimitHint}`
+            : tokenLimitHint;
+          log.info(
+            `[attempt] 🔧 P118: 注入 token 限制提示 (maxTokens=${modelMaxTokens}, approxChars=${approxChars}, source=${params.model?.maxTokens ? "model" : "default"})`,
+          );
         }
       }
 
@@ -1380,6 +1445,61 @@ export async function runEmbeddedAttempt(
                 );
               }
             }
+          }
+        }
+        // ═══════════════════════════════════════════════════════════════
+
+        // ═══════════════════════════════════════════════════════════════
+        // Step 5.7: P118b — 截断自动续传恢复（continue_generation 安全网）
+        // 当 LLM 输出因 maxOutputTokens 被截断但未主动调用 continue_generation 时，
+        // 系统自动检测 stopReason 并注入续传请求重新 prompt LLM。
+        // 这解决了 P118 的核心盲区：截断 = LLM 已无法调用任何工具（包括 continue_generation）。
+        // ═══════════════════════════════════════════════════════════════
+        const _P118B_TRUNCATION_REASONS = new Set(["length", "max_tokens"]);
+        const _P118B_MAX_AUTO_CONT = 5;
+        if (!promptError && !aborted && !params.disableTools) {
+          const _p118bHasContinueTool = tools.some((t) => t.name === "continue_generation");
+          let _p118bAutoContCount = 0;
+
+          while (_p118bAutoContCount < _P118B_MAX_AUTO_CONT && !promptError && !aborted) {
+            // 获取最新的 lastAssistant（经过 Step 5.5/P88 可能已更新）
+            const _p118bLatestAssistant = messagesSnapshot
+              .slice()
+              .reverse()
+              .find((m) => (m as AgentMessage)?.role === "assistant") as AssistantMessage | undefined;
+
+            if (
+              !_p118bLatestAssistant?.stopReason ||
+              !_P118B_TRUNCATION_REASONS.has(_p118bLatestAssistant.stopReason)
+            ) {
+              break; // 不是截断，正常结束
+            }
+
+            _p118bAutoContCount++;
+            log.warn(
+              `[attempt] ⚠️ P118b: 输出被截断 (stopReason=${_p118bLatestAssistant.stopReason}), ` +
+              `自动续传 #${_p118bAutoContCount}/${_P118B_MAX_AUTO_CONT}` +
+              (_p118bHasContinueTool ? "" : " (无 continue_generation 工具)"),
+            );
+
+            // 引导 LLM 从断点继续：有 continue_generation 时提醒使用，否则直接要求继续
+            const _p118bContPrompt = _p118bHasContinueTool
+              ? `[系统提示] 你的回复因 token 限制被截断了。请调用 continue_generation 工具记录进度摘要，然后从上次停止的地方继续完成任务。不要重复已输出的内容。`
+              : `[系统提示] 你的回复因 token 限制被截断了。请从上次停止的地方继续，完成未完成的工作。不要重复已输出的内容，尽量精简表述。`;
+
+            try {
+              await abortable(activeSession.prompt(_p118bContPrompt));
+              messagesSnapshot = activeSession.messages.slice();
+            } catch (err) {
+              promptError = err;
+              break;
+            }
+          }
+
+          if (_p118bAutoContCount > 0) {
+            log.info(
+              `[attempt] ✅ P118b 截断自动续传完成: ${_p118bAutoContCount} 轮`,
+            );
           }
         }
         // ═══════════════════════════════════════════════════════════════

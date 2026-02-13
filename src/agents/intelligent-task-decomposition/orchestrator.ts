@@ -30,6 +30,7 @@ import { deriveExecutionRole, createExecutionContext } from "./execution-context
 import { getPrompts } from "./prompts-loader.js";
 import { classifyTaskType, classifyAndEnrich, classifyTaskTypeWithLLM, getBlueprintTypeKey, isWordCountCritical, requiresFileOutput, type TaskTypeClassification } from "./task-type-classifier.js";
 import type { ClawdbotConfig } from "../../config/config.js";
+import { getCP0DecomposeSignal, recordDecompositionDecision, type CP2DecisionSource } from "./intent-complexity-analyzer.js";
 
 /**
  * 任务分解协调器
@@ -290,6 +291,13 @@ export class Orchestrator {
         // 直接跳到后续的文件验证和保存步骤
       } else {
       try {
+        // 🆕 UTIL CP3: 动态质检严格度 — 根据 CP0 复杂度等级调整
+        const { deriveStrictnessFromComplexity: _cp3Derive } = await import("./intent-complexity-analyzer.js");
+        const _cp3SessionId = taskTree.id;
+        const _cp3Strictness = _cp3Derive(_cp3SessionId, subTask.id);
+        if (_cp3Strictness !== "normal") {
+          console.log(`[Orchestrator] 🧠 UTIL CP3: 质检严格度=${_cp3Strictness} (subTask=${subTask.id})`);
+        }
         console.log(`[Orchestrator] 🔍 开始质量评估：${subTask.id}`);
 
         // 🔧 P94 修复：非写作类任务跳过字数前置检查
@@ -1490,6 +1498,18 @@ export class Orchestrator {
 
     // 🆕 V5: chunk 子任务不再分解（Map/Reduce/Finalize 子任务直接执行）
     if (subTask.metadata?.isChunkTask) return false;
+
+    // 🆕 UTIL CP2: 消费 CP0 的 force/suggest 信号
+    // 核心修复：打通 P102 → shouldAutoDecompose 的断裂
+    const sessionId = taskTree.id; // sessionId 作为 key
+    const cp0Signal = getCP0DecomposeSignal(sessionId, subTask.depth ?? 0);
+    if (cp0Signal?.force) {
+      console.log(
+        `[Orchestrator] 🧠 UTIL CP2: CP0 force_decompose 信号 → 强制分解 ${subTask.id} (depth=${subTask.depth ?? 0})`,
+      );
+      recordDecompositionDecision(sessionId, subTask.id, "decompose", "CP0 force_decompose 信号", "cp0_force");
+      return true;
+    }
     
     const prompt = subTask.prompt;
     const promptLen = prompt.length;
@@ -1533,7 +1553,11 @@ export class Orchestrator {
 
     // 🔧 P52: 最小粒度守卫 — prompt 短且字数要求小的任务不值得分解
     // 根因：分解后子任务的 prompt 不会比原 prompt 简单多少，反而增加调度开销
-    const isSmallTask = promptLen < 1200 && (!extractedWordCount || extractedWordCount < 3000);
+    // 🆕 UTIL CP2: CP0 suggest_decompose 时忽略最小粒度守卫
+    const cp0LowerThreshold = cp0Signal?.lowerThreshold ?? false;
+    const isSmallTask = cp0LowerThreshold
+      ? false  // CP0 suggest_decompose 覆盖小任务守卫
+      : (promptLen < 1200 && (!extractedWordCount || extractedWordCount < 3000));
 
     // 🔧 P59: 分类器置信度门槛 — 低置信度分类不触发自动分解
     const classifierConfident = classification.confidence > 60;
@@ -1542,20 +1566,27 @@ export class Orchestrator {
     // - 写作分段/大输入候选 → 直接通过（不受最小粒度限制）
     // - 分类器建议分解 + 置信度足够 + 非小任务 → 通过
     // - 🔧 P52: 多维度综合得分 → 阈值从 1 提高到 2（至少满足两个条件）
+    // - 🆕 UTIL CP2: CP0 suggest_decompose 时降低 legacyScore 阈值为 1
+    const legacyThreshold = cp0LowerThreshold ? 1 : 2;
     const legacyScore = (isLongPrompt ? 1 : 0) + (hasLargeWordCount ? 1 : 0) + (hasMultiStepSignals ? 1 : 0);
     const shouldDecompose = 
       isWritingSegmentCandidate ||
       isLargeInputCandidate ||
       (classifierSuggestsDecompose && classifierConfident && !isSmallTask) ||
-      (legacyScore >= 2 && !isSmallTask);
+      (legacyScore >= legacyThreshold && !isSmallTask);
     
     if (shouldDecompose) {
+      const cp2Source: CP2DecisionSource = cp0LowerThreshold ? (cp0Signal?.source ?? "rule") : "rule";
+      recordDecompositionDecision(sessionId, subTask.id, "decompose", 
+        `综合判断: legacy=${legacyScore}/${legacyThreshold}, classifier=${classifierSuggestsDecompose}, cp0=${cp0LowerThreshold}`,
+        cp2Source);
       console.log(
-        `[Orchestrator] 📊 V6: 子任务 ${subTask.id} type=${classification.type}(${classification.confidence}%) prompt=${promptLen}字符, ` +
+        `[Orchestrator] 📊 V6+UTIL: 子任务 ${subTask.id} type=${classification.type}(${classification.confidence}%) prompt=${promptLen}字符, ` +
         `depth=${subTask.depth ?? 0}/${maxDepth}, ` +
         `signals=[classifier=${classifierSuggestsDecompose}, long=${isLongPrompt}, wordCount=${hasLargeWordCount}, multiStep=${hasMultiStepSignals}` +
         `, writingSegment=${isWritingSegmentCandidate}(${extractedWordCount ?? 0}字)` +
-        `, largeInput=${isLargeInputCandidate}(${detectedFilePath ?? "none"})] → 推荐自动分解`,
+        `, largeInput=${isLargeInputCandidate}(${detectedFilePath ?? "none"})` +
+        `, cp0=${cp0Signal?.source ?? "none"}(lowerThreshold=${cp0LowerThreshold})] → 推荐自动分解`,
       );
     }
     return shouldDecompose;
@@ -2008,6 +2039,39 @@ export class Orchestrator {
     } else {
       taskTree.status = hasFailed ? "failed" : "completed";
       console.log(`[Orchestrator] 🏁 Task tree marked as ${taskTree.status} (round: ${rootTaskId})`);
+    }
+
+    // 🆕 UTIL CP4: 回顾学习 — 统计轮次执行数据，评估 CP0 预判准确度，写入经验池
+    try {
+      const { buildRetrospective, clearActiveContext } = await import("./intent-complexity-analyzer.js");
+      const { recordExperience } = await import("./experience-pool.js");
+      const _cp4Stats = {
+        totalTasks: roundTasks.length,
+        completed: roundTasks.filter(t => t.status === "completed").length,
+        failed: roundTasks.filter(t => t.status === "failed").length,
+        totalRetries: roundTasks.reduce((s, t) => s + (t.retryCount ?? 0), 0),
+      };
+      const _cp4SessionId = taskTree.id;
+      const _cp4Result = buildRetrospective(_cp4SessionId, _cp4Stats);
+      if (_cp4Result && _cp4Result.lessonsLearned.length > 0) {
+        for (const lesson of _cp4Result.lessonsLearned) {
+          await recordExperience({
+            category: "execution",
+            pattern: `complexity_prediction_${_cp4Result.predictionAccuracy}`,
+            lesson,
+            suggestion: _cp4Result.predictionAccuracy === "underestimated"
+              ? "考虑对类似短 prompt 提高复杂度预判"
+              : "考虑对类似任务降低复杂度预判，减少不必要分解",
+            taskType: roundTasks[0]?.taskType as import("./types.js").TaskType | undefined,
+          });
+        }
+        console.log(`[Orchestrator] 📝 UTIL CP4: 写入 ${_cp4Result.lessonsLearned.length} 条经验`);
+      }
+      // 轮次结束，清理 Context 释放内存
+      clearActiveContext(_cp4SessionId);
+    } catch (_cp4Err) {
+      // 回顾学习失败不阻塞主流程
+      console.warn(`[Orchestrator] ⚠️ UTIL CP4: 回顾学习失败: ${_cp4Err}`);
     }
 
     await this.taskTreeManager.save(taskTree);

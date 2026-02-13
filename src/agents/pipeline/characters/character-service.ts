@@ -21,7 +21,7 @@ export interface FullCharacterConfig {
   name: string;
   displayName: string;
   version: string;
-  type: "system-persona" | "virtual-character";
+  type: "system-persona" | "virtual-character" | "custom-aiji";
   enabled: boolean;
 
   // 识别配置
@@ -227,13 +227,13 @@ export class CharacterService {
       const profile = await this.loadProfile(characterDir);
 
       // 3. 加载知识库
-      const knowledge = await this.loadKnowledge(characterDir, config.knowledge.files);
+      const knowledge = await this.loadKnowledge(characterDir, config.knowledge?.files ?? []);
 
       // 4. 加载记忆
-      const memories = await this.loadMemories(characterDir, config.memory);
+      const memories = await this.loadMemories(characterDir, config.memory ?? { coreMemoriesFile: "core-memories.md", sessionArchiveDir: "sessions", maxRetrievalResults: 10 });
 
       // 5. 加载系统提示词模板
-      const systemPromptTemplate = await this.loadSystemPromptTemplate(characterDir, config.prompts);
+      const systemPromptTemplate = await this.loadSystemPromptTemplate(characterDir, config.prompts ?? { systemPromptTemplate: "system.md" });
 
       // 5.5 加载 persona.md（新增）
       const persona = await this.loadPersona(characterDir, config);

@@ -276,7 +276,13 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
         if (errorName === "TypeError") {
           const errorMessage = (error as { message?: string }).message;
           if (errorMessage && errorMessage.includes("fetch failed")) {
-            console.warn("[llm-gated-fetch] Network error (fetch failed):", error);
+            // P120b: 连接类错误只打一行摘要，不打完整堆栈（避免 embedding 端点不可达时刷屏）
+            const cause = (error as { cause?: { code?: string; address?: string; port?: number } }).cause;
+            if (cause && /ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT/.test(cause.code ?? "")) {
+              console.warn(`[llm-gated-fetch] Network error: ${cause.code} ${cause.address ?? ""}:${cause.port ?? ""}`);
+            } else {
+              console.warn("[llm-gated-fetch] Network error (fetch failed):", error);
+            }
             throw error; // 重新抛出，让上层处理
           }
         }

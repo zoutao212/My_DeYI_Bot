@@ -828,6 +828,10 @@ export function createFollowupRunner(params: {
                 // 写作/通用类：基础工具即可
                 subTaskToolAllowlist = ["write", "read", "edit", "exec", "process"];
               }
+              // 🔧 P118: continue_generation 对所有任务类型可用（输出续传机制）
+              if (!subTaskToolAllowlist.includes("continue_generation")) {
+                subTaskToolAllowlist.push("continue_generation");
+              }
               // 🔧 P102: prompt 驱动的 memory 工具动态注入
               // 根因：子任务 prompt 明确要求使用 memory_search/write/update/delete 等工具，
               // 但白名单中没有它们 → LLM 被迫用 exec 替代 → 路径不存在 → 退化为幻觉文本

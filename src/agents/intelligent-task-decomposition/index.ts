@@ -24,5 +24,5 @@ export { checkCoherence, formatCoherenceReport } from "./coherence-checker.js";
 export type { CoherenceIssueType, CoherenceSeverity, CoherenceIssue, CoherenceCheckResult } from "./coherence-checker.js";
 export { getTaskTemplate, getAllTemplates, applyNamingTemplate, buildOutputContract, templateSuggestsDecompose } from "./task-template.js";
 export type { TaskTemplate } from "./task-template.js";
-export { analyzeIntentComplexity, buildComplexityGuidance } from "./intent-complexity-analyzer.js";
-export type { ComplexityLevel, RecommendedStrategy, IntentComplexityResult } from "./intent-complexity-analyzer.js";
+export { analyzeIntentComplexity, buildComplexityGuidance, getActiveContext, setActiveContext, clearActiveContext, validateEntryAgainstCP0, getCP0DecomposeSignal, recordDecompositionDecision, deriveStrictnessFromComplexity, buildRetrospective } from "./intent-complexity-analyzer.js";
+export type { ComplexityLevel, RecommendedStrategy, IntentComplexityResult, TaskIntelligenceContext, EntryValidationResult, StrictnessLevel, RetrospectiveResult, CP2DecisionSource } from "./intent-complexity-analyzer.js";

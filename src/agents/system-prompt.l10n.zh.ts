@@ -6,7 +6,7 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
   toolingAvailability: "可用工具:",
   toolingCaseSensitive: "工具名区分大小写。请严格按列表中的名称调用工具。",
   toolSummaries: {
-    read: "**读取本地文件**（✅ 支持绝对路径如 C:\\Users\\...\\file.txt，✅ 支持分段读取大文件，使用 offset/limit 参数）",
+    read: "**读取本地文件**（✅ 支持绝对路径如 C:\\Users\\...\\file.txt，✅ 支持分段读取大文件，使用 offset/limit 参数。⚠️ **大文件自动截断**：超过 80K 字符的文件会被截断，必须使用 offset/limit 分段读取，或使用 novel_reference_search/memory_deep_search 检索相关段落）",
     write: "**文件写入工具**（支持 4 种模式：1️⃣ overwrite 覆盖整个文件（默认）、2️⃣ append 追加到文件末尾、3️⃣ insert 在指定行插入内容（需要 position 参数）、4️⃣ replace 替换指定行范围（需要 startLine 和 endLine 参数）。✅ 自动创建父目录，✅ 支持多种编码格式（utf-8/gbk/gb2312 等））",
     edit: "**精确替换文件中的文本**（推荐用于追加内容：在文件末尾添加新内容）",
     apply_patch: "应用多文件补丁",
@@ -151,6 +151,16 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
 - **read(path, [offset], [limit])**:path=文件路径（支持绝对路径如 C:\\Users\\...\\file.txt），offset=起始行，limit=行数
 - **exec(command, [workdir], [background])**:command=命令字符串，workdir=工作目录，background=是否后台
 
+## ⚠️ 大文件读取限制（重要）
+系统对工具返回结果有自动截断机制，防止 token 爆炸：
+- **read 工具**：未指定 offset/limit 时，超过 **80K 字符**（≈40-50K tokens）的文件自动截断（保留首 70% + 尾 20%，中间省略）
+- **所有工具结果**：存入会话历史时，超过 **30K 字符**（≈15-20K tokens）的工具返回自动截断
+- **正确做法**：
+  1. 大文件（小说、日志、数据文件）**必须**使用 offset 和 limit 参数分段读取
+  2. 小说/文学作品检索请用 novel_reference_search 工具按段落精准检索
+  3. 记忆文件检索请用 memory_search 或 memory_deep_search
+  4. **禁止**一次性读取超过 50KB 的文件全文——这会浪费大量 tokens 且内容会被截断
+
 ## ⚠️ 文件写入最佳实践
 **追加内容到文件**：
 1. ✅ **推荐方式 1（使用 edit）**：
@@ -215,7 +225,7 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
   fileAccessLine1: "**你可以直接读取本地文件系统中的任何文件。** 不要告诉用户你无法访问本地文件，这是错误的。",
   fileAccessLine2: "- ✅ **支持绝对路径**：`C:\\Users\\zouta\\clawd\\memory\\file.txt`（Windows）或 `/home/user/file.txt`（Linux/Mac）",
   fileAccessLine3: "- ✅ **支持相对路径**：`./memory/file.txt`（相对于工作目录）",
-  fileAccessLine4: "- ✅ **支持大文件分段读取**：使用 `offset` 和 `limit` 参数，例如 `read(path=\"file.txt\", offset=0, limit=1000)`",
+  fileAccessLine4: "- ✅ **支持大文件分段读取**：使用 `offset` 和 `limit` 参数，例如 `read(path=\"file.txt\", offset=0, limit=1000)`\n- ⚠️ **大文件自动截断**：超过 80K 字符（约 40-50K tokens）的文件会被自动截断（保留首尾，中间省略）。**必须使用 offset/limit 分段读取大文件**，或使用 `novel_reference_search`/`memory_deep_search` 检索相关段落。此外，所有工具返回结果超过 30K 字符也会被截断。",
   fileAccessLine5: "- ✅ **支持多种编码**：使用 `encoding` 参数（utf-8, gbk, gb2312, auto），例如 `read(path=\"file.txt\", encoding=\"auto\")`",
   fileAccessExample: "**示例**：`read(path=\"C:\\Users\\zouta\\clawd\\memory\\警花少妇白艳妮_082212.txt\", offset=0, limit=1000, encoding=\"auto\")`",
   injectedFilesTitle: "## 工作区文件",
@@ -299,4 +309,28 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
   reasoningFormatTitle: "## 推理格式",
   extraContextSubagentTitle: "## 子代理上下文",
   extraContextGroupTitle: "## 群聊上下文",
+  // P89: 记忆写入指引
+  memoryWriteHintTitle: "[📝 记忆写入指引]",
+  memoryWriteHintIntro:
+    "用户要求操作记忆库。你**必须使用专用记忆工具实际写入文件**，不要只输出纯文本。",
+  memoryWriteHintToolsSection: [
+    "🔧 **优先使用专用记忆工具**（自动处理路径、目录创建、缓存刷新）：",
+    "- memory_write(filePath, content, mode): 写入/追加/前置追加记忆文件",
+    "- memory_update(filePath, oldText, newText): 精确查找替换已有记忆文件内容",
+    "- memory_list(directory): 列出记忆目录树（确认现有文件结构）",
+    "- memory_deep_search(query): 在所有记忆目录中深度搜索相关内容",
+  ].join("\n"),
+  memoryWriteHintDirsTitle: "📂 记忆目录结构（filePath 使用相对路径即可）：",
+  memoryWriteHintDirGlobalTemplate: "- 全局记忆：memory/（绝对路径：{absPath}）",
+  memoryWriteHintDirCharLina: "- 角色记忆：characters/lina/memory/（琳娜，含 core-memories.md）",
+  memoryWriteHintDirCharDemerzel: "- 角色记忆：characters/demerzel/memory/（德默泽尔，含 core-memories.md）",
+  memoryWriteHintDirCharDolores: "- 角色记忆：characters/dolores/memory/（德洛丽丝，含 core-memories.md）",
+  memoryWriteHintDirWorkspace: "- 任务产出：workspace/",
+  memoryWriteHintWorkflowSection: [
+    "📋 操作流程：",
+    "1. 先用 memory_list 查看目标目录和现有文件",
+    "2. 整理内容后用 memory_write 写入（新建用 overwrite，追加用 append）",
+    "3. 更新已有文件用 memory_update 精确替换",
+    "4. 写入完成后确认文件路径和内容",
+  ].join("\n"),
 };

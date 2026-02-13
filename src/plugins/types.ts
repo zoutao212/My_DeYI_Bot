@@ -323,6 +323,8 @@ export type PluginHookBeforeAgentStartResult = {
   systemPrompt?: string;
   prependContext?: string;
   characterName?: string;  // 🆕 动态识别的角色名（传递给 buildEmbeddedSystemPrompt）
+  /** 🆕 聊天室模式已处理：当设置时，attempt.ts 短路返回此文本作为 agent 回复，跳过正常 LLM 调用 */
+  chatRoomHandled?: { responseText: string };
 };
 
 // agent_end hook

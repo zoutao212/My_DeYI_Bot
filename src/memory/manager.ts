@@ -104,6 +104,7 @@ const EMBEDDING_RETRY_MAX_DELAY_MS = 8000;
 const BATCH_FAILURE_LIMIT = 2;
 const SESSION_DELTA_READ_CHUNK_BYTES = 64 * 1024;
 const VECTOR_LOAD_TIMEOUT_MS = 30_000;
+const NOTIFY_CIRCUIT_COOLDOWN_MS = 5 * 60_000;
 const EMBEDDING_QUERY_TIMEOUT_REMOTE_MS = 60_000;
 const EMBEDDING_QUERY_TIMEOUT_LOCAL_MS = 5 * 60_000;
 const EMBEDDING_BATCH_TIMEOUT_REMOTE_MS = 2 * 60_000;
@@ -172,6 +173,7 @@ export class MemoryIndexManager {
   >();
   private sessionWarm = new Set<string>();
   private syncing: Promise<void> | null = null;
+  private notifyCircuitOpenUntil = 0;
 
   static async get(params: {
     cfg: ClawdbotConfig;
@@ -326,6 +328,11 @@ export class MemoryIndexManager {
    */
   async notifyFileChanged(absPath: string): Promise<void> {
     try {
+      // P120a: 熔断器 — embedding 端点不可达时跳过索引，避免重复刷屏
+      if (Date.now() < this.notifyCircuitOpenUntil) {
+        log.debug(`notifyFileChanged: circuit open, skipping index for ${absPath}`);
+        return;
+      }
       const relPath = path.relative(this.workspaceDir, absPath).replace(/\\/g, "/");
       // 仅索引记忆相关文件（memory/ 或 characters/*/memory/ 下的文件）
       const isMemory = isMemoryPath(relPath)
@@ -338,9 +345,18 @@ export class MemoryIndexManager {
       }
       const entry = await buildFileEntry(absPath, this.workspaceDir);
       await this.indexFile(entry, { source: "memory" });
+      // 索引成功 → 重置熔断器
+      this.notifyCircuitOpenUntil = 0;
       log.info(`notifyFileChanged: indexed ${relPath} (${entry.size} bytes)`);
     } catch (err) {
-      log.warn(`notifyFileChanged failed for ${absPath}: ${String(err)}`);
+      // P120a: 连接类错误 → 开启熔断器（冷却 5 分钟）
+      const msg = String(err);
+      if (/ECONNREFUSED|ECONNRESET|ENOTFOUND|fetch failed|ETIMEDOUT/.test(msg)) {
+        this.notifyCircuitOpenUntil = Date.now() + NOTIFY_CIRCUIT_COOLDOWN_MS;
+        log.warn(`notifyFileChanged: embedding endpoint unreachable, circuit open for 5min (${absPath})`);
+      } else {
+        log.warn(`notifyFileChanged failed for ${absPath}: ${msg}`);
+      }
     }
   }
 

@@ -16,6 +16,12 @@ import {
 
 // NOTE(steipete): Upstream read now does file-magic MIME detection; we keep the wrapper
 // to normalize payloads and sanitize oversized images before they hit providers.
+
+// P116: read 工具大文件截断上限（字符数）
+// 80K 字符 ≈ 40-50K tokens（CJK），与 V5 CHUNK_TARGET_CHARS 对齐。
+// 当用户未指定 offset/limit 且文件超过此阈值时，截断并提示使用分段读取。
+const MAX_READ_CONTENT_CHARS = 80_000;
+
 type ToolContentBlock = AgentToolResult<unknown>["content"][number];
 type ImageContentBlock = Extract<ToolContentBlock, { type: "image" }>;
 type TextContentBlock = Extract<ToolContentBlock, { type: "text" }>;
@@ -349,6 +355,19 @@ export function createClawdbotReadTool(base: AnyAgentTool): AnyAgentTool {
             content = lines.slice(startLine, endLine).join("\n");
           }
           
+          // P116: 截断过大内容（仅当用户未指定 offset/limit 时）
+          if (offset === undefined && limit === undefined && content.length > MAX_READ_CONTENT_CHARS) {
+            const originalLen = content.length;
+            const totalLines = content.split("\n").length;
+            const headLen = Math.floor(MAX_READ_CONTENT_CHARS * 0.7);
+            const tailLen = Math.floor(MAX_READ_CONTENT_CHARS * 0.2);
+            content = content.substring(0, headLen)
+              + `\n\n⚠️ [P116 大文件截断] 文件共 ${originalLen} 字符 / ${totalLines} 行，已截断到 ${MAX_READ_CONTENT_CHARS} 字符上限。`
+              + `\n请使用 offset 和 limit 参数分段读取，或使用 novel_reference_search 工具检索相关段落。\n\n`
+              + content.substring(content.length - tailLen);
+            console.log(`[read-tool] ✂️ P116: 截断大文件 ${filePath} ${originalLen} → ${content.length} 字符`);
+          }
+          
           // Return as text result
           return {
             content: [
@@ -357,7 +376,7 @@ export function createClawdbotReadTool(base: AnyAgentTool): AnyAgentTool {
                 text: `Read text file [${encoding}]\n\n${content}`,
               },
             ],
-            details: { encoding, filePath, offset, limit },
+            details: { encoding, filePath, offset, limit, truncatedByP116: content.length < (offset === undefined && limit === undefined ? Infinity : 0) },
           } satisfies AgentToolResult<unknown>;
         } catch (err) {
           // Fall back to default read if encoding fails
@@ -388,6 +407,25 @@ export function createClawdbotReadTool(base: AnyAgentTool): AnyAgentTool {
         normalized ?? params,
         signal,
       )) as AgentToolResult<unknown>;
+      
+      // P116: 截断默认读取路径中的过大文本结果（仅当用户未指定 offset/limit 时）
+      if (offset === undefined && limit === undefined && Array.isArray(result.content)) {
+        for (const block of result.content) {
+          if (!block || typeof block !== "object") continue;
+          const textBlock = block as { type?: string; text?: string };
+          if (textBlock.type === "text" && typeof textBlock.text === "string" && textBlock.text.length > MAX_READ_CONTENT_CHARS) {
+            const original = textBlock.text;
+            const totalLines = original.split("\n").length;
+            const headLen = Math.floor(MAX_READ_CONTENT_CHARS * 0.7);
+            const tailLen = Math.floor(MAX_READ_CONTENT_CHARS * 0.2);
+            textBlock.text = original.substring(0, headLen)
+              + `\n\n⚠️ [P116 大文件截断] 文件共 ${original.length} 字符 / ${totalLines} 行，已截断到 ${MAX_READ_CONTENT_CHARS} 字符上限。`
+              + `\n请使用 offset 和 limit 参数分段读取，或使用 novel_reference_search 工具检索相关段落。\n\n`
+              + original.substring(original.length - tailLen);
+            console.log(`[read-tool] ✂️ P116: 截断大文件 ${filePath} ${original.length} → ${textBlock.text.length} 字符`);
+          }
+        }
+      }
       
       const normalizedResult = await normalizeReadImageResult(result, filePath);
       return sanitizeToolResultImages(normalizedResult, `read:${filePath}`);

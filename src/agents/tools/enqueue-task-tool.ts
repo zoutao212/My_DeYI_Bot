@@ -8,6 +8,7 @@ import type { SessionEntry } from "../../config/sessions.js";
 import { Orchestrator } from "../intelligent-task-decomposition/orchestrator.js";
 import { deriveExecutionRole, createExecutionContext } from "../intelligent-task-decomposition/execution-context.js";
 import { PERMISSION_MATRIX } from "../intelligent-task-decomposition/types.js";
+import { validateEntryAgainstCP0 } from "../intelligent-task-decomposition/intent-complexity-analyzer.js";
 
 const EnqueueTaskSchema = Type.Object({
   prompt: Type.String({
@@ -470,6 +471,16 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
           rootTaskId,         // 🆕 轮次隔离 ID
         );
         console.log(`[enqueue_task] ✅ Sub task added to tree: ${subTask.id} (${summary || "none"}) [parent=${parentId || "none"}, waitForChildren=${waitForChildren}, isNewRootTask=${isNewRootTask}]`);
+
+        // 🆕 UTIL CP1: 入队校验 — 校验 LLM 的分解方案是否与 CP0 预判一致
+        const _cp1SessionKey = currentFollowupRun.run.sessionKey ?? "";
+        const _cp1ExistingCount = taskTree.subTasks.filter(
+          t => t.rootTaskId === rootTaskId && t.status === "pending",
+        ).length;
+        const _cp1Result = validateEntryAgainstCP0(_cp1SessionKey, isNewRootTask, _cp1ExistingCount);
+        if (_cp1Result.warning) {
+          console.log(`[enqueue_task] 🧠 UTIL CP1: ${_cp1Result.warning}`);
+        }
         
         // 构建 FollowupRun（融合方案 1+2+3 + 精确匹配）
         // - isRootTask：新根任务允许分解子任务（方案 1）

@@ -19,6 +19,9 @@ import { clearCommandLane, getQueueSize } from "../../process/command-queue.js";
 import { normalizeMainKey } from "../../routing/session-key.js";
 import { isReasoningTagProvider } from "../../utils/provider-utils.js";
 import { hasControlCommand } from "../command-detection.js";
+import { buildMemoryWriteHint } from "../../agents/system-prompt.js";
+import { SYSTEM_PROMPT_L10N_EN } from "../../agents/system-prompt.l10n.en.js";
+import { SYSTEM_PROMPT_L10N_ZH } from "../../agents/system-prompt.l10n.zh.js";
 import { buildInboundMediaNote } from "../media-note.js";
 import type { MsgContext, TemplateContext } from "../templating.js";
 import {
@@ -31,7 +34,7 @@ import {
   type VerboseLevel,
 } from "../thinking.js";
 import { SILENT_REPLY_TOKEN } from "../tokens.js";
-import { analyzeIntentComplexity, buildComplexityGuidance } from "../../agents/intelligent-task-decomposition/intent-complexity-analyzer.js";
+import { analyzeIntentComplexity, buildComplexityGuidance, setActiveContext, type TaskIntelligenceContext } from "../../agents/intelligent-task-decomposition/intent-complexity-analyzer.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { runReplyAgent } from "./agent-runner.js";
 import { applySessionHints } from "./body.js";
@@ -188,15 +191,27 @@ export async function runPreparedReply(
   try {
     const _p102Result = await analyzeIntentComplexity(_p102Body, cfg, provider, model);
     complexityGuidance = buildComplexityGuidance(_p102Result);
+
+    // UTIL P5: 将 CP0 结果存入全局 TaskIntelligenceContext，供 CP1-CP4 消费
+    const _utilSessionKey = sessionKey ?? "";
+    if (_utilSessionKey) {
+      const _utilCtx: TaskIntelligenceContext = {
+        intentAnalysis: _p102Result,
+        userMessage: _p102Body,
+        createdAt: Date.now(),
+      };
+      setActiveContext(_utilSessionKey, _utilCtx);
+    }
+
     if (complexityGuidance) {
       console.log(
-        `[get-reply-run] P102: 复杂度预判注入 (complexity=${_p102Result.complexity}, ` +
+        `[get-reply-run] P102+UTIL: CP0 预判注入 (complexity=${_p102Result.complexity}, ` +
         `strategy=${_p102Result.strategy}, guidance长度=${complexityGuidance.length})`,
       );
     }
   } catch (err) {
     // 静默降级，不阻塞主流程
-    console.warn(`[get-reply-run] P102: 预判异常，跳过: ${err instanceof Error ? err.message : String(err)}`);
+    console.warn(`[get-reply-run] P102+UTIL: CP0 预判异常，跳过: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // P89: 检测用户消息中的"记忆写入"意图，注入记忆目录路径引导
@@ -207,28 +222,9 @@ export async function runPreparedReply(
     /(?:记忆|memory).{0,8}(?:写入|保存|整理|归档|更新|同步)/i.test(_p89Body);
   let memoryWriteHint = "";
   if (_p89HasMemoryWriteIntent && workspaceDir) {
-    const p = (s: string) => `${workspaceDir}/${s}`.replace(/\//g, "\\");
-    memoryWriteHint = [
-      "[📝 记忆写入指引]",
-      "用户要求操作记忆库。你**必须使用专用记忆工具实际写入文件**，不要只输出纯文本。",
-      "",
-      "🔧 **优先使用专用记忆工具**（自动处理路径、目录创建、缓存刷新）：",
-      "- memory_write(filePath, content, mode): 写入/追加/前置追加记忆文件",
-      "- memory_update(filePath, oldText, newText): 精确查找替换已有记忆文件内容",
-      "- memory_list(directory): 列出记忆目录树（确认现有文件结构）",
-      "- memory_deep_search(query): 在所有记忆目录中深度搜索相关内容",
-      "",
-      "📂 记忆目录结构（filePath 使用相对路径即可）：",
-      `- 全局记忆：memory/（绝对路径：${p("memory/")}）`,
-      `- 角色记忆：characters/lina/memory/（含 core-memories.md）`,
-      `- 任务产出：workspace/`,
-      "",
-      "📋 操作流程：",
-      "1. 先用 memory_list 查看目标目录和现有文件",
-      "2. 整理内容后用 memory_write 写入（新建用 overwrite，追加用 append）",
-      "3. 更新已有文件用 memory_update 精确替换",
-      "4. 写入完成后确认文件路径和内容",
-    ].join("\n");
+    const _p89PromptLang = cfg.agents?.defaults?.promptLanguage === "zh" ? "zh" : "en";
+    const _p89L10n = _p89PromptLang === "zh" ? SYSTEM_PROMPT_L10N_ZH : SYSTEM_PROMPT_L10N_EN;
+    memoryWriteHint = buildMemoryWriteHint(_p89L10n, workspaceDir);
   }
 
   const extraSystemPrompt = [groupIntro, groupSystemPrompt, memoryWriteHint, complexityGuidance].filter(Boolean).join("\n\n");

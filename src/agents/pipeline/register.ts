@@ -10,7 +10,9 @@
 
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import type { ClawdbotPluginApi } from "../../plugins/types.js";
-import type { PipelineContext } from "./types.js";
+import type { CharacterRecognitionConfig, PipelineContext } from "./types.js";
+import { detectChatRoomIntent, handleChatRoomMessage, closeChatRoom, hasActiveSession } from "../chatroom/index.js";
+import { loadConfig } from "../../config/config.js";
 
 const log = createSubsystemLogger("pipeline:register");
 
@@ -48,13 +50,71 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
           log.info("🔵 [Pipeline] ⚠️ Detected original user message in queue, will still perform character detection");
         }
 
-        // 🔧 简单的角色识别逻辑（临时实现，后续用 LLM 替换）
+        // ── 聊天室检测（优先级最高，在单角色检测之前） ──
+        const characterConfigs = getBuiltinCharacterConfigs();
+        const stateKey = ctx.sessionKey ?? ctx.agentId ?? "default";
+        const sessionActive = hasActiveSession(stateKey);
+        const chatRoomResult = detectChatRoomIntent(userMessage, characterConfigs, sessionActive);
+
+        // 退出聊天室
+        if (chatRoomResult.triggerType === "exit" && sessionActive) {
+          const messages: string[] = [];
+          await closeChatRoom(stateKey, async (text) => { messages.push(text); });
+          log.info(`🔵 [Pipeline] 聊天室已关闭: ${stateKey}`);
+          return {
+            chatRoomHandled: { responseText: messages.join("\n\n") },
+          };
+        }
+
+        // 进入/延续聊天室模式
+        if (chatRoomResult.isChatRoomMode) {
+          log.info(
+            `� [Pipeline] 🏠 聊天室模式触发: participants=${chatRoomResult.participants.join(",")}, ` +
+            `triggerType=${chatRoomResult.triggerType}`,
+          );
+          const messages: string[] = [];
+          const collectReply = async (text: string) => { messages.push(text); };
+          let config;
+          try { config = loadConfig(); } catch { /* 静默 */ }
+
+          await handleChatRoomMessage(
+            {
+              userMessage,
+              participants: chatRoomResult.participants,
+              sessionKey: stateKey,
+              sendReply: collectReply,
+              callStrategy: "staggered",
+              interactionMode: chatRoomResult.interactionMode ?? null,
+              agentSessionKey: ctx.sessionKey,
+            },
+            config ?? undefined,
+          );
+
+          log.info(
+            `🔵 [Pipeline] 聊天室响应完成: messages=${messages.length}`,
+          );
+          return {
+            chatRoomHandled: { responseText: messages.join("\n\n") },
+          };
+        }
+
+        // ── 单角色识别（聊天室未触发时回退到此） ──
         let detectedCharacter: string | undefined;
         
         // 检测是否提到栗娜
         if (userMessage.includes("栗娜") || userMessage.includes("琳娜") || userMessage.includes("lina")) {
           detectedCharacter = "lina";
           log.info("🔵 [Pipeline] Detected character: lina (栗娜)");
+        }
+        // 检测是否提到德默泽尔
+        else if (userMessage.includes("德默泽尔") || userMessage.includes("德姨") || userMessage.includes("demerzel") || userMessage.includes("爱姬") || userMessage.includes("机械姬")) {
+          detectedCharacter = "demerzel";
+          log.info("🔵 [Pipeline] Detected character: demerzel (德默泽尔)");
+        }
+        // 检测是否提到德洛丽丝
+        else if (userMessage.includes("德洛丽丝") || userMessage.includes("多莉") || userMessage.includes("dolores") || userMessage.includes("德妹") || userMessage.includes("Dolly")) {
+          detectedCharacter = "dolores";
+          log.info("🔵 [Pipeline] Detected character: dolores (德洛丽丝)");
         }
         // 检测是否提到丽丝
         else if (userMessage.includes("丽丝") || userMessage.includes("lisi")) {
@@ -96,4 +156,54 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
   );
 
   log.info("Pipeline Plugin registered successfully");
+}
+
+// ============================================================================
+// 内置角色识别配置（供聊天室检测器使用）
+// ============================================================================
+
+/** 缓存，避免每次请求重建 */
+let _builtinCharConfigs: CharacterRecognitionConfig[] | null = null;
+
+/**
+ * 获取内置角色识别配置列表
+ *
+ * 与 plugin.ts 中 IntentAnalyzer 的硬编码回退一致，
+ * 确保聊天室检测器能识别所有已知角色。
+ */
+function getBuiltinCharacterConfigs(): CharacterRecognitionConfig[] {
+  if (_builtinCharConfigs) return _builtinCharConfigs;
+  _builtinCharConfigs = [
+    {
+      id: "lina",
+      displayName: "琳娜",
+      isSystemPersona: true,
+      recognition: {
+        names: ["栗娜", "lina", "linna", "莉娜", "琳娜", "管家"],
+        triggers: ["帮我", "安排", "提醒", "记住", "日程", "待办", "任务"],
+        contexts: ["任务", "日程", "待办", "记忆", "提醒"],
+      },
+    },
+    {
+      id: "demerzel",
+      displayName: "德默泽尔",
+      isSystemPersona: false,
+      recognition: {
+        names: ["德默泽尔", "德姨", "demerzel", "爱姬01号", "机械姬"],
+        triggers: ["德默泽尔", "01号"],
+        contexts: ["爱姬", "资产", "克隆", "丝袜", "泌乳", "场景"],
+      },
+    },
+    {
+      id: "dolores",
+      displayName: "德洛丽丝",
+      isSystemPersona: false,
+      recognition: {
+        names: ["德洛丽丝", "dolores", "爱姬02号", "多莉", "Dolly", "德妹", "Lola"],
+        triggers: ["德洛丽丝", "多莉", "02号"],
+        contexts: ["爱姬", "资产", "克隆", "丝袜", "泌乳", "场景", "西部世界", "接待员"],
+      },
+    },
+  ];
+  return _builtinCharConfigs;
 }
