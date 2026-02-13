@@ -158,7 +158,7 @@ const CHAPTER_TITLE_RE = /(?:^\s*#{1,3}\s|^第[一二三四五六七八九十百
 /** 段落分隔正则（连续空行 / 章节标题前的分隔） */
 const PARA_SPLIT_RE = /\n\s*\n/;
 
-// ─── 段落索引缓存 ──────────────────────────────────────────
+// ─── 段落索引缓存（内存 + H6 磁盘持久化）───────────────────────
 
 const indexCache = new Map<string, FileIndex>();
 
@@ -172,9 +172,140 @@ function clearExpiredIndexCache(): void {
   }
 }
 
-/** 手动清空全部索引缓存 */
+/** 手动清空全部索引缓存（内存 + 磁盘） */
 export function clearNovelIndexCache(): void {
   indexCache.clear();
+}
+
+// ─── H6: 磁盘持久化 ──────────────────────────────────────────
+
+/** H6: 持久化段落边界（不含 text/textLower，从文件重建） */
+interface PersistedParagraphBoundary {
+  paraIndex: number;
+  startLine: number;
+  endLine: number;
+  charCount: number;
+  chapterHint?: string;
+  isTitle: boolean;
+}
+
+/** H6: 磁盘索引文件格式 */
+interface PersistedNovelIndex {
+  version: 1;
+  absPath: string;
+  fileName: string;
+  totalChars: number;
+  totalLines: number;
+  mtimeMs: number;
+  size: number;
+  createdAt: number;
+  paragraphs: PersistedParagraphBoundary[];
+}
+
+/**
+ * H6: 简单路径哈希（用于生成缓存文件名）
+ * 产生一个包含文件名 + 路径哈希的唯一标识符
+ */
+function hashForCacheFile(absPath: string): string {
+  const baseName = path.basename(absPath, path.extname(absPath));
+  let hash = 0;
+  for (let i = 0; i < absPath.length; i++) {
+    hash = ((hash << 5) - hash + absPath.charCodeAt(i)) | 0;
+  }
+  const hashStr = Math.abs(hash).toString(36).padStart(6, "0");
+  // 清洗文件名（移除特殊字符）
+  const safeName = baseName.replace(/[^\w\u4e00-\u9fff-]/g, "_").substring(0, 30);
+  return `${safeName}_${hashStr}`;
+}
+
+/**
+ * H6: 从磁盘加载持久化索引
+ * 返回 null 表示磁盘缓存不存在或已过期
+ */
+async function loadPersistedIndex(
+  absPath: string,
+  stat: { mtimeMs: number; size: number },
+  cacheDir: string,
+): Promise<FileIndex | null> {
+  try {
+    const cacheFile = path.join(cacheDir, hashForCacheFile(absPath) + ".json");
+    const raw = await fs.readFile(cacheFile, "utf-8");
+    const persisted: PersistedNovelIndex = JSON.parse(raw);
+
+    // 校验版本 + mtime + size
+    if (persisted.version !== 1) return null;
+    if (persisted.mtimeMs !== stat.mtimeMs || persisted.size !== stat.size) return null;
+    if (persisted.absPath !== absPath) return null;
+
+    // 从文件重建 text/textLower（只读文件，不重新解析）
+    const content = await fs.readFile(absPath, "utf-8");
+    const lines = content.split("\n");
+
+    const paragraphs: ParagraphEntry[] = persisted.paragraphs.map(pb => {
+      const startIdx = Math.max(0, pb.startLine - 1);
+      const endIdx = Math.min(lines.length, pb.endLine);
+      const text = lines.slice(startIdx, endIdx).join("\n").trim();
+      return {
+        paraIndex: pb.paraIndex,
+        startLine: pb.startLine,
+        endLine: pb.endLine,
+        text,
+        charCount: text.length,
+        chapterHint: pb.chapterHint,
+        isTitle: pb.isTitle,
+        textLower: text.toLowerCase(),
+      };
+    });
+
+    return {
+      absPath,
+      fileName: persisted.fileName,
+      paragraphs,
+      totalChars: persisted.totalChars,
+      totalLines: persisted.totalLines,
+      cachedAt: Date.now(),
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * H6: 将段落索引持久化到磁盘（fire-and-forget）
+ */
+async function persistIndex(index: FileIndex, cacheDir: string): Promise<void> {
+  try {
+    await fs.mkdir(cacheDir, { recursive: true });
+    const cacheFile = path.join(cacheDir, hashForCacheFile(index.absPath) + ".json");
+
+    const persisted: PersistedNovelIndex = {
+      version: 1,
+      absPath: index.absPath,
+      fileName: index.fileName,
+      totalChars: index.totalChars,
+      totalLines: index.totalLines,
+      mtimeMs: index.mtimeMs,
+      size: index.size,
+      createdAt: Date.now(),
+      paragraphs: index.paragraphs.map(p => ({
+        paraIndex: p.paraIndex,
+        startLine: p.startLine,
+        endLine: p.endLine,
+        charCount: p.charCount,
+        chapterHint: p.chapterHint,
+        isTitle: p.isTitle,
+      })),
+    };
+
+    // 原子写入（tmp -> rename）
+    const tmpFile = cacheFile + ".tmp";
+    await fs.writeFile(tmpFile, JSON.stringify(persisted), "utf-8");
+    await fs.rename(tmpFile, cacheFile);
+  } catch {
+    // 持久化失败不影响功能
+  }
 }
 
 // ─── 目录文件列表缓存 ──────────────────────────────────────
@@ -375,9 +506,12 @@ function splitLongParagraph(text: string, baseStartLine: number): ParagraphEntry
 // ─── 文件索引构建 ──────────────────────────────────────────
 
 /**
- * 获取或构建文件的段落索引（带缓存）
+ * 获取或构建文件的段落索引（三层缓存：内存 → H6磁盘 → 重建）
+ *
+ * @param absPath - 文件绝对路径
+ * @param cacheDir - H6 磁盘缓存目录（不传则不使用磁盘缓存）
  */
-async function getFileIndex(absPath: string): Promise<FileIndex | null> {
+async function getFileIndex(absPath: string, cacheDir?: string): Promise<FileIndex | null> {
   clearExpiredIndexCache();
 
   const cached = indexCache.get(absPath);
@@ -386,13 +520,22 @@ async function getFileIndex(absPath: string): Promise<FileIndex | null> {
     const stat = await fs.stat(absPath);
     if (!stat.isFile() || stat.size === 0 || stat.size > MAX_FILE_SIZE) return null;
 
-    // 缓存命中：mtime+size 未变
+    // L1: 内存缓存命中（mtime+size 未变）
     if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
       cached.cachedAt = Date.now(); // 刷新 TTL
       return cached;
     }
 
-    // 读取文件（大文件用 utf-8 流式）
+    // L2: H6 磁盘缓存命中（冷启动时避免重新解析）
+    if (cacheDir) {
+      const fromDisk = await loadPersistedIndex(absPath, stat, cacheDir);
+      if (fromDisk) {
+        indexCache.set(absPath, fromDisk);
+        return fromDisk;
+      }
+    }
+
+    // L3: 完整重建（读取文件 + splitIntoParagraphs）
     const content = await fs.readFile(absPath, "utf-8");
     const lines = content.split("\n");
     const paragraphs = splitIntoParagraphs(content);
@@ -409,6 +552,12 @@ async function getFileIndex(absPath: string): Promise<FileIndex | null> {
     };
 
     indexCache.set(absPath, index);
+
+    // H6: fire-and-forget 持久化到磁盘（首次切分只做一次）
+    if (cacheDir) {
+      void persistIndex(index, cacheDir);
+    }
+
     return index;
   } catch {
     return null;
@@ -684,6 +833,9 @@ export async function searchNovelAssets(
     allFiles.push(...files);
   }
 
+  // H6: 磁盘缓存目录（冷启动时避免重新切分百万字大文件）
+  const novelIndexCacheDir = path.join(workspaceDir, ".cache", "novel-index");
+
   // Step 3: 并行构建索引 + 搜索（分批避免同时打开太多文件）
   const BATCH_SIZE = 20;
   let allScored: ScoredParagraph[] = [];
@@ -691,7 +843,7 @@ export async function searchNovelAssets(
 
   for (let i = 0; i < allFiles.length; i += BATCH_SIZE) {
     const batch = allFiles.slice(i, i + BATCH_SIZE);
-    const indexes = await Promise.all(batch.map(f => getFileIndex(f)));
+    const indexes = await Promise.all(batch.map(f => getFileIndex(f, novelIndexCacheDir)));
 
     for (const idx of indexes) {
       if (!idx) continue;

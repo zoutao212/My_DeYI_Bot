@@ -25,6 +25,7 @@ import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "../agent-scope.
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readStringParam, readNumberParam } from "./common.js";
 import { createMemoryPatchTool } from "./memory-patch-tool.js";
+import { detectSimilarMemories } from "../../memory/memory-lifecycle.js";
 
 // ─── Schema 定义 ──────────────────────────────────────────────
 
@@ -145,6 +146,21 @@ export function createMemoryWriteTool(options: MemoryCrudToolOptions): AnyAgentT
             : content + (content.endsWith("\n") ? "" : "\n") + existing;
         }
 
+        // H5: 写入前冲突检测 — 检查是否有语义相似的已有记忆
+        let conflictWarnings: Array<{ path: string; score: number; snippet: string }> | undefined;
+        if (mode === "overwrite" && content.length >= 30) {
+          try {
+            const conflicts = await detectSimilarMemories(content, workspaceDir, absPath);
+            if (conflicts.length > 0) {
+              conflictWarnings = conflicts.map(c => ({
+                path: c.path,
+                score: c.score,
+                snippet: c.snippet,
+              }));
+            }
+          } catch { /* 冲突检测失败不阻塞写入 */ }
+        }
+
         await fs.writeFile(absPath, finalContent, "utf-8");
 
         // 刷新所有缓存
@@ -155,14 +171,22 @@ export function createMemoryWriteTool(options: MemoryCrudToolOptions): AnyAgentT
         void triggerImmediateIndex(cfg, agentId, absPath);
 
         const stat = await fs.stat(absPath);
-        return jsonResult({
+        const result: Record<string, unknown> = {
           success: true,
           path: filePath,
           absPath,
           mode,
           size: stat.size,
           lines: finalContent.split("\n").length,
-        });
+        };
+        // H5: 如果发现潜在冲突，附带警告提醒 LLM 考虑更新而非新增
+        if (conflictWarnings && conflictWarnings.length > 0) {
+          result.conflictWarning = {
+            message: `发现 ${conflictWarnings.length} 个语义相似的已有记忆，建议检查是否需要更新而非新建文件`,
+            similar: conflictWarnings,
+          };
+        }
+        return jsonResult(result);
       } catch (err) {
         return jsonResult({
           success: false,
