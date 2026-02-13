@@ -31,6 +31,7 @@ import {
   type VerboseLevel,
 } from "../thinking.js";
 import { SILENT_REPLY_TOKEN } from "../tokens.js";
+import { analyzeIntentComplexity, buildComplexityGuidance } from "../../agents/intelligent-task-decomposition/intent-complexity-analyzer.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { runReplyAgent } from "./agent-runner.js";
 import { applySessionHints } from "./body.js";
@@ -180,6 +181,24 @@ export async function runPreparedReply(
     : "";
   const groupSystemPrompt = sessionCtx.GroupSystemPrompt?.trim() ?? "";
 
+  // P102: 上游意图复杂度预判 — 每条用户消息先做轻量 LLM 分析
+  // 对"短 prompt + 高隐含复杂度"的请求，注入 extraSystemPrompt 引导 LLM 使用 enqueue_task
+  const _p102Body = (ctx.CommandBody ?? ctx.RawBody ?? ctx.Body ?? "").trim();
+  let complexityGuidance = "";
+  try {
+    const _p102Result = await analyzeIntentComplexity(_p102Body, cfg, provider, model);
+    complexityGuidance = buildComplexityGuidance(_p102Result);
+    if (complexityGuidance) {
+      console.log(
+        `[get-reply-run] P102: 复杂度预判注入 (complexity=${_p102Result.complexity}, ` +
+        `strategy=${_p102Result.strategy}, guidance长度=${complexityGuidance.length})`,
+      );
+    }
+  } catch (err) {
+    // 静默降级，不阻塞主流程
+    console.warn(`[get-reply-run] P102: 预判异常，跳过: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   // P89: 检测用户消息中的"记忆写入"意图，注入记忆目录路径引导
   // 升级版：优先推荐专用 CRUD 工具（memory_write/memory_update/memory_list）
   const _p89Body = (ctx.CommandBody ?? ctx.RawBody ?? ctx.Body ?? "").toLowerCase();
@@ -212,7 +231,7 @@ export async function runPreparedReply(
     ].join("\n");
   }
 
-  const extraSystemPrompt = [groupIntro, groupSystemPrompt, memoryWriteHint].filter(Boolean).join("\n\n");
+  const extraSystemPrompt = [groupIntro, groupSystemPrompt, memoryWriteHint, complexityGuidance].filter(Boolean).join("\n\n");
   const baseBody = sessionCtx.BodyStripped ?? sessionCtx.Body ?? "";
   // Use CommandBody/RawBody for bare reset detection (clean message without structural context).
   const rawBodyTrimmed = (ctx.CommandBody ?? ctx.RawBody ?? ctx.Body ?? "").trim();

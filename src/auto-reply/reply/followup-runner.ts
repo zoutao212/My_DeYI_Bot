@@ -56,6 +56,46 @@ interface OutputValidationResult {
   suggestedAction?: "retry" | "skip" | "fail";
 }
 
+/**
+ * 🔧 P103: 检测 outputText 是否实际上是 API 错误消息
+ *
+ * 根因：PI library 将 429/503 等 API 错误格式化为中文文本
+ * "⚠️ API 返回了错误响应..." 放入 content[0].text。
+ * buildEmbeddedRunPayloads 的 shouldSuppressRawErrorText 只对比英文格式的
+ * formatAssistantErrorText 输出和 rawErrorMessage JSON，无法匹配中文格式，
+ * 导致错误消息流入 contentPayloads（未标记 isError），绕过 P100 守卫。
+ *
+ * 检测条件：文本较短（<1500 字符）且匹配 API 错误模式。
+ * 真正的 LLM 写作产出通常远超 1500 字符，不会误触发。
+ */
+const _P103_API_ERROR_PATTERNS: RegExp[] = [
+  /api\s*返回了?\s*错误/i,
+  /too many requests/i,
+  /rate[_ ]?limit/i,
+  /["']?code["']?\s*:\s*429/,
+  /["']?status["']?\s*:\s*["']?too many requests/i,
+  /model[_ ]?not[_ ]?found/i,
+  /上游负载[已已]饱和/,
+  /请稍后再试/,
+  /service unavailable/i,
+  /["']?code["']?\s*:\s*503/,
+  /overloaded/i,
+  /upstream.*saturated/i,
+];
+
+function _isOutputApiError(text: string): boolean {
+  if (!text || text.length > 1500) return false;
+  // 至少匹配 2 个模式才确认（降低误判风险）
+  let matchCount = 0;
+  for (const pattern of _P103_API_ERROR_PATTERNS) {
+    if (pattern.test(text)) {
+      matchCount++;
+      if (matchCount >= 2) return true;
+    }
+  }
+  return false;
+}
+
 function validateSubTaskOutput(
   outputText: string,
   toolMetas: Array<{ toolName: string; [k: string]: unknown }>,
@@ -1167,9 +1207,64 @@ export function createFollowupRunner(params: {
           // 作为 isError:true 的 payload 传入。旧代码不区分正常输出和错误输出，
           // 导致 "Incomplete JSON segment at the end" 等错误消息被存为 subTask.output，
           // 进而触发字数不达标 → decomposeFailedTask → 生成无意义续写任务。
-          const contentPayloads = payloadArray.filter((p) => !p.isError);
-          const errorPayloads = payloadArray.filter((p) => p.isError);
-          const outputText = contentPayloads.map((p) => p.text).filter(Boolean).join("\n");
+          let contentPayloads = payloadArray.filter((p) => !p.isError);
+          let errorPayloads = payloadArray.filter((p) => p.isError);
+
+          // 🔧 P110 修复：检测 contentPayloads 中的伪内容（API 错误格式化文本泄漏）
+          // 根因：API adapter 在 assistant.content[0].text 中放入格式化错误文本
+          // （如 "⚠️ API 返回了错误响应..."），但 formatAssistantErrorText 从 errorMessage
+          // 解析生成不同格式（如 "HTTP 429 ..."）。shouldSuppressRawErrorText 比较两者不匹配，
+          // 导致错误文本作为非 isError payload 通过。P100 检查 !outputText 失败。
+          {
+            const _p110IsApiErrorText = (text: string): boolean => {
+              const t = text.trim();
+              if (!t) return false;
+              // 中文格式化错误消息（API adapter 生成）
+              if (/^⚠️\s*API\s*返回了错误/.test(t)) return true;
+              // 英文格式化错误消息
+              if (/^⚠️\s*(?:The )?AI service returned an error/i.test(t)) return true;
+              // 包含错误 JSON payload 的文本
+              if (/错误信息[：:]\s*\{/.test(t) && /"(?:code|status)"/.test(t)) return true;
+              // HTTP 状态码错误（buildEmbeddedRunPayloads 格式）
+              if (/^HTTP\s+[45]\d{2}\b/i.test(t)) return true;
+              // 纯 JSON API 错误 payload
+              if (/^\{.*"error".*"(?:code|status|message)".*\}$/s.test(t)) return true;
+              // 常见 429/5xx 模式
+              if (/(?:Too Many Requests|rate.?limit|负载已饱和|upstream.*overloaded)/i.test(t) && t.length < 500) return true;
+              return false;
+            };
+            const realContent = contentPayloads.filter(p => !_p110IsApiErrorText(p.text ?? ""));
+            const pseudoErrors = contentPayloads.filter(p => _p110IsApiErrorText(p.text ?? ""));
+            if (realContent.length === 0 && pseudoErrors.length > 0) {
+              console.warn(
+                `[followup-runner] ⚠️ P110: ${pseudoErrors.length} 个 contentPayload 为 API 错误伪内容，重新归类为 errorPayloads`,
+              );
+              contentPayloads = realContent;
+              errorPayloads = [...errorPayloads, ...pseudoErrors];
+            }
+          }
+
+          // 🔧 P111 修复：过滤 [Historical context: ...] 幻觉文本
+          // 根因：LLM 成功执行工具后偶发输出幻觉工具调用文本（Gemini function calling 偶发失败），
+          // P88 Spot Recovery 尝试恢复但可能失败，幻觉文本仍留在 assistantTexts 中被存为 output。
+          // 修复：从内容中剥离 [Historical context: ...] 块，只保留真正的内容。
+          const _p111StripHistoricalContext = (text: string): string => {
+            return text.replace(
+              /\[Historical context:.*?Do not mimic this format[^\]]*\]/gs,
+              "",
+            ).trim();
+          };
+
+          const outputText = (() => {
+            const raw = contentPayloads.map((p) => p.text).filter(Boolean).join("\n");
+            const stripped = _p111StripHistoricalContext(raw);
+            if (stripped !== raw && stripped.length < raw.length * 0.5) {
+              console.warn(
+                `[followup-runner] ⚠️ P111: 输出中含 [Historical context:] 幻觉文本，已剥离 (${raw.length} → ${stripped.length} chars)`,
+              );
+            }
+            return stripped;
+          })();
 
           // P100: 如果正常内容为空但有错误 payload → API 临时故障，直接重试
           if (!outputText && errorPayloads.length > 0) {
@@ -1200,6 +1295,46 @@ export function createFollowupRunner(params: {
             // 重试次数耗尽，标记失败
             subTask.status = "failed";
             subTask.error = `API 错误（重试耗尽）: ${errorSummary}`;
+            await orchestrator.saveTaskTree(taskTree);
+            if (queued.run.sessionKey) {
+              finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
+            }
+            return;
+          }
+
+          // 🔧 P103: 防御性 API 错误检测 — 检测 outputText 本身是否实际是 API 错误消息
+          // 根因：PI library 将 429 错误格式化为中文 "⚠️ API 返回了错误响应..." 放入 content[0].text，
+          // buildEmbeddedRunPayloads 的 shouldSuppressRawErrorText 无法匹配该中文格式（它只对比
+          // formatAssistantErrorText 的英文输出和 rawErrorMessage 的 JSON），导致错误文本流入
+          // contentPayloads（未标记 isError），outputText 非空，P100 守卫被绕过。
+          // 修复：对 outputText 做二次 API 错误模式检测，命中时走 P100 相同的重试/失败路径。
+          if (outputText && _isOutputApiError(outputText)) {
+            const errorSummary = outputText.substring(0, 200);
+            console.warn(
+              `[followup-runner] ⚠️ P103: output 实际为 API 错误消息: ${errorSummary}`,
+            );
+            subTask.retryCount = (subTask.retryCount ?? 0) + 1;
+            const willRetryP103 = subTask.retryCount < 3;
+            if (willRetryP103) {
+              subTask.status = "pending";
+              subTask.error = `API 错误（P103 检测）: ${errorSummary}`;
+              await orchestrator.saveTaskTree(taskTree);
+              console.log(
+                `[followup-runner] 🔄 P103: API 错误自动重试 (${subTask.retryCount}/3)`,
+              );
+              if (queued.run.sessionKey) {
+                const retryFollowupRun = buildFollowupRun(queued, subTask);
+                const resolvedQueue = resolveQueueSettings({
+                  cfg: queued.run.config ?? ({} as any),
+                  inlineMode: "followup",
+                });
+                enqueueFollowupRun(queued.run.sessionKey, retryFollowupRun, resolvedQueue, "none");
+                finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
+              }
+              return;
+            }
+            subTask.status = "failed";
+            subTask.error = `API 错误（P103 重试耗尽）: ${errorSummary}`;
             await orchestrator.saveTaskTree(taskTree);
             if (queued.run.sessionKey) {
               finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
@@ -1311,7 +1446,27 @@ export function createFollowupRunner(params: {
             return;
           }
 
-          subTask.output = outputText;
+          // 🔧 P106: Spot Recovery 后清理 output 中的幻觉文本
+          // 根因：P88 成功执行了幻觉工具调用（文件已写入），但原始幻觉文本
+          // "[Historical context: a different model called tool ...]" 仍留在
+          // assistantTexts 中（session 历史不可变），被存入 output 字段。
+          // 这污染了后续合并管线（mergeTaskOutputs 读 output 字段）和质检。
+          // 修复：当 spotRecoveryExecuted 时，剥离 [Historical context: ...] 模式行。
+          let cleanedOutputText = outputText;
+          if (runResult.spotRecoveryExecuted && outputText) {
+            const beforeLen = outputText.length;
+            cleanedOutputText = outputText
+              .split("\n")
+              .filter(line => !/^\[Historical context:.*(?:called tool|Do not mimic)/i.test(line.trim()))
+              .join("\n")
+              .trim();
+            if (cleanedOutputText.length < beforeLen) {
+              console.log(
+                `[followup-runner] 🔧 P106: 清理 Spot Recovery 幻觉文本 (${beforeLen} → ${cleanedOutputText.length} chars)`,
+              );
+            }
+          }
+          subTask.output = cleanedOutputText;
           subTask.completedAt = Date.now();
 
           // 🔧 P61c 时序修复：先收集文件追踪结果，再更新状态

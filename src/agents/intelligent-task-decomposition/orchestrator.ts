@@ -2951,11 +2951,13 @@ export class Orchestrator {
       segFilePrefix = chNumMatch[1].replace(/[\_\-]+$/, ""); // 书名部分，去尾部分隔符
       chapterNumStr = chNumMatch[2]; // 章号字符串，可能是 "01" 或 "05-06"
     }
-    // 🔧 P110: 清除 segFilePrefix 尾部的孤立括号（中英文）
-    // 根因：chapterBase 如 "孙丽莎侍奉剧情（第2部分）" 经正则提取后，
+    // 🔧 P110+P115: 清除 segFilePrefix 尾部的孤立括号（中英文）
+    // P110 根因：chapterBase 如 "孙丽莎侍奉剧情（第2部分）" 经正则提取后，
     // segFilePrefix = "孙丽莎侍奉剧情（"（非贪婪匹配捕获到左括号），
     // 产生畸形分段文件名如 "孙丽莎侍奉剧情（_第2章_第1节.txt"
-    segFilePrefix = segFilePrefix.replace(/[\(\)（）\[\]【】]+$/, "");
+    // P115 修复：原正则 /[\(\)（）]+$/ 过于激进，会把 "构建（Part 1）" 的右括号也清掉，
+    // 导致 "构建（Part 1" 左括号孤立。改为只清除尾部孤立的**未配对左括号**。
+    segFilePrefix = segFilePrefix.replace(/[（(\[【]+$/, ""); // 尾部孤立的左括号 → 清除（P110 场景）
 
     // 🔧 P43: 根据任务类型决定分段是否可并行
     // 刻板问题：所有分段都强制串行（seg-2 依赖 seg-1），但翻译/分析类任务的各段是独立的

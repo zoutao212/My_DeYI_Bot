@@ -495,7 +495,17 @@ export function parseSpotToolCallsFromText(text: string): TextToolCall[] {
     }
   }
 
-  if (results.length > 0) return results.slice(0, MAX_CALLS_PER_ITERATION);
+  // P114: 去重 — 相同工具+相同参数只保留第一个（LLM 常重复输出相同的 Historical context 块）
+  if (results.length > 0) {
+    const seen = new Set<string>();
+    const deduped = results.filter((r) => {
+      const key = `${r.tool}::${JSON.stringify(r.args)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    return deduped.slice(0, MAX_CALLS_PER_ITERATION);
+  }
 
   // 策略3: 裸 JSON {"tool": "xxx", "args": {...}} 嵌入在文本中（无代码块）
   const bareJsonPattern = /\{\s*["']tool["']\s*:\s*["'](\w+)["']\s*,\s*["']args["']\s*:\s*(\{[\s\S]*?\})\s*\}/g;
@@ -558,7 +568,9 @@ export async function executeTextToolCalls(
       console.log(
         `[text-tool-fallback] 🔧 执行工具: ${call.tool}(${JSON.stringify(call.args).slice(0, 300)})`,
       );
-      const result = await (tool as any).execute(call.args);
+      // P113: 工具 execute 签名是 (toolCallId, params)，必须传入合成 toolCallId
+      const syntheticToolCallId = `ttf-${call.tool}-${Date.now()}`;
+      const result = await (tool as any).execute(syntheticToolCallId, call.args);
       const resultStr =
         typeof result === "string"
           ? result

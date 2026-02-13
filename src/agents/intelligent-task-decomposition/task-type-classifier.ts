@@ -88,7 +88,10 @@ const TASK_TYPE_RULES: TaskTypeRule[] = [
     weight: 85,
     keywords: [
       "代码", "编程", "实现", "开发", "修复", "bug", "特性",
-      "函数", "类", "接口", "API", "模块", "组件", "测试", "单元测试",
+      // 🔧 P104: 移除单字 "类"（"分类" 中的 "类" 误匹配 coding）
+      // 根因："材质分类审计" 中的 "类" 匹配 coding 关键词 "类"(class)，
+      // 但 "分类" 是 classification 不是 class。保留英文 "class" 和结构模式。
+      "函数", "接口", "API", "模块", "组件", "测试", "单元测试",
       "code", "program", "implement", "develop", "fix", "refactor",
       "function", "class", "interface", "module", "component", "test",
       "feature", "debug", "compile", "build", "deploy",
@@ -318,7 +321,9 @@ const FILE_OPERATION_INTENT_PATTERNS_CLOSE: RegExp[] = [
  *
  * 修复：拆分为“操作动词”和“目标概念”两层独立检测，两者同时出现在全文中即视为文件操作意图。
  */
-const FILE_OP_VERBS = /(?:整理|读取|写入|迁移|同步|归档|备份|复制|移动|提取|处理|分析|创建|构建|更新|保存|存放|沉淀)/;
+// 🔧 P104: 移除 "构建" — "构建美学架构" 不是文件操作
+// 近距离模式 FILE_OPERATION_INTENT_PATTERNS_CLOSE 已覆盖 "构建索引/目录/记忆"
+const FILE_OP_VERBS = /(?:整理|读取|写入|迁移|同步|归档|备份|复制|移动|提取|处理|分析|创建|更新|保存|存放|沉淀)/;
 const FILE_OP_TARGETS = /(?:目录|文件夹|路径|memory|记忆|记忆库|workspace|产出|输出|文件|索引|characters|clawd|chunk_\d+)/i;
 /** 路径强信号：prompt 包含绝对路径或明确的目录引用 */
 const FILE_PATH_SIGNAL = /(?:[A-Z]:\\|~\/|\/home\/|\\users\\|characters\\|memory\\|workspace[\\/])/i;
@@ -397,7 +402,10 @@ export function classifyTaskType(prompt: string): TaskTypeClassification {
       // 🔧 P101: 加大惩罚力度（从 20 → 40）
       // 原因：当 prompt 包含大量 writing 内容名词（如“续写/剧情/角色/感官资产”）时，
       // writing 得分可能达 60+，20 分惩罚不足以压低。
-      intentPenalty = 40;
+      // 🔧 P104: 当 writing 有结构信号匹配（字数要求/章节号等强信号）时，减半惩罚。
+      // 根因："构建报告，约 2000 字" 同时命中文件操作意图（路径+动词）和写作结构信号，
+      // 40 分惩罚把 writing 从 98 压到 58，被 coding 88 反超（"分类" 中 "类" 误匹配）。
+      intentPenalty = structuralMatches > 0 ? 20 : 40;
     }
 
     // 综合得分 = 基础权重 + 关键词命中数加成 + 结构信号加成 - 意图惩罚
