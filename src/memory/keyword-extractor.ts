@@ -8,6 +8,8 @@
  * @module memory/keyword-extractor
  */
 
+import { isMeaninglessNgram as isLowValueNgram } from "./shared-scorer.js";
+
 // ─── 类型定义 ───────────────────────────────────────────────
 
 export interface ExtractedKeyword {
@@ -80,6 +82,8 @@ const CJK_RE = /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/;
 const CJK_SEGMENT_RE = /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]+/g;
 const ALPHA_WORD_RE = /[A-Za-z][A-Za-z0-9_-]{1,}/g;
 const NUMBER_RE = /^\d+$/;
+
+// W11: 停用字集合和 isLowValueNgram 已移至 shared-scorer.ts（导入为 isMeaninglessNgram -> isLowValueNgram）
 
 interface RawToken {
   text: string;
@@ -245,17 +249,17 @@ export function extractKeywords(text: string, options: ExtractionOptions = {}): 
         addTerm(seg, "cjk", token.lineIndex, token.isTitle);
       }
 
-      // 生成 bigram / trigram
+      // 生成 bigram / trigram（W4: 过滤首尾为停用字的无意义碎片）
       if (enableNgrams && seg.length > 2) {
         for (let i = 0; i <= seg.length - 2; i++) {
           const bigram = seg.substring(i, i + 2);
-          if (!stopwords.has(bigram)) {
+          if (!stopwords.has(bigram) && !isLowValueNgram(bigram)) {
             addTerm(bigram, "bigram", token.lineIndex, token.isTitle);
           }
         }
         for (let i = 0; i <= seg.length - 3; i++) {
           const trigram = seg.substring(i, i + 3);
-          if (!stopwords.has(trigram)) {
+          if (!stopwords.has(trigram) && !isLowValueNgram(trigram)) {
             addTerm(trigram, "trigram", token.lineIndex, token.isTitle);
           }
         }

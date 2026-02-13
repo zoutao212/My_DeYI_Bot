@@ -44,6 +44,7 @@ import type { Orchestrator } from "../../agents/intelligent-task-decomposition/o
 import { TaskProgressReporter, getTaskProgressFromTree, formatDetailedProgress } from "../../agents/intelligent-task-decomposition/task-progress-reporter.js";
 import { estimateTokens, allocateBudget, truncateToTokenBudget, type BudgetRequest } from "../../agents/intelligent-task-decomposition/context-budget-manager.js";
 import { localGrepSearch, getDefaultMemoryDirs } from "../../memory/local-search.js";
+import { searchNovelAssets, hasNovelAssets, formatNovelSnippetsForPrompt } from "../../memory/novel-assets-searcher.js";
 
 // ── P10: 输出验证门（OutputValidator）──
 // 规则驱动，零 LLM 调用。在标记 completed 之前拦截明显无效输出。
@@ -52,27 +53,37 @@ interface OutputValidationResult {
   valid: boolean;
   failureCode?: OutputFailureCode;
   failureReason?: string;
-  suggestedAction?: "retry" | "skip";
+  suggestedAction?: "retry" | "skip" | "fail";
 }
 
 function validateSubTaskOutput(
   outputText: string,
   toolMetas: Array<{ toolName: string; [k: string]: unknown }>,
-  context?: { isRootTask?: boolean },
+  context?: { isRootTask?: boolean; spotRecoveryExecuted?: boolean },
 ): OutputValidationResult {
   // 规则 1：检测 LLM 把 tool call 幻觉为纯文本
-  const hallucinationPatterns = [
-    /\[Historical context:.*called tool/i,
-    /Do not mimic this format.*use proper function calling/i,
-    /a different model called tool/i,
-  ];
-  if (hallucinationPatterns.some((p) => p.test(outputText))) {
-    return {
-      valid: false,
-      failureCode: "hallucinated_tool_calls",
-      failureReason: "LLM 将 tool call 幻觉为纯文本输出，非真实工具调用",
-      suggestedAction: "retry",
-    };
+  // 🔧 P98 修复：当 P88 Spot Recovery 已成功执行时，跳过此检测。
+  // 根因：P88 在 attempt.ts 中检测到幻觉工具调用并执行了它们，但原始幻觉文本
+  // 仍留在 assistantTexts 中（session 历史不可变）。如果不跳过，OutputValidator
+  // 会看到幻觉模式并拒绝整个输出，导致 P88 的修复无效。
+  if (!context?.spotRecoveryExecuted) {
+    const hallucinationPatterns = [
+      /\[Historical context:.*called tool/i,
+      /Do not mimic this format.*use proper function calling/i,
+      /a different model called tool/i,
+    ];
+    if (hallucinationPatterns.some((p) => p.test(outputText))) {
+      return {
+        valid: false,
+        failureCode: "hallucinated_tool_calls",
+        failureReason: "LLM 将 tool call 幻觉为纯文本输出，非真实工具调用",
+        suggestedAction: "retry",
+      };
+    }
+  } else {
+    console.log(
+      `[OutputValidator] ℹ️ P98: spotRecoveryExecuted=true，跳过幻觉检测（P88 已处理）`,
+    );
   }
 
   // 规则 1.5：检测 LLM 委派行为（调用 sessions_spawn/enqueue_task 而非直接执行）
@@ -189,7 +200,10 @@ function validateSubTaskOutput(
         valid: false,
         failureCode: "api_content_block",
         failureReason: `检测到 API 内容审查/错误: "${outputText.substring(0, 120)}"`,
-        suggestedAction: "retry",
+        // 🔧 P106: PROHIBITED_CONTENT/SAFETY 是永久性内容策略拒绝，同一 prompt 重试必然相同结果。
+        // 修复前：suggestedAction="retry" → 浪费 3 次 API 调用才失败。
+        // 修复后：直接 fail，不浪费 API 配额。
+        suggestedAction: "fail",
       };
     }
     // 有 write 工具调用 → LLM 在报错前已写入文件，降级放行但记录警告
@@ -696,6 +710,41 @@ export function createFollowupRunner(params: {
           }
         }
 
+        // 🆕 NovelsAssets: 写作/角色扮演子任务自动注入小说素材参考片段
+        // 从 NovelsAssets/ 目录检索与当前任务相关的原文片段（风格参考、情节参考）
+        // 仅对 writing/design 类型子任务启用，零远程 API 调用
+        let novelReferenceCtx = "";
+        if (isSubTaskForMemory && queued.run.workspaceDir) {
+          const novelTaskTypes = ["writing", "design"];
+          const taskType = subTask?.taskType ?? "generic";
+          if (novelTaskTypes.includes(taskType)) {
+            try {
+              const novelAvailable = await hasNovelAssets(queued.run.workspaceDir);
+              if (novelAvailable) {
+                const searchQuery = subTask?.summary || queued.prompt.substring(0, 300);
+                const novelResult = await searchNovelAssets(searchQuery, queued.run.workspaceDir, {
+                  maxSnippets: 4,
+                  snippetTargetChars: 400,
+                  snippetMaxChars: 600,
+                  maxSnippetsPerFile: 2,
+                  minScore: 0.15,
+                  autoExtractKeywords: true,
+                });
+                if (novelResult.snippets.length > 0) {
+                  const MAX_NOVEL_REF_CHARS = 3000;
+                  const formatted = formatNovelSnippetsForPrompt(novelResult, MAX_NOVEL_REF_CHARS);
+                  if (formatted) {
+                    novelReferenceCtx = `\n\n[📖 原文参考片段]\n以下是从小说素材库中检索到的与当前创作任务相关的原文片段，请参考其写作风格、描写手法和叙事节奏：\n${formatted}`;
+                    console.log(`[followup-runner] 📖 NovelsAssets 参考注入: ${novelResult.snippets.length} snippets, ${novelReferenceCtx.length} chars, ${novelResult.durationMs}ms (taskType=${taskType})`);
+                  }
+                }
+              }
+            } catch {
+              // 素材检索失败不阻塞任务执行
+            }
+          }
+        }
+
         const fallbackResult = await runWithModelFallback({
           cfg: queued.run.config,
           provider: queued.run.provider,
@@ -739,6 +788,24 @@ export function createFollowupRunner(params: {
                 // 写作/通用类：基础工具即可
                 subTaskToolAllowlist = ["write", "read", "edit", "exec", "process"];
               }
+              // 🔧 P102: prompt 驱动的 memory 工具动态注入
+              // 根因：子任务 prompt 明确要求使用 memory_search/write/update/delete 等工具，
+              // 但白名单中没有它们 → LLM 被迫用 exec 替代 → 路径不存在 → 退化为幻觉文本
+              const MEMORY_TOOL_NAMES = [
+                "memory_search", "memory_get", "memory_write", "memory_update",
+                "memory_delete", "memory_list", "memory_deep_search",
+              ];
+              const promptLower = (subTask?.prompt ?? queued.prompt ?? "").toLowerCase();
+              const needsMemoryTools = MEMORY_TOOL_NAMES.some((t) => promptLower.includes(t)) ||
+                /(?:记忆|memory)\s*(?:检索|搜索|查询|写入|更新|删除|列表|工具)/.test(promptLower) ||
+                /(?:使用|调用|用)\s*(?:记忆|memory)/.test(promptLower);
+              if (needsMemoryTools) {
+                for (const mt of MEMORY_TOOL_NAMES) {
+                  if (!subTaskToolAllowlist.includes(mt)) {
+                    subTaskToolAllowlist.push(mt);
+                  }
+                }
+              }
             }
             return runEmbeddedPiAgent({
               sessionId: queued.run.sessionId,
@@ -772,7 +839,11 @@ export function createFollowupRunner(params: {
                   if (subTask?.metadata?.previousOutput || subTask?.metadata?.lastFailureFindings) {
                     const parts: string[] = ["\n\n[⚠️ 迭代优化指令] 这是重试执行。请基于上次的结果进行改进，不要从零开始。"];
                     if (subTask.metadata.lastFailureFindings && subTask.metadata.lastFailureFindings.length > 0) {
-                      parts.push(`上次被打回的原因：${subTask.metadata.lastFailureFindings.join("；")}`);
+                      // 🔧 P108: 防御性类型检查 — lastFailureFindings 可能是字符串（LLM 质检返回不一致）
+                      const findings = Array.isArray(subTask.metadata.lastFailureFindings)
+                        ? subTask.metadata.lastFailureFindings
+                        : [String(subTask.metadata.lastFailureFindings)];
+                      parts.push(`上次被打回的原因：${findings.join("；")}`);
                       parts.push("请针对以上问题重点改进。");
                     }
                     if (subTask.metadata.previousOutput) {
@@ -1037,7 +1108,7 @@ export function createFollowupRunner(params: {
                   }
                 }
 
-                const combined = [base, siblingCtx, parentGoalCtx, subTaskMemoryCtx, persistInstruction, blueprintCtx, chapterOutlineCtx, experienceHint ? `\n\n${experienceHint}` : ""].filter(Boolean).join("");
+                const combined = [base, siblingCtx, parentGoalCtx, subTaskMemoryCtx, novelReferenceCtx, persistInstruction, blueprintCtx, chapterOutlineCtx, experienceHint ? `\n\n${experienceHint}` : ""].filter(Boolean).join("");
                 return combined || undefined;
               })(),
               ownerNumbers: queued.run.ownerNumbers,
@@ -1091,11 +1162,58 @@ export function createFollowupRunner(params: {
           }
 
           const payloadArray = runResult.payloads ?? [];
-          const outputText = payloadArray.map((p) => p.text).filter(Boolean).join("\n");
+          // 🔧 P100 修复：排除 isError:true 的 payload（API 错误消息不应作为任务产出）
+          // 根因：LLM 返回 stopReason="error" 时，errorMessage 通过 buildEmbeddedRunPayloads
+          // 作为 isError:true 的 payload 传入。旧代码不区分正常输出和错误输出，
+          // 导致 "Incomplete JSON segment at the end" 等错误消息被存为 subTask.output，
+          // 进而触发字数不达标 → decomposeFailedTask → 生成无意义续写任务。
+          const contentPayloads = payloadArray.filter((p) => !p.isError);
+          const errorPayloads = payloadArray.filter((p) => p.isError);
+          const outputText = contentPayloads.map((p) => p.text).filter(Boolean).join("\n");
+
+          // P100: 如果正常内容为空但有错误 payload → API 临时故障，直接重试
+          if (!outputText && errorPayloads.length > 0) {
+            const errorSummary = errorPayloads.map((p) => p.text).filter(Boolean).join("; ").substring(0, 200);
+            console.warn(
+              `[followup-runner] ⚠️ P100: 无正常输出但有 API 错误: ${errorSummary}`,
+            );
+            subTask.retryCount = (subTask.retryCount ?? 0) + 1;
+            const willRetryApiError = subTask.retryCount < 3;
+            if (willRetryApiError) {
+              subTask.status = "pending";
+              subTask.error = `API 错误（无正常输出）: ${errorSummary}`;
+              await orchestrator.saveTaskTree(taskTree);
+              console.log(
+                `[followup-runner] 🔄 P100: API 错误自动重试 (${subTask.retryCount}/3)`,
+              );
+              if (queued.run.sessionKey) {
+                const retryFollowupRun = buildFollowupRun(queued, subTask);
+                const resolvedQueue = resolveQueueSettings({
+                  cfg: queued.run.config ?? ({} as any),
+                  inlineMode: "followup",
+                });
+                enqueueFollowupRun(queued.run.sessionKey, retryFollowupRun, resolvedQueue, "none");
+                finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
+              }
+              return;
+            }
+            // 重试次数耗尽，标记失败
+            subTask.status = "failed";
+            subTask.error = `API 错误（重试耗尽）: ${errorSummary}`;
+            await orchestrator.saveTaskTree(taskTree);
+            if (queued.run.sessionKey) {
+              finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
+            }
+            return;
+          }
 
           // 🆕 P10: 输出验证门 — 在标记 completed 之前拦截明显无效输出
           const isRootTaskExecution = Boolean(queued.isRootTask || queued.isNewRootTask);
-          const validation = validateSubTaskOutput(outputText, runResult.toolMetas ?? [], { isRootTask: isRootTaskExecution });
+          const validation = validateSubTaskOutput(outputText, runResult.toolMetas ?? [], {
+            isRootTask: isRootTaskExecution,
+            // 🔧 P98: P88 Spot Recovery 已处理幻觉工具调用时，跳过 OutputValidator 幻觉检测
+            spotRecoveryExecuted: runResult.spotRecoveryExecuted,
+          });
           if (!validation.valid) {
             console.warn(
               `[followup-runner] ⚠️ OutputValidator 拦截: ${validation.failureCode} — ${validation.failureReason}`,
@@ -1171,6 +1289,22 @@ export function createFollowupRunner(params: {
             subTask.status = "failed";
             subTask.error = `OutputValidator: ${validation.failureReason}`;
             await orchestrator.saveTaskTree(taskTree);
+
+            // 🔧 P105: OutputValidator 最终失败后检查轮次完成
+            // 根因：OutputValidator return 跳过 postProcessSubTaskCompletion，
+            // 当轮次中所有子任务都通过此路径失败时（如 PROHIBITED_CONTENT），
+            // 没有任何代码检查 isRoundCompleted → 轮次永远 stuck "active"。
+            const ovFailRoundId = subTask.rootTaskId ?? queued.rootTaskId;
+            if (ovFailRoundId && orchestrator.isRoundCompleted(taskTree, ovFailRoundId)) {
+              const ovRound = taskTree.rounds?.find((r: any) => r.id === ovFailRoundId);
+              if (ovRound && ovRound.status !== "completed" && ovRound.status !== "failed") {
+                await orchestrator.markRoundCompleted(taskTree, ovFailRoundId);
+                console.log(
+                  `[followup-runner] 🔧 P105: OutputValidator 失败后触发 round ${ovFailRoundId} 完成`,
+                );
+              }
+            }
+
             if (queued.run.sessionKey) {
               finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
             }

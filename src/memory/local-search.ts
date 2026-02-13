@@ -10,6 +10,7 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { extractSearchTerms } from "./keyword-extractor.js";
+import { isMeaninglessNgram, scoreText, computeDocumentFrequency, computeIdfWeight } from "./shared-scorer.js";
 
 // ─── 类型定义 ───────────────────────────────────────────────
 
@@ -146,10 +147,19 @@ export async function readFileWithCache(absPath: string, maxSize: number): Promi
 
 // ─── 分词 ─────────────────────────────────────────────────
 
+// W11: 停用字集合已移至 shared-scorer.ts（isMeaninglessNgram）
+
+/** W12: 每个 CJK 片段最多生成的 n-gram 数（避免 token 爆炸稀释覆盖率） */
+const MAX_BIGRAMS_PER_SEGMENT = 6;
+const MAX_TRIGRAMS_PER_SEGMENT = 4;
+
 /**
  * 智能分词：支持中英文混合
  * - 英文按空格/标点分词
  * - 中文按连续字符保持完整（2字及以上作为搜索词）
+ * - W3: 生成 bigram + trigram（提高部分匹配召回）
+ * - W4: 过滤无意义的 CJK n-gram（降低假阳性）
+ * - W12: 限制每个片段的 n-gram 数量（避免 token 爆炸）
  * - 去重 + 过滤短 token
  */
 export function tokenizeQuery(query: string): string[] {
@@ -166,22 +176,37 @@ export function tokenizeQuery(query: string): string[] {
     }
   }
 
-  // 提取 CJK 连续片段，按 bigram 切分提高召回率
+  // 提取 CJK 连续片段，按 bigram+trigram 切分提高召回率
   const cjkMatches = query.match(/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]+/g) ?? [];
   for (const segment of cjkMatches) {
     if (segment.length < 2) continue;
-    // 完整片段
+    // 完整片段（用户原始输入，不过滤停用词）
     if (!seen.has(segment)) {
       seen.add(segment);
       tokens.push(segment);
     }
-    // 长于 2 字的片段额外生成 bigram（2 字滑动窗口）提高部分匹配召回
+    // 长于 2 字的片段生成 bigram + trigram（W12: 限流）
     if (segment.length > 2) {
-      for (let i = 0; i <= segment.length - 2; i++) {
+      // W3: bigram（2字滑动窗口）+ W4 停用词过滤
+      let bigramCount = 0;
+      for (let i = 0; i <= segment.length - 2 && bigramCount < MAX_BIGRAMS_PER_SEGMENT; i++) {
         const bigram = segment.substring(i, i + 2);
-        if (!seen.has(bigram)) {
+        if (!seen.has(bigram) && !isMeaninglessNgram(bigram)) {
           seen.add(bigram);
           tokens.push(bigram);
+          bigramCount++;
+        }
+      }
+      // W3: trigram（3字滑动窗口）— 比 bigram 更精确，减少误匹配
+      if (segment.length > 3) {
+        let trigramCount = 0;
+        for (let i = 0; i <= segment.length - 3 && trigramCount < MAX_TRIGRAMS_PER_SEGMENT; i++) {
+          const trigram = segment.substring(i, i + 3);
+          if (!seen.has(trigram) && !isMeaninglessNgram(trigram)) {
+            seen.add(trigram);
+            tokens.push(trigram);
+            trigramCount++;
+          }
         }
       }
     }
@@ -346,12 +371,20 @@ export async function localGrepSearch(
 
     const windows = mergeMatchWindows(matches, cached.lines.length, contextLines);
 
+    const fileName = path.basename(absPath);
     for (const window of windows) {
       const snippet = cached.lines.slice(window.start, window.end + 1).join("\n");
-      // 归一化分数：匹配率 × (1 + 标题加权)
-      const matchRatio = Math.min(1, window.totalMatches / tokens.length);
-      const titleBonus = window.hasTitle ? TITLE_WEIGHT_BONUS : 0;
-      const score = Math.min(1, matchRatio + titleBonus);
+      const snippetLower = snippet.toLowerCase();
+
+      // A1: 使用 shared-scorer 统一打分（W1 频次 + W2 邻近度 + W5 文件名 + W6 密度）
+      // H5: 传递文件 mtime 用于时间衰减加权
+      const scored = scoreText(snippetLower, tokens, {
+        fileName,
+        isTitle: window.hasTitle,
+        charCount: snippet.length,
+        modifiedAtMs: cached.mtimeMs,
+      });
+      const score = scored?.score ?? Math.min(1, window.totalMatches / tokens.length);
 
       const relPath = workspaceDir
         ? path.relative(workspaceDir, absPath).replace(/\\/g, "/")
@@ -496,19 +529,21 @@ async function searchFileDeep(
   const windows = mergeMatchWindows(matches, cached.lines.length, contextLines);
   const results: DeepSearchResult[] = [];
 
+  const fileName = path.basename(absPath);
   for (const window of windows) {
     const snippet = cached.lines.slice(window.start, window.end + 1).join("\n");
-
-    // 精确记录匹配到了哪些关键词
     const snippetLower = snippet.toLowerCase();
-    const matchedTerms = tokens.filter(t => snippetLower.includes(t.toLowerCase()));
 
-    // 综合分数：覆盖率(匹配词数/总词数) × 密度(匹配行数/窗口行数) + 标题加权
-    const coverage = matchedTerms.length / tokens.length;
-    const windowSize = window.end - window.start + 1;
-    const density = Math.min(1, window.totalMatches / windowSize);
-    const titleBonus = window.hasTitle ? TITLE_WEIGHT_BONUS : 0;
-    const score = Math.min(1, coverage * 0.6 + density * 0.3 + titleBonus + 0.1);
+    // A1: 使用 shared-scorer 统一打分（W1-W8 全部优化）
+    // H5: 传递文件 mtime 用于时间衰减加权
+    const scored = scoreText(snippetLower, tokens, {
+      fileName,
+      isTitle: window.hasTitle,
+      charCount: snippet.length,
+      modifiedAtMs: cached.mtimeMs,
+    });
+    const matchedTerms = scored?.matchedTerms ?? tokens.filter(t => snippetLower.includes(t));
+    const score = scored?.score ?? Math.min(1, window.totalMatches / tokens.length + 0.1);
 
     const relPath = workspaceDir
       ? path.relative(workspaceDir, absPath).replace(/\\/g, "/")

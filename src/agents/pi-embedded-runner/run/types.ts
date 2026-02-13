@@ -103,6 +103,8 @@ export type EmbeddedRunAttemptResult = {
   messagingToolSentTexts: string[];
   messagingToolSentTargets: MessagingToolSend[];
   cloudCodeAssistFormatError: boolean;
+  /** 🔧 P98: P88 Spot Recovery 成功执行后为 true，通知 OutputValidator 跳过幻觉检测 */
+  spotRecoveryExecuted?: boolean;
   /** Client tool call detected (OpenResponses hosted tools). */
   clientToolCall?: { name: string; params: Record<string, unknown> };
 };

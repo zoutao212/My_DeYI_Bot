@@ -292,6 +292,18 @@ export class Orchestrator {
       try {
         console.log(`[Orchestrator] 🔍 开始质量评估：${subTask.id}`);
 
+        // 🔧 P94 修复：非写作类任务跳过字数前置检查
+        // 根因：automation/analysis/data/research 类任务的产出是工具调用结果（短确认消息），
+        // 不是长文本。字数前置检查会错误地将 34 字确认消息判定为"字数不达标"并触发 decompose。
+        // 例："整理 workspace 产出到琳娜记忆库" output="Incomplete JSON segment..." (34字)
+        // → word_count 失败 → decompose → 创建无意义续写子任务。
+        const { isWordCountCritical: _isWcCritP94 } = await import("./task-type-classifier.js");
+        const _effectiveTypeP94 = subTask.taskType ?? "generic";
+        if (!_isWcCritP94(_effectiveTypeP94 as import("./types.js").TaskType)) {
+          console.log(
+            `[Orchestrator] ℹ️ P94: 非写作类任务 (${_effectiveTypeP94})，跳过字数前置检查: ${subTask.id}`,
+          );
+        } else {
         // 🔧 P5 修复：精确字数前置检查（零 LLM 调用，减轻质检负担）
         // 从 prompt 中提取字数要求，与实际文件内容字数精确比较
         // 🆕 结构性失败分治策略：重试过一次仍不达标 → decompose（而非继续 restart）
@@ -615,6 +627,7 @@ export class Orchestrator {
             `[Orchestrator] ✅ P5 精确字数前置检查通过：要求 ${wordCountReq} 字，实际 ${actualLength} 字（${Math.round(actualLength / wordCountReq * 100)}%）`,
           );
         } // end if (wordCountReq && subTask.output)
+        } // end P94 else (isWordCountCritical)
 
         // ── 🆕 V6: 通用前置验证（非写作任务的规则驱动质检） ──
         // 写作类的字数检查已在上方处理完毕，此处处理其他任务类型的验证策略
@@ -868,7 +881,12 @@ export class Orchestrator {
                 }
               }
               if (review.findings && review.findings.length > 0) {
-                subTask.metadata.lastFailureFindings = review.findings;
+                // 🔧 P108: 类型安全防御 — LLM 质检有时返回 findings 为字符串而非数组
+                // 根因：quality-reviewer LLM JSON 解析不稳定，findings 可能是单个字符串
+                // 下游 followup-runner 调用 .join() 会崩溃（"join is not a function"）
+                subTask.metadata.lastFailureFindings = Array.isArray(review.findings)
+                  ? review.findings
+                  : [String(review.findings)];
               }
               // 🔧 问题 M 修复：restart 时清空旧的文件追踪数据（与字数前置检查分支对齐）
               if (subTask.metadata.producedFilePaths && subTask.metadata.producedFilePaths.length > 0) {
@@ -1848,6 +1866,17 @@ export class Orchestrator {
     const now = Date.now();
     for (const t of roundTasks) {
       if (t.status === "active") {
+        // 🔧 P107 修复：跳过已有 completedAt 的任务（merge-on-save 竞态保护）
+        // 根因：followup-runner 已完成任务（设置了 completedAt + output），但由于
+        // merge-on-save 竞态，磁盘上的 status 仍为 "active"。另一个并发任务的
+        // isRoundCompleted() 读取到 stale 状态，会误将已完成任务标记为僵尸失败。
+        // 修复：completedAt 存在说明执行侧已确认完成，不应被僵尸检测覆盖。
+        if (t.completedAt) {
+          // 同时修正 status 为 completed（弥合 merge-on-save 竞态造成的不一致）
+          t.status = "completed";
+          continue;
+        }
+
         // 🔧 P33 修复：跳过 waitForChildren 且有实际子任务的父任务
         // 根因：父任务在分解后被设为 active，合法等待子任务完成（可能超过 5 分钟）。
         // 僵尸检测不应误杀这些正在等待子任务的父任务。
@@ -2922,6 +2951,11 @@ export class Orchestrator {
       segFilePrefix = chNumMatch[1].replace(/[\_\-]+$/, ""); // 书名部分，去尾部分隔符
       chapterNumStr = chNumMatch[2]; // 章号字符串，可能是 "01" 或 "05-06"
     }
+    // 🔧 P110: 清除 segFilePrefix 尾部的孤立括号（中英文）
+    // 根因：chapterBase 如 "孙丽莎侍奉剧情（第2部分）" 经正则提取后，
+    // segFilePrefix = "孙丽莎侍奉剧情（"（非贪婪匹配捕获到左括号），
+    // 产生畸形分段文件名如 "孙丽莎侍奉剧情（_第2章_第1节.txt"
+    segFilePrefix = segFilePrefix.replace(/[\(\)（）\[\]【】]+$/, "");
 
     // 🔧 P43: 根据任务类型决定分段是否可并行
     // 刻板问题：所有分段都强制串行（seg-2 依赖 seg-1），但翻译/分析类任务的各段是独立的
@@ -3615,9 +3649,34 @@ export class Orchestrator {
       }
     }
 
+    // 🔧 P95 修复：任务类型守卫 — 非写作/编码类任务不创建续写子任务
+    // 根因：automation/analysis/data/research 类任务的产出不是长文本，
+    // 它们的 output 只有确认消息（如 "已完成整理"），不应触发续写。
+    // 例："整理 workspace 产出到琳娜记忆库" 被误分类为 writing 后触发续写，
+    // 即使修复了分类器（P93），仍需在此加守卫防止未来类似误分类的级联影响。
+    const { classifyTaskType: _classifyP95 } = await import("./task-type-classifier.js");
+    const effectiveTaskType = subTask.taskType ?? _classifyP95(subTask.prompt).type;
+    const CONTINUATION_ELIGIBLE_TYPES = new Set(["writing", "coding", "review"]);
+    if (!CONTINUATION_ELIGIBLE_TYPES.has(effectiveTaskType)) {
+      console.log(
+        `[Orchestrator] ℹ️ P95: 非续写适用类型 (${effectiveTaskType})，跳过 decomposeFailedTask: ${subTask.id}`,
+      );
+      return [];
+    }
+
     const existingOutput = subTask.output ?? "";
     let existingLength = existingOutput.length;
     const wordCountReq = this.qualityReviewer.extractWordCountRequirement(subTask.prompt);
+
+    // 🔧 P95 修复：无明确字数要求时不创建续写子任务
+    // 根因：wordCountReq=undefined 时旧逻辑默认创建 2 个各 2000 字的续写子任务，
+    // 对没有字数要求的任务（如文件整理、数据处理）产出无意义的续写内容。
+    if (!wordCountReq) {
+      console.log(
+        `[Orchestrator] ℹ️ P95: 无明确字数要求，跳过 decomposeFailedTask: ${subTask.id}`,
+      );
+      return [];
+    }
 
     // 🔧 关键修复：优先用文件内容计算已有字数
     // subTask.output 可能只是 LLM 的确认消息（如"已创作完成"），不是文件内容
@@ -3677,9 +3736,8 @@ export class Orchestrator {
     const maxOutputPerTask = 2000;
 
     // 计算需要多少个续写子任务
-    const continuationCount = remainingChars > 0
-      ? Math.max(1, Math.ceil(remainingChars / maxOutputPerTask))
-      : 2; // 没有明确字数要求时默认拆 2 个
+    // 🔧 P95: wordCountReq=undefined 已在上方被拦截返回，此处 remainingChars 必 > 0
+    const continuationCount = Math.max(1, Math.ceil(remainingChars / maxOutputPerTask));
 
     console.log(
       `[Orchestrator] 🔧 decomposeFailedTask: ${subTask.id}, ` +
@@ -3723,10 +3781,26 @@ export class Orchestrator {
       contFilePrefix = baseName;
     }
     // 策略2：从 prompt 中提取文件名（如 "写入 C:\xxx\九天星辰录_第02章.txt"）
+    // 🔧 P97 修复：排除"更新/读取/处理/整理/提取/参考"后面的路径
+    // 这些路径是"被操作的目标文件"，不是本任务应该产出的文件。
+    // 例："更新 `丽丝夫人_剧情增补.md`" → 这是目标文件，不应作为续写文件名。
     if (!contFilePrefix) {
-      const pathMatch = subTask.prompt.match(/[\\/]([^\s\\/`"'\u201C\u201D]+\.(?:txt|md))/);
-      if (pathMatch) {
-        contFilePrefix = pathMatch[1].replace(/\.(?:txt|md)$/i, "");
+      // 先尝试匹配"写入/保存/输出"后面的路径（这些才是产出文件）
+      const writePathMatch = subTask.prompt.match(/(?:写入|保存|输出)[^\n]*?[\\/]([^\s\\/`"'\u201C\u201D]+\.(?:txt|md))/);
+      if (writePathMatch) {
+        contFilePrefix = writePathMatch[1].replace(/\.(?:txt|md)$/i, "");
+      } else {
+        // 回退：通用路径匹配，但排除"更新/读取/处理/整理/提取/参考"上下文中的路径
+        const pathMatch = subTask.prompt.match(/[\\/]([^\s\\/`"'\u201C\u201D]+\.(?:txt|md))/);
+        if (pathMatch) {
+          // P97: 检查该路径前方 30 字符内是否有操作动词（说明它是被操作对象，非产出）
+          const matchIdx = subTask.prompt.indexOf(pathMatch[0]);
+          const contextBefore = subTask.prompt.substring(Math.max(0, matchIdx - 30), matchIdx);
+          const isTargetFile = /(?:更新|读取|处理|整理|提取|参考|分析|同步|沉淀)/.test(contextBefore);
+          if (!isTargetFile) {
+            contFilePrefix = pathMatch[1].replace(/\.(?:txt|md)$/i, "");
+          }
+        }
       }
     }
     // 策略3：从 summary 生成（清洗非法字符）

@@ -1,9 +1,9 @@
 import { Type } from "@sinclair/typebox";
-import * as path from "node:path";
 
 import type { ClawdbotConfig } from "../../config/config.js";
 import { getMemorySearchManager } from "../../memory/index.js";
 import { localGrepSearch, deepGrepSearch, getDefaultMemoryDirs } from "../../memory/local-search.js";
+import { searchNovelAssets, hasNovelAssets } from "../../memory/novel-assets-searcher.js";
 import {
   routeQuery,
   getSearchCacheKey,
@@ -15,7 +15,7 @@ import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "../agent-scope.
 import { resolveMemorySearchConfig } from "../memory-search.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readNumberParam, readStringParam } from "./common.js";
-import { keywordSearch } from "./memory-keyword-search.js";
+// H2: keywordSearch 已删除，keyword/fts 通道统一使用 localGrepSearch
 
 const MemorySearchSchema = Type.Object({
   query: Type.String(),
@@ -72,7 +72,46 @@ export function createMemorySearchTool(options: {
         grep: true, // grep 始终可用
       });
 
-      const allChannels: SearchChannel[] = [decision.primary, ...decision.secondary];
+      // H1: 通道去重 — manager.search() 内部已含 vector+FTS+localGrep 三路融合，
+      // 外层不再单独起 grep/keyword/fts 通道（避免 localGrepSearch 被执行 2-3 次）。
+      // 仅保留 deepGrep 作为补充通道（TF-IDF 关键词抽取，与 localGrep 互补）。
+      // manager 不可用时降级到独立 grep + deepGrep。
+      const allChannels: SearchChannel[] = [];
+      const allRequested = [decision.primary, ...decision.secondary];
+      const hasEmbedding = allRequested.includes("embedding") && embeddingAvailable;
+
+      // H3: 跨域搜索 — 检测写作/角色相关意图时，自动纳入 novelAssets 通道
+      const novelAssetsAvailable = await hasNovelAssets(workspaceDir).catch(() => false);
+      const isWritingIntent = novelAssetsAvailable && /(?:写作|角色|风格|情节|场景|小说|创作|参考|原著|描写|对话|打斗|情感|character|writing|novel)/i.test(query);
+
+      if (hasEmbedding) {
+        // manager 可用 → 它内部已做三路融合，只补充 deepGrep + novelAssets
+        allChannels.push("embedding");
+        if (allRequested.includes("deepGrep")) {
+          allChannels.push("deepGrep");
+        }
+        if (isWritingIntent) {
+          allChannels.push("novelAssets" as SearchChannel);
+        }
+      } else {
+        // manager 不可用 → 降级：去重后保留 grep + deepGrep（keyword/fts 等效于 grep）
+        const seen = new Set<SearchChannel>();
+        for (const ch of allRequested) {
+          if (ch === "embedding") continue; // 不可用
+          // keyword/fts 已统一为 grep，避免重复
+          const normalized = (ch === "keyword" || ch === "fts") ? "grep" as SearchChannel : ch;
+          if (!seen.has(normalized)) {
+            seen.add(normalized);
+            allChannels.push(normalized);
+          }
+        }
+        // 确保至少有 grep
+        if (allChannels.length === 0) allChannels.push("grep");
+        // H3: 无 embedding 时也纳入 novelAssets
+        if (isWritingIntent) {
+          allChannels.push("novelAssets" as SearchChannel);
+        }
+      }
 
       // 并行执行所有选中通道
       type ChannelResult = { channel: SearchChannel; results: Array<{ path: string; startLine: number; endLine: number; score: number; snippet: string; source?: string; matchedTerms?: string[] }> };
@@ -82,8 +121,9 @@ export function createMemorySearchTool(options: {
           switch (channel) {
             case "embedding": {
               if (!manager) return { channel, results: [] };
+              // manager.search() 内部已含 vector+FTS+localGrep 三路融合
               const results = await manager.search(query, {
-                maxResults,
+                maxResults: maxResults * 2,
                 minScore,
                 sessionKey: options.agentSessionKey,
               });
@@ -129,28 +169,30 @@ export function createMemorySearchTool(options: {
                 })),
               };
             }
-            case "keyword":
-            case "fts": {
-              const memoryDir = path.join(workspaceDir, "memory");
-              const results = await keywordSearch({
-                query,
-                memoryDir,
-                maxResults: maxResults * 2,
-              });
-              return {
-                channel,
-                results: results.map(r => ({
-                  path: r.path,
-                  startLine: r.lineStart,
-                  endLine: r.lineEnd,
-                  score: r.score,
-                  snippet: r.text,
-                  source: "keyword",
-                })),
-              };
-            }
-            default:
+            default: {
+              // H3: novelAssets 跨域搜索通道
+              if (channel === ("novelAssets" as SearchChannel)) {
+                const novelResult = await searchNovelAssets(query, workspaceDir, {
+                  maxSnippets: Math.min(5, maxResults),
+                  snippetTargetChars: 400,
+                  snippetMaxChars: 600,
+                  autoExtractKeywords: true,
+                });
+                return {
+                  channel,
+                  results: novelResult.snippets.map(s => ({
+                    path: `NovelsAssets/${s.fileName}`,
+                    startLine: s.startLine,
+                    endLine: s.endLine,
+                    score: s.score,
+                    snippet: s.text.length > 500 ? s.text.substring(0, 500) + "…" : s.text,
+                    source: "novel-assets",
+                    matchedTerms: s.matchedTerms,
+                  })),
+                };
+              }
               return { channel, results: [] };
+            }
           }
         } catch {
           return { channel, results: [] };

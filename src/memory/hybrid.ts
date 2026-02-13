@@ -1,3 +1,5 @@
+import { isMeaninglessNgram } from "./shared-scorer.js";
+
 export type HybridSource = string;
 
 export type HybridVectorResult = {
@@ -37,21 +39,39 @@ export function buildFtsQuery(raw: string): string | null {
       ?.map((t) => t.trim())
       .filter(Boolean) ?? [];
 
-  // CJK 字符 bigram 切分（中日韩统一表意文字）
+  // A2: CJK bigram+trigram 切分 + W4 停用词过滤 + W12 限流
   const cjkSegments = raw.match(/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]+/g) ?? [];
   const cjkTokens: string[] = [];
+  const seen = new Set<string>();
   for (const segment of cjkSegments) {
-    // 2字及以上：按 bigram（2字滑动窗口）切分
-    if (segment.length >= 2) {
-      for (let i = 0; i <= segment.length - 2; i++) {
-        cjkTokens.push(segment.substring(i, i + 2));
-      }
-      // 完整片段也加入（提升精确匹配权重）
-      if (segment.length > 2) {
-        cjkTokens.push(segment);
+    if (segment.length < 2) continue;
+    // 完整片段加入（提升精确匹配权重）
+    if (segment.length > 2 && !seen.has(segment)) {
+      seen.add(segment);
+      cjkTokens.push(segment);
+    }
+    // W3+W4+W12: bigram（限 6 个/片段）+ 停用词过滤
+    let bigramCount = 0;
+    for (let i = 0; i <= segment.length - 2 && bigramCount < 6; i++) {
+      const bigram = segment.substring(i, i + 2);
+      if (!seen.has(bigram) && !isMeaninglessNgram(bigram)) {
+        seen.add(bigram);
+        cjkTokens.push(bigram);
+        bigramCount++;
       }
     }
-    // 单字不加入（噪音太大）
+    // W3: trigram（限 4 个/片段）
+    if (segment.length > 3) {
+      let trigramCount = 0;
+      for (let i = 0; i <= segment.length - 3 && trigramCount < 4; i++) {
+        const trigram = segment.substring(i, i + 3);
+        if (!seen.has(trigram) && !isMeaninglessNgram(trigram)) {
+          seen.add(trigram);
+          cjkTokens.push(trigram);
+          trigramCount++;
+        }
+      }
+    }
   }
 
   const allTokens = [...alphaTokens, ...cjkTokens];

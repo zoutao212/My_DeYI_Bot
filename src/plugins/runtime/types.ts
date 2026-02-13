@@ -86,6 +86,10 @@ type CreateMemorySearchTool =
   typeof import("../../agents/tools/memory-tool.js").createMemorySearchTool;
 type CreateAllMemoryCrudTools =
   typeof import("../../agents/tools/memory-crud-tool.js").createAllMemoryCrudTools;
+type CreateNovelReferenceSearchTool =
+  typeof import("../../agents/tools/novel-reference-tool.js").createNovelReferenceSearchTool;
+type CreateNovelAssetsListTool =
+  typeof import("../../agents/tools/novel-reference-tool.js").createNovelAssetsListTool;
 type RegisterMemoryCli = typeof import("../../cli/memory-cli.js").registerMemoryCli;
 type DiscordMessageActions =
   typeof import("../../channels/plugins/actions/discord.js").discordMessageActions;
@@ -203,6 +207,8 @@ export type PluginRuntime = {
     createMemoryGetTool: CreateMemoryGetTool;
     createMemorySearchTool: CreateMemorySearchTool;
     createAllMemoryCrudTools: CreateAllMemoryCrudTools;
+    createNovelReferenceSearchTool: CreateNovelReferenceSearchTool;
+    createNovelAssetsListTool: CreateNovelAssetsListTool;
     registerMemoryCli: RegisterMemoryCli;
   };
   channel: {

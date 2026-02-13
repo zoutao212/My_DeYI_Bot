@@ -992,6 +992,7 @@ export async function runEmbeddedAttempt(
       // 🆕 hookRunner 已经在前面声明（第 422 行附近），这里不需要重复声明
 
       let promptError: unknown = null;
+      let spotRecoveryExecuted = false;
       try {
         const promptStartedAt = Date.now();
 
@@ -1312,13 +1313,29 @@ export async function runEmbeddedAttempt(
           // 当 provider 正常（hadPriorToolCalls=true）但当前回复偶发性地将
           // 工具调用输出为纯文本时（如 Gemini 偶发 function calling 失败），
           // 解析并执行文本中的工具调用，但不标记 provider 为降级。
+          // 🔧 P98 增强：成功执行后设置 spotRecoveryExecuted 标志，
+          //    通知下游 OutputValidator 跳过幻觉检测（原始幻觉文本仍留在 output 中）。
+          // 🔧 P103 修复：_ttfHasNativeToolCalls 检查的是整个 attempt 的 toolMetas，
+          //    当 seq=1/2 有正常 tool call 但 seq=3 退化为 [Historical context:...] 时，
+          //    toolMetas.length > 0 → P88 永远不触发。改为检查最后一条 assistant 消息
+          //    是否包含 toolCall 内容（只看最后一轮回复是否有原生工具调用）。
           // ═════════════════════════════════════════════════════════════
+          const _ttfLastRoundHasNativeToolCalls = (() => {
+            const lastAssist = messagesSnapshot.slice().reverse()
+              .find((m) => (m as AgentMessage)?.role === "assistant") as AssistantMessage | undefined;
+            if (!lastAssist) return false;
+            const content = lastAssist.content;
+            if (Array.isArray(content)) {
+              return content.some((c) => typeof c === "object" && c !== null && "type" in c && c.type === "toolCall");
+            }
+            return false;
+          })();
           if (
             !promptError &&
             !aborted &&
             !_ttfWasDegraded &&
             !_ttfNewlyDetected &&
-            !_ttfHasNativeToolCalls &&
+            !_ttfLastRoundHasNativeToolCalls &&
             _ttfResponseText.length > 50
           ) {
             const {
@@ -1357,8 +1374,9 @@ export async function runEmbeddedAttempt(
                   promptError = err;
                 }
 
+                spotRecoveryExecuted = true;
                 log.info(
-                  `[attempt] ✅ P88 单次回退完成: ${_ttfSpotCalls.length} 个工具调用已执行`,
+                  `[attempt] ✅ P88 单次回退完成: ${_ttfSpotCalls.length} 个工具调用已执行 (spotRecoveryExecuted=true)`,
                 );
               }
             }
@@ -1429,6 +1447,8 @@ export async function runEmbeddedAttempt(
         didSendViaMessagingTool: didSendViaMessagingTool(),
         messagingToolSentTexts: getMessagingToolSentTexts(),
         messagingToolSentTargets: getMessagingToolSentTargets(),
+        // 🔧 P98: P88 Spot Recovery 成功执行后为 true
+        spotRecoveryExecuted,
         cloudCodeAssistFormatError: Boolean(
           lastAssistant?.errorMessage && isCloudCodeAssistFormatError(lastAssistant.errorMessage),
         ),

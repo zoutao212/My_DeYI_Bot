@@ -52,6 +52,8 @@ export type EmbeddedPiRunResult = {
   // Tool call metadata from the agent run (tool name + optional meta string).
   // Used by followup-runner to detect whether write/send_file tools were invoked.
   toolMetas?: Array<{ toolName: string; meta?: string }>;
+  /** 🔧 P98: P88 Spot Recovery 成功执行后为 true，通知 OutputValidator 跳过幻觉检测 */
+  spotRecoveryExecuted?: boolean;
 };
 
 export type EmbeddedPiCompactResult = {

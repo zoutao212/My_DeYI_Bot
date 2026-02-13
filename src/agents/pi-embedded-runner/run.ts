@@ -662,6 +662,8 @@ export async function runEmbeddedPiAgent(
             messagingToolSentTexts: attempt.messagingToolSentTexts,
             messagingToolSentTargets: attempt.messagingToolSentTargets,
             toolMetas: attempt.toolMetas,
+            // 🔧 P98: 传递 Spot Recovery 标志到 followup-runner
+            spotRecoveryExecuted: attempt.spotRecoveryExecuted,
           };
         }
       } finally {

@@ -24,6 +24,7 @@ import { getMemorySearchManager } from "../../memory/search-manager.js";
 import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "../agent-scope.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readStringParam, readNumberParam } from "./common.js";
+import { createMemoryPatchTool } from "./memory-patch-tool.js";
 
 // ─── Schema 定义 ──────────────────────────────────────────────
 
@@ -491,9 +492,11 @@ export function createAllMemoryCrudTools(options: MemoryCrudToolOptions): AnyAge
   const del = createMemoryDeleteTool(options);
   const list = createMemoryListTool(options);
   const deepSearch = createMemoryDeepSearchTool(options);
+  const patch = createMemoryPatchTool(options); // H4: 结构化补丁工具
 
   if (write) tools.push(write);
   if (update) tools.push(update);
+  if (patch) tools.push(patch);
   if (del) tools.push(del);
   if (list) tools.push(list);
   if (deepSearch) tools.push(deepSearch);

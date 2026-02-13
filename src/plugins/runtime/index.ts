@@ -36,6 +36,7 @@ import { finalizeInboundContext } from "../../auto-reply/reply/inbound-context.j
 import { resolveEffectiveMessagesConfig, resolveHumanDelayConfig } from "../../agents/identity.js";
 import { createMemoryGetTool, createMemorySearchTool } from "../../agents/tools/memory-tool.js";
 import { createAllMemoryCrudTools } from "../../agents/tools/memory-crud-tool.js";
+import { createNovelReferenceSearchTool, createNovelAssetsListTool } from "../../agents/tools/novel-reference-tool.js";
 import { handleSlackAction } from "../../agents/tools/slack-actions.js";
 import { handleWhatsAppAction } from "../../agents/tools/whatsapp-actions.js";
 import { removeAckReactionAfterReply, shouldAckReaction } from "../../channels/ack-reactions.js";
@@ -190,6 +191,8 @@ export function createPluginRuntime(): PluginRuntime {
       createMemoryGetTool,
       createMemorySearchTool,
       createAllMemoryCrudTools,
+      createNovelReferenceSearchTool,
+      createNovelAssetsListTool,
       registerMemoryCli,
     },
     channel: {

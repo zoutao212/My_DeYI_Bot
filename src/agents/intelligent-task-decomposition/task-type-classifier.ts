@@ -56,15 +56,22 @@ const TASK_TYPE_RULES: TaskTypeRule[] = [
       "写", "创作", "撰写", "小说", "文章", "故事", "章节", "散文", "诗", "剧本",
       "续写", "改写", "仿写", "翻译", "论文", "报告", "文案", "博客", "日记",
       "角色卡", "人物卡", "人设", "世界观", "设定集",
+      // 🔧 P109: 增加中文创作常用动词/名词
+      // 根因："生成剧情" "描写场景" 等常见写作 prompt 不含 "写/创作"，
+      // 导致被 analysis("剧情"/"风格") 抢走分类，不触发 V4 分段写作
+      "生成", "剧情", "渲染", "描写", "描述", "叙事", "情节",
       "write", "novel", "story", "chapter", "essay", "article", "blog",
       "translate", "script", "poem", "draft", "compose", "author",
-      "character card", "character sheet",
+      "character card", "character sheet", "generate",
     ],
     structuralPatterns: [
-      /(?:写|创作|撰写)\s*(?:\d+|[一二三四五六七八九十百千万]+)\s*(?:字|章|篇)/,
-      /(?:word\s*count|字数)[：:]\s*\d+/i,
+      /(?:写|创作|撰写|生成)\s*(?:\d+|[一二三四五六七八九十百千万]+)\s*(?:字|章|篇)/,
+      // 🔧 P109: 支持 "字数：约 6000 字" 等带修饰词的格式
+      /(?:word\s*count|字数)[：:]\s*(?:约|大约|至少|不少于|不低于|超过)?\s*\d+/i,
       /第\s*\d+\s*章/,
       /chapter\s*\d+/i,
+      // 🔧 P109: 独立的 "约 N 字" / "N 字" 字数要求模式（无需前缀）
+      /(?:约|大约|至少)?\s*\d{4,}\s*(?:字|词)/,
     ],
     validationStrategies: ["word_count", "file_output", "completeness"],
     autoDecomposeHeuristic: (prompt) => {
@@ -181,7 +188,9 @@ const TASK_TYPE_RULES: TaskTypeRule[] = [
     weight: 70,
     keywords: [
       "分析", "学习", "提取", "总结", "摘要", "归纳", "梳理", "整理",
-      "模仿", "风格", "角色", "人物", "剧情", "审查", "审阅", "评估",
+      // 🔧 P109: 移除 "剧情"（已移入 writing，创作剧情是写作而非分析）
+      // "风格" 和 "角色" 保留："分析风格" "分析角色" 仍是分析任务
+      "模仿", "风格", "角色", "人物", "审查", "审阅", "评估",
       "analyze", "extract", "summarize", "review", "evaluate",
       "study", "learn", "character", "style", "plot",
     ],
@@ -207,10 +216,16 @@ const TASK_TYPE_RULES: TaskTypeRule[] = [
       "部署", "发布", "迁移", "安装", "配置", "设置",
       "automate", "batch", "pipeline", "workflow", "script",
       "deploy", "release", "migrate", "install", "configure", "setup",
+      // P104: 记忆工具 CRUD 操作属于自动化类
+      "memory_search", "memory_write", "memory_update", "memory_delete",
+      "memory_list", "memory_deep_search", "memory_get",
+      "记忆检索", "记忆写入", "记忆更新", "记忆删除",
     ],
     structuralPatterns: [
       /(?:自动|批量)\s*(?:化|执行|处理|部署)/,
       /(?:automate|batch)\s+(?:the|this|these)/i,
+      // P104: 检测 memory 工具调用意图
+      /(?:调用|使用|用)\s*(?:memory_\w+|记忆\s*(?:工具|检索|搜索|写入|更新|删除))/,
     ],
     validationStrategies: ["tool_usage", "completeness"],
     autoDecomposeHeuristic: (prompt) => {
@@ -277,6 +292,70 @@ export interface TaskTypeClassification {
   shouldAutoDecompose: boolean;
 }
 
+// 🆕 P93: 操作意图检测（防止内容名词误导分类）
+// ========================================
+
+/**
+ * 文件操作/数据迁移意图的强信号模式（近距离匹配）
+ *
+ * 当 prompt 的核心动作是“整理文件/读取写入目录/迁移数据”时，
+ * prompt 中提到的被操作对象名称（如“角色卡”、“人物”）不应导致 writing 分类。
+ */
+const FILE_OPERATION_INTENT_PATTERNS_CLOSE: RegExp[] = [
+  /(?:整理|读取|写入|迁移|同步|归档|备份|复制|移动)\s*(?:到|至|进|入)?\s*(?:目录|文件夹|路径|memory|记忆)/i,
+  /(?:整理|提取|处理|分析)\s*(?:workspace|产出|输出|文件)/i,
+  /(?:创建|构建|更新)\s*(?:索引|目录|文件夹|记忆|memory)/i,
+  /(?:写入|保存|存放|沉淀)\s*(?:到|至|进)?\s*(?:characters|memory|clawd)/i,
+  /\bworkspace\/[\w-]+/i,
+  /(?:读取|处理)\s*chunk_\d+/i,
+];
+
+/**
+ * 🔧 P101: 文件操作意图的拆分检测（远距离匹配）
+ *
+ * 问题：原有模式要求操作动词和目标词相邻（\s*），但实际 prompt 中它们常被文件路径隔开
+ * （如“整理 C:\Users\...\workspace\... 的产出”），导致正则无法匹配。
+ *
+ * 修复：拆分为“操作动词”和“目标概念”两层独立检测，两者同时出现在全文中即视为文件操作意图。
+ */
+const FILE_OP_VERBS = /(?:整理|读取|写入|迁移|同步|归档|备份|复制|移动|提取|处理|分析|创建|构建|更新|保存|存放|沉淀)/;
+const FILE_OP_TARGETS = /(?:目录|文件夹|路径|memory|记忆|记忆库|workspace|产出|输出|文件|索引|characters|clawd|chunk_\d+)/i;
+/** 路径强信号：prompt 包含绝对路径或明确的目录引用 */
+const FILE_PATH_SIGNAL = /(?:[A-Z]:\\|~\/|\/home\/|\\users\\|characters\\|memory\\|workspace[\\/])/i;
+
+/**
+ * writing 规则中经常作为"被操作对象"出现的关键词
+ *
+ * 这些词在文件操作上下文中不应作为 writing 信号。
+ * 例如："整理角色卡到记忆库" 中的"角色卡"是被操作的对象，不是要创作角色卡。
+ */
+const WRITING_OBJECT_KEYWORDS = new Set([
+  "角色卡", "人物卡", "人设", "世界观", "设定集",
+  "character card", "character sheet",
+  "角色", "人物", "剧情",
+  "小说", "故事", "章节",
+  // 🔧 P101: 扩展覆盖 — 这些词在文件操作 prompt 中频繁作为被操作对象出现
+  "剧情增补", "续写", "感官资产", "资产",
+  "人物卡", "角色文件", "记忆文档",
+  "分析文档", "分析文件",
+]);
+
+/**
+ * 检测 prompt 是否以文件操作/数据迁移为主要意图
+ *
+ * 🔧 P101 增强：三层检测（近距离→远距离→路径信号）
+ * 原有逻辑只匹配近距离模式，当操作动词和目标词被文件路径隔开时失败。
+ */
+function hasFileOperationIntent(prompt: string): boolean {
+  // 层 1：近距离模式（操作动词和目标词相邻，最强信号）
+  if (FILE_OPERATION_INTENT_PATTERNS_CLOSE.some(p => p.test(prompt))) return true;
+  // 层 2：远距离模式（操作动词和目标概念分別出现在全文中）
+  if (FILE_OP_VERBS.test(prompt) && FILE_OP_TARGETS.test(prompt)) return true;
+  // 层 3：路径强信号 + 操作动词（prompt 含绝对路径 + 操作动词）
+  if (FILE_PATH_SIGNAL.test(prompt) && FILE_OP_VERBS.test(prompt)) return true;
+  return false;
+}
+
 // ========================================
 // 核心分类函数
 // ========================================
@@ -292,6 +371,7 @@ export interface TaskTypeClassification {
  */
 export function classifyTaskType(prompt: string): TaskTypeClassification {
   const lowerPrompt = prompt.toLowerCase();
+  const isFileOpContext = hasFileOperationIntent(prompt);
 
   let bestResult: TaskTypeClassification | null = null;
 
@@ -306,10 +386,24 @@ export function classifyTaskType(prompt: string): TaskTypeClassification {
       structuralMatches = rule.structuralPatterns.filter(p => p.test(prompt)).length;
     }
 
-    // 综合得分 = 基础权重 + 关键词命中数加成 + 结构信号加成
-    const keywordBonus = Math.min(matchedKeywords.length * 3, 15); // 每个关键词 +3，上限 15
+    // 🆕 P93: 操作意图检测 — 过滤"被操作对象"关键词
+    // 当 prompt 主要意图是文件操作时，writing 的"对象关键词"不计入加分
+    let effectiveKeywords = matchedKeywords;
+    let intentPenalty = 0;
+    if (rule.type === "writing" && isFileOpContext) {
+      effectiveKeywords = matchedKeywords.filter(kw => !WRITING_OBJECT_KEYWORDS.has(kw));
+      if (effectiveKeywords.length === 0) continue; // 所有命中词都是"被操作对象" → 跳过 writing
+      // 即使有非对象关键词命中，也施加惩罚（文件操作上下文中 writing 不应是首选）
+      // 🔧 P101: 加大惩罚力度（从 20 → 40）
+      // 原因：当 prompt 包含大量 writing 内容名词（如“续写/剧情/角色/感官资产”）时，
+      // writing 得分可能达 60+，20 分惩罚不足以压低。
+      intentPenalty = 40;
+    }
+
+    // 综合得分 = 基础权重 + 关键词命中数加成 + 结构信号加成 - 意图惩罚
+    const keywordBonus = Math.min(effectiveKeywords.length * 3, 15); // 每个关键词 +3，上限 15
     const structuralBonus = structuralMatches * 10; // 每个结构信号 +10
-    const score = rule.weight + keywordBonus + structuralBonus;
+    const score = rule.weight + keywordBonus + structuralBonus - intentPenalty;
 
     // 置信度 = score / 120 * 100（上限 100）
     const confidence = Math.min(100, Math.round(score / 120 * 100));

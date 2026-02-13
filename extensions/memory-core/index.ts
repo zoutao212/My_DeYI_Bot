@@ -36,6 +36,23 @@ const memoryCorePlugin = {
       { names: ["memory_write", "memory_update", "memory_delete", "memory_list", "memory_deep_search"] },
     );
 
+    // 小说素材参考检索工具（零外部依赖，只需文件系统）
+    api.registerTool(
+      (ctx) => {
+        const novelSearchTool = api.runtime.tools.createNovelReferenceSearchTool({
+          config: ctx.config,
+          agentSessionKey: ctx.sessionKey,
+        });
+        const novelListTool = api.runtime.tools.createNovelAssetsListTool({
+          config: ctx.config,
+          agentSessionKey: ctx.sessionKey,
+        });
+        const tools = [novelSearchTool, novelListTool].filter(Boolean);
+        return tools.length > 0 ? tools : null;
+      },
+      { names: ["novel_reference_search", "novel_assets_list"] },
+    );
+
     api.registerCli(
       ({ program }) => {
         api.runtime.tools.registerMemoryCli(program);
