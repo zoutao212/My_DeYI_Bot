@@ -145,6 +145,13 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
   taskDecompositionStorageLine1: "**质量评估**：系统会自动评估质量，AI 自主决策（continue/adjust/restart/overthrow）",
   taskDecompositionStorageLine2: "**失败学习**：系统会记录失败原因、提取教训、注入经验到新任务树",
   taskDecompositionStorageLine3: "**任务树存储**：自动保存到 `~/.clawdbot/tasks/{sessionId}/TASK_TREE.json`，支持断点恢复和版本回滚",
+  // P120: 精简版任务分解指导（minimal + characterName 模式使用）
+  taskDecompositionCompactTitle: "## 任务分解（精简）",
+  taskDecompositionCompactIntro: "当任务复杂（多步骤/长文本>2000字/多文件操作/大规模分析）时，使用 `enqueue_task` 工具分解为子任务。",
+  taskDecompositionCompactLine1: "- 每个子任务应可独立执行，系统会自动排队、并行执行、质检、合并产出",
+  taskDecompositionCompactLine2: "- 长文本创作会自动分段执行（V4 智能分段）",
+  taskDecompositionCompactLine3: "- 大文件分析会自动 Map-Reduce 拆分（V5 流水线）",
+  taskDecompositionCompactGuideline: "- 判断准则：涉及多步骤、长文本生成(>2000字)、多文件操作、大规模数据分析时，优先使用 enqueue_task",
   toolParamsQuickRef: `## 核心工具参数速查
 - **write(path, content)**:path=文件路径，content=完整内容（⚠️ 会覆盖整个文件！）
 - **edit(path, oldText, newText)**:path=文件路径，oldText=要替换的原文，newText=替换后的新文本

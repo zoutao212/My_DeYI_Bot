@@ -10,11 +10,16 @@
  * @module agents/chatroom/character-agent
  */
 
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import type { ClawdbotConfig } from "../../config/config.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { runEmbeddedPiAgent } from "../pi-embedded.js";
 import { getCharacterService } from "../pipeline/characters/character-service.js";
 import { createSystemLLMCaller } from "../intelligent-task-decomposition/system-llm-caller.js";
-import type { ChatRoomMessage, CharacterResponse, ChatRoomConfig } from "./types.js";
+import type { ChatRoomMessage, CharacterResponse, ChatRoomConfig, CollaborativeTaskContext } from "./types.js";
 import { DEFAULT_CHATROOM_CONFIG, CHARACTER_ICONS } from "./types.js";
 import {
   fetchMemoryContext,
@@ -23,6 +28,8 @@ import {
   parseMemoryActions,
   executeMemoryActions,
 } from "./memory-bridge.js";
+import { fillTemplate } from "./character-agent.l10n.types.js";
+import { getCharacterAgentL10n } from "./detector-l10n-loader.js";
 
 const log = createSubsystemLogger("chatroom:agent");
 
@@ -107,19 +114,20 @@ function buildChatRoomContextPrompt(params: {
   interactionHint?: string;
 }): string {
   const { characterId, displayName, participants, recentMessages, isInteraction, interactionHint } = params;
+  const t = getCharacterAgentL10n();
 
   const parts: string[] = [];
 
   // ── 1. 场景说明 ──
-  parts.push(`## 🏠 爱姬聊天室`);
-  parts.push(`你正在与主人和其他姐妹一起在聊天室中。`);
-  parts.push(`你是 ${displayName}，请用你自己独特的风格和视角回答。`);
-  parts.push(`参与者：${participants.join("、")}`);
+  parts.push(t.chatRoomTitle);
+  parts.push(t.chatRoomIntro);
+  parts.push(fillTemplate(t.chatRoomYouAre, { displayName }));
+  parts.push(fillTemplate(t.chatRoomParticipants, { participants: participants.join(t.participantSeparator) }));
   parts.push(``);
 
   // ── 2. 近期聊天历史 ──
   if (recentMessages.length > 0) {
-    parts.push(`## 聊天记录`);
+    parts.push(t.chatHistoryTitle);
     for (const msg of recentMessages) {
       const icon = msg.senderType === "user"
         ? "👤"
@@ -136,13 +144,10 @@ function buildChatRoomContextPrompt(params: {
   }
 
   // ── 4. 行为守则 ──
-  parts.push(`## 聊天室守则`);
-  parts.push(`- 用你自己的风格和视角回答主人的问题`);
-  parts.push(`- 可以引用或回应其他姐妹的观点，但要有自己的见解`);
-  parts.push(`- 回复控制在 200-500 字以内，简洁有力`);
-  parts.push(`- 保持角色一致性，不要出戏`);
-  parts.push(`- 不要重复其他姐妹已经说过的内容`);
-  parts.push(`- 展现你独特的思维方式和知识背景`);
+  parts.push(t.chatRulesTitle);
+  for (const rule of t.chatRules) {
+    parts.push(rule);
+  }
 
   return parts.join("\n");
 }
@@ -177,6 +182,8 @@ export async function generateCharacterResponse(params: {
   agentSessionKey?: string;
   /** 是否启用记忆桥接（默认 true） */
   enableMemory?: boolean;
+  /** 复杂度感知提示（来自 register.ts 的意图复杂度分析） */
+  complexityHint?: string;
 }): Promise<CharacterResponse> {
   const {
     characterId,
@@ -189,21 +196,25 @@ export async function generateCharacterResponse(params: {
     interactionHint,
     agentSessionKey,
     enableMemory = true,
+    complexityHint,
   } = params;
   const cfg = { ...DEFAULT_CHATROOM_CONFIG, ...chatroomConfig };
   const started = Date.now();
 
   try {
+    // 0. 获取 l10n 配置
+    const t = getCharacterAgentL10n();
+
     // 1. 加载角色人格
     const loaded = await loadCharacterSystemPrompt(characterId);
     if (!loaded) {
       return {
         characterId,
         displayName: characterId,
-        content: `（${characterId} 暂时无法回应）`,
+        content: fillTemplate(t.characterUnavailable, { name: characterId }),
         durationMs: Date.now() - started,
         ok: false,
-        error: "角色加载失败",
+        error: t.characterLoadFailed,
       };
     }
 
@@ -238,7 +249,7 @@ export async function generateCharacterResponse(params: {
 
     // 4. 组装完整 prompt（system prompt + 记忆上下文 + 记忆写入指引 + 聊天室上下文 + 用户消息）
     const promptParts = [
-      `# 角色设定\n\n${loaded.systemPrompt}`,
+      `${t.roleSettingTitle}\n\n${loaded.systemPrompt}`,
     ];
     // 注入记忆上下文（如有）
     if (memoryContextText) {
@@ -249,8 +260,12 @@ export async function generateCharacterResponse(params: {
       promptParts.push(`\n\n${buildMemoryWriteGuide(characterId)}`);
     }
     promptParts.push(`\n\n${chatRoomContext}`);
-    promptParts.push(`\n\n# 主人的消息\n\n${userMessage}`);
-    promptParts.push(`\n\n请以 ${loaded.displayName} 的身份回复。直接输出回复内容，不要加任何前缀标签。`);
+    // 注入复杂度感知提示（如有）
+    if (complexityHint) {
+      promptParts.push(`\n\n${complexityHint}`);
+    }
+    promptParts.push(`\n\n${t.masterMessageTitle}\n\n${userMessage}`);
+    promptParts.push(`\n\n${fillTemplate(t.replyInstruction, { displayName: loaded.displayName })}`);
     const fullPrompt = promptParts.join("");
 
     // 5. 调用 LLM（复用缓存的 caller 实例）
@@ -295,7 +310,7 @@ export async function generateCharacterResponse(params: {
     return {
       characterId,
       displayName,
-      content: `（${displayName} 正在思考中，稍后再来……）`,
+      content: fillTemplate(getCharacterAgentL10n().characterThinking, { displayName }),
       durationMs,
       ok: false,
       error: String(err),
@@ -342,4 +357,185 @@ export function clearPersonaCache(): void {
   personaCache.clear();
   cachedLLMCaller = null;
   log.debug("[CharacterAgent] Persona + LLM caller cache cleared");
+}
+
+// ============================================================================
+// 协作任务：领头角色带工具执行（runEmbeddedPiAgent）
+// ============================================================================
+
+/** 协作任务 LLM 超时：5 分钟（复杂任务需要更多时间） */
+const COLLAB_TIMEOUT_MS = 300_000;
+
+/**
+ * 以指定角色身份执行带工具的完整 agent loop（协作任务专用）
+ *
+ * 与 generateCharacterResponse 不同，此方法使用 runEmbeddedPiAgent
+ * 而非 completeSimple，让角色获得完整的工具能力：
+ * enqueue_task / 记忆 CRUD / 文件操作 / Web / 技能 / continue_generation
+ *
+ * 调用时绕过 lane 排队（enqueue: inline），因为当前已在 hook 中执行。
+ */
+export async function executeLeadCharacterWithTools(params: {
+  characterId: string;
+  userMessage: string;
+  participants: string[];
+  /** 其他角色的规划讨论（Phase 1 产出，注入领头角色上下文） */
+  planningContext: string;
+  collaborativeContext: CollaborativeTaskContext;
+  config?: ClawdbotConfig;
+}): Promise<CharacterResponse> {
+  const {
+    characterId,
+    userMessage,
+    participants,
+    planningContext,
+    collaborativeContext,
+    config,
+  } = params;
+  const started = Date.now();
+
+  try {
+    // 0. 获取 l10n 配置
+    const t = getCharacterAgentL10n();
+
+    // 1. 加载角色人格
+    const loaded = await loadCharacterSystemPrompt(characterId);
+    if (!loaded) {
+      return {
+        characterId,
+        displayName: characterId,
+        content: fillTemplate(t.collabCharacterLoadFailed, { name: characterId }),
+        durationMs: Date.now() - started,
+        ok: false,
+        error: t.characterLoadFailed,
+      };
+    }
+
+    // 2. 创建隔离的 session 文件（避免污染主 session）
+    const taskId = crypto.randomUUID().slice(0, 8);
+    const sessionDir = path.join(os.homedir(), ".clawdbot", "chatroom-collab");
+    await fs.mkdir(sessionDir, { recursive: true });
+    const sessionFile = path.join(sessionDir, `collab_${taskId}.jsonl`);
+    const sessionId = `collab-${taskId}`;
+
+    // 3. 构建增强 system prompt（角色人格 + 协作上下文 + 能力清单）
+    const participantList = participants
+      .map((id) => {
+        const icon = CHARACTER_ICONS[id]?.icon ?? "💬";
+        return `${icon}${id}`;
+      })
+      .join(t.participantSeparator);
+
+    const extraParts: string[] = [
+      `${t.roleSettingTitle}\n\n${loaded.systemPrompt}`,
+      `\n\n${t.collabTitle}`,
+      fillTemplate(t.collabLeadIntro, { displayName: loaded.displayName }),
+      fillTemplate(t.chatRoomParticipants, { participants: participantList }),
+    ];
+
+    // 注入姐妹们的规划讨论
+    if (planningContext) {
+      extraParts.push(
+        `\n\n${t.collabPlanningTitle}\n${t.collabPlanningIntro}`,
+        planningContext,
+      );
+    }
+
+    // 注入复杂度分析
+    if (collaborativeContext.complexityReason) {
+      extraParts.push(
+        `\n\n${t.collabComplexityTitle}\n${collaborativeContext.complexityReason}`,
+      );
+    }
+
+    extraParts.push(
+      `\n\n${t.collabCapabilitiesTitle}`,
+      t.collabCapabilitiesIntro,
+      t.collabCapabilityEnqueue,
+      t.collabCapabilityMemory,
+      t.collabCapabilityContinue,
+      t.collabCapabilityFile,
+      t.collabCapabilityWeb,
+      `\n${t.collabClosingInstruction}`,
+    );
+
+    const extraSystemPrompt = extraParts.filter(Boolean).join("\n");
+
+    // 4. 解析 provider/model（优先使用显式指定，回退到 config 默认值）
+    const effectiveConfig = collaborativeContext.config ?? config;
+    const provider =
+      collaborativeContext.provider ??
+      (effectiveConfig as Record<string, any>)?.agents?.defaults?.provider;
+    const model =
+      collaborativeContext.model ??
+      (effectiveConfig as Record<string, any>)?.agents?.defaults?.model?.id;
+
+    log.info(
+      `[CharacterAgent] 🤝 协作任务执行: ${characterId} (${loaded.displayName}), ` +
+      `provider=${provider}, model=${model}, prompt=${userMessage.length}字`,
+    );
+
+    // 5. 调用 runEmbeddedPiAgent（全工具 agent loop）
+    //    enqueue: inline 绕过 lane 排队，避免与外层 hook 死锁
+    const runResult = await runEmbeddedPiAgent({
+      sessionId,
+      sessionKey: `collab-${taskId}`,
+      messageProvider: collaborativeContext.messageProvider,
+      sessionFile,
+      workspaceDir: collaborativeContext.workspaceDir,
+      config: effectiveConfig,
+      prompt: userMessage,
+      provider,
+      model,
+      authProfileId: collaborativeContext.authProfileId,
+      timeoutMs: COLLAB_TIMEOUT_MS,
+      runId: crypto.randomUUID(),
+      extraSystemPrompt,
+      enqueue: (task) => task(),
+    });
+
+    // 6. 提取输出文本
+    const contentParts: string[] = [];
+    if (runResult.payloads) {
+      for (const p of runResult.payloads) {
+        if (p.text && !p.isError) contentParts.push(p.text);
+      }
+    }
+    const outputText =
+      contentParts.join("\n\n") || t.collabNoOutput;
+    const durationMs = Date.now() - started;
+
+    log.info(
+      `[CharacterAgent] 🤝 协作执行完成: ${characterId}, ` +
+      `${outputText.length}字, ${durationMs}ms, ` +
+      `tools=${runResult.toolMetas?.length ?? 0}`,
+    );
+
+    return {
+      characterId,
+      displayName: loaded.displayName,
+      content: outputText,
+      durationMs,
+      ok: true,
+    };
+  } catch (err) {
+    const durationMs = Date.now() - started;
+    log.error(`[CharacterAgent] 🤝 协作执行失败 (${characterId}, ${durationMs}ms): ${err}`);
+
+    let displayName = characterId;
+    try {
+      const svc = getCharacterService();
+      const loaded = await svc.loadCharacter(characterId);
+      if (loaded) displayName = loaded.config.displayName;
+    } catch { /* 忽略 */ }
+
+    return {
+      characterId,
+      displayName,
+      content: fillTemplate(getCharacterAgentL10n().collabError, { displayName, error: String(err).slice(0, 200) }),
+      durationMs,
+      ok: false,
+      error: String(err),
+    };
+  }
 }

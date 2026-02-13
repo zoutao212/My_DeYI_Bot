@@ -17,13 +17,17 @@
 
 import type { ClawdbotConfig } from "../../config/config.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
-import { generateCharacterResponse, getCharacterDisplayName } from "./character-agent.js";
+import { generateCharacterResponse, getCharacterDisplayName, executeLeadCharacterWithTools } from "./character-agent.js";
 import {
   formatOpeningMessage,
   formatResponses,
   formatInteractionResponses,
   formatClosingMessage,
   formatLimitReachedMessage,
+  formatCollaborativeBanner,
+  formatPlanningPhase,
+  formatExecutionPhase,
+  formatReviewPhase,
 } from "./formatter.js";
 import {
   getOrCreateSession,
@@ -41,6 +45,7 @@ import type {
   CharacterResponse,
   ChatRoomConfig,
   ChatRoomHandleParams,
+  CollaborativeTaskContext,
   InteractionMode,
   MemoryActionResult,
 } from "./types.js";
@@ -77,6 +82,9 @@ export async function handleChatRoomMessage(
     callStrategy = "staggered",
     interactionMode = null,
     agentSessionKey,
+    complexityHint,
+    collaborativeTaskMode,
+    collaborativeContext,
   } = params;
 
   log.info(
@@ -123,66 +131,83 @@ export async function handleChatRoomMessage(
     setInteractionMode(session, interactionMode);
   }
 
-  // ── 7. 调用多角色 LLM ──
-  const recentMessages = getRecentMessages(session, 10);
-
-  // 过滤掉已达上限的角色
-  const activeParticipants = session.participants.filter((id) =>
-    canCharacterReply(session, id, cfg),
-  );
-
-  if (activeParticipants.length === 0) {
-    await sendReply(formatLimitReachedMessage("", "", "total"));
-    const closing = formatClosingMessage(session);
-    await sendReply(closing);
-    closeSession(sessionKey);
-    return;
-  }
-
-  // 提示已达上限的角色
-  for (const id of session.participants) {
-    if (!activeParticipants.includes(id)) {
-      await sendReply(formatLimitReachedMessage(id, displayNames[id] ?? id, "character"));
-    }
-  }
-
-  const responses = await callMultipleAgents({
-    characterIds: activeParticipants,
-    userMessage,
-    participants: session.participants,
-    recentMessages,
-    config,
-    chatroomConfig: cfg,
-    callStrategy,
-    isInteraction: false,
-    agentSessionKey,
-  });
-
-  // ── 7.5 汇总记忆动作结果（诊断日志）──
-  logMemoryActions(responses);
-
-  // ── 8. 记录角色回答到会话 ──
-  for (const resp of responses) {
-    addCharacterMessage(session, resp.characterId, resp.displayName, resp.content);
-  }
-
-  // ── 9. 格式化并发送回答 ──
-  const formattedResponse = formatResponses(responses, session);
-  await sendReply(formattedResponse);
-
-  // ── 10. 触发互动轮次（如果请求了） ──
-  if (interactionMode && session.interactionRoundsExecuted < cfg.maxInteractionRounds) {
-    await executeInteractionRound({
+  // ── 7. 协作任务模式 vs 普通模式 ──
+  if (collaborativeTaskMode && collaborativeContext && activeParticipantsCheck(session, cfg, sendReply, sessionKey, displayNames)) {
+    // 🤝 协作任务三阶段流程（force_decompose 触发）
+    await executeCollaborativeTask({
       session,
-      responses,
-      mode: interactionMode,
+      userMessage,
       config,
       chatroomConfig: cfg,
       callStrategy,
       sendReply,
       agentSessionKey,
+      collaborativeContext,
+      displayNames,
     });
-    session.interactionRoundsExecuted++;
+  } else if (!collaborativeTaskMode) {
+    // 普通聊天室模式
+    const recentMessages = getRecentMessages(session, 10);
+
+    // 过滤掉已达上限的角色
+    const activeParticipants = session.participants.filter((id) =>
+      canCharacterReply(session, id, cfg),
+    );
+
+    if (activeParticipants.length === 0) {
+      await sendReply(formatLimitReachedMessage("", "", "total"));
+      const closing = formatClosingMessage(session);
+      await sendReply(closing);
+      closeSession(sessionKey);
+      return;
+    }
+
+    // 提示已达上限的角色
+    for (const id of session.participants) {
+      if (!activeParticipants.includes(id)) {
+        await sendReply(formatLimitReachedMessage(id, displayNames[id] ?? id, "character"));
+      }
+    }
+
+    const responses = await callMultipleAgents({
+      characterIds: activeParticipants,
+      userMessage,
+      participants: session.participants,
+      recentMessages,
+      config,
+      chatroomConfig: cfg,
+      callStrategy,
+      isInteraction: false,
+      agentSessionKey,
+      complexityHint,
+    });
+
+    // ── 7.5 汇总记忆动作结果（诊断日志）──
+    logMemoryActions(responses);
+
+    // ── 8. 记录角色回答到会话 ──
+    for (const resp of responses) {
+      addCharacterMessage(session, resp.characterId, resp.displayName, resp.content);
+    }
+
+    // ── 9. 格式化并发送回答 ──
+    const formattedResponse = formatResponses(responses, session);
+    await sendReply(formattedResponse);
+
+    // ── 10. 触发互动轮次（如果请求了） ──
+    if (interactionMode && session.interactionRoundsExecuted < cfg.maxInteractionRounds) {
+      await executeInteractionRound({
+        session,
+        responses,
+        mode: interactionMode,
+        config,
+        chatroomConfig: cfg,
+        callStrategy,
+        sendReply,
+        agentSessionKey,
+      });
+      session.interactionRoundsExecuted++;
+    }
   }
 
   // ── 11. 再次检查限制 ──
@@ -230,6 +255,8 @@ interface MultiAgentCallParams {
   interactionMode?: InteractionMode;
   /** agent session key（记忆工具工作区路径解析） */
   agentSessionKey?: string;
+  /** 复杂度感知提示（注入角色 prompt，让角色知道任务的复杂度） */
+  complexityHint?: string;
 }
 
 /**
@@ -263,6 +290,7 @@ async function callMultipleAgents(params: MultiAgentCallParams): Promise<Charact
     isInteraction,
     interactionHint,
     agentSessionKey: params.agentSessionKey,
+    complexityHint: params.complexityHint,
   }));
 
   switch (callStrategy) {
@@ -505,6 +533,203 @@ function buildProgressiveInteractionHint(
   }
 
   return parts.join("\n");
+}
+
+// ============================================================================
+// 协作任务三阶段流程
+// ============================================================================
+
+/** 协作任务审查上下文截断上限（避免 Phase 3 prompt 过长） */
+const REVIEW_CONTEXT_MAX_CHARS = 3000;
+
+/**
+ * 检查活跃参与者（公共守卫，协作/普通模式复用）
+ */
+function activeParticipantsCheck(
+  session: import("./types.js").ChatRoomSession,
+  cfg: ChatRoomConfig,
+  sendReply: (text: string) => Promise<void>,
+  sessionKey: string,
+  displayNames: Record<string, string>,
+): boolean {
+  const activeParticipants = session.participants.filter((id) =>
+    canCharacterReply(session, id, cfg),
+  );
+  if (activeParticipants.length === 0) {
+    sendReply(formatLimitReachedMessage("", "", "total")).then(() => {
+      sendReply(formatClosingMessage(session));
+      closeSession(sessionKey);
+    });
+    return false;
+  }
+  return true;
+}
+
+interface CollaborativeTaskParams {
+  session: import("./types.js").ChatRoomSession;
+  userMessage: string;
+  config?: ClawdbotConfig;
+  chatroomConfig: ChatRoomConfig;
+  callStrategy: CallStrategy;
+  sendReply: (text: string) => Promise<void>;
+  agentSessionKey?: string;
+  collaborativeContext: CollaborativeTaskContext;
+  displayNames: Record<string, string>;
+}
+
+/**
+ * 协作任务三阶段执行流程
+ *
+ * Phase 1（规划）：所有角色讨论任务方案（completeSimple，轻量快速）
+ * Phase 2（执行）：领头角色使用 runEmbeddedPiAgent（全工具 agent loop）
+ * Phase 3（互检）：其他角色审查领头角色的产出（completeSimple）
+ *
+ * 整个流程在聊天室内完成，不退出聊天室。
+ */
+async function executeCollaborativeTask(params: CollaborativeTaskParams): Promise<void> {
+  const {
+    session,
+    userMessage,
+    config,
+    chatroomConfig,
+    callStrategy,
+    sendReply,
+    agentSessionKey,
+    collaborativeContext,
+    displayNames,
+  } = params;
+
+  const leadCharacterId = session.participants[0];
+  const reviewerIds = session.participants.filter((id) => id !== leadCharacterId);
+
+  log.info(
+    `[Orchestrator] 🤝 协作任务启动: lead=${leadCharacterId}, ` +
+    `reviewers=${reviewerIds.join(",")}, msg=${userMessage.slice(0, 100)}`,
+  );
+
+  // ── 0. 发送协作任务横幅 ──
+  await sendReply(formatCollaborativeBanner(
+    session.participants,
+    displayNames,
+    leadCharacterId,
+  ));
+
+  // ── Phase 1: 规划讨论（所有角色简短讨论方案） ──
+  log.info(`[Orchestrator] 🤝 Phase 1: 规划讨论`);
+  const recentMessages = getRecentMessages(session, 10);
+  const activeParticipants = session.participants.filter((id) =>
+    canCharacterReply(session, id, chatroomConfig),
+  );
+
+  const planningHint =
+    `## 🤝 协作任务 — 规划阶段\n` +
+    `主人交给聊天室一项复杂任务，姐妹们需要协作完成。\n` +
+    `请简要分析这个任务，提出你的方案建议（100-300字）。\n` +
+    `你的分析将供负责执行的姐妹参考。\n` +
+    `注意：你现在只需要讨论方案，不需要执行。执行由主导姐妹负责。`;
+
+  const planningResponses = await callMultipleAgents({
+    characterIds: activeParticipants,
+    userMessage,
+    participants: session.participants,
+    recentMessages,
+    config,
+    chatroomConfig,
+    callStrategy,
+    isInteraction: false,
+    interactionHint: planningHint,
+    agentSessionKey,
+  });
+
+  // 记录到会话 + 发送
+  for (const resp of planningResponses) {
+    addCharacterMessage(session, resp.characterId, resp.displayName, resp.content);
+  }
+  await sendReply(formatPlanningPhase(planningResponses));
+
+  // 汇总规划内容供 Phase 2 使用
+  const planningContext = planningResponses
+    .filter((r) => r.ok)
+    .map((r) => {
+      const icon = CHARACTER_ICONS[r.characterId]?.icon ?? "💬";
+      return `${icon} ${r.displayName}：${r.content}`;
+    })
+    .join("\n\n");
+
+  // ── Phase 2: 领头角色执行（全工具 agent loop） ──
+  log.info(`[Orchestrator] 🤝 Phase 2: ${leadCharacterId} 执行任务`);
+  const executionStarted = Date.now();
+
+  const leadResponse = await executeLeadCharacterWithTools({
+    characterId: leadCharacterId,
+    userMessage,
+    participants: session.participants,
+    planningContext,
+    collaborativeContext,
+    config,
+  });
+
+  const executionDurationMs = Date.now() - executionStarted;
+
+  // 记录到会话 + 发送
+  addCharacterMessage(
+    session,
+    leadResponse.characterId,
+    leadResponse.displayName,
+    leadResponse.content,
+  );
+  await sendReply(formatExecutionPhase(leadResponse, executionDurationMs));
+
+  // ── Phase 3: 姐妹互检（其他角色审查产出） ──
+  if (reviewerIds.length > 0 && leadResponse.ok) {
+    log.info(`[Orchestrator] 🤝 Phase 3: 互检 (${reviewerIds.join(",")})`);
+
+    // 截断执行产出供审查（避免 prompt 过长）
+    const outputForReview = leadResponse.content.length > REVIEW_CONTEXT_MAX_CHARS
+      ? leadResponse.content.slice(0, REVIEW_CONTEXT_MAX_CHARS) + "\n\n...（产出已截断，完整内容请查看文件）"
+      : leadResponse.content;
+
+    const leadIcon = CHARACTER_ICONS[leadCharacterId]?.icon ?? "💬";
+    const leadName = displayNames[leadCharacterId] ?? leadCharacterId;
+    const reviewHint =
+      `## 🔍 协作任务 — 互检阶段\n` +
+      `${leadIcon}${leadName} 已完成任务执行，以下是她的产出：\n\n` +
+      `---\n${outputForReview}\n---\n\n` +
+      `请审查以上产出，给出你的评价和建议（100-300字）：\n` +
+      `- 是否完成了主人的需求？\n` +
+      `- 有没有遗漏或可以改进的地方？\n` +
+      `- 质量如何？`;
+
+    const reviewMessages = getRecentMessages(session, 15);
+    const activeReviewers = reviewerIds.filter((id) =>
+      canCharacterReply(session, id, chatroomConfig),
+    );
+
+    if (activeReviewers.length > 0) {
+      const reviewResponses = await callMultipleAgents({
+        characterIds: activeReviewers,
+        userMessage: `（协作任务互检）`,
+        participants: session.participants,
+        recentMessages: reviewMessages,
+        config,
+        chatroomConfig,
+        callStrategy,
+        isInteraction: true,
+        interactionHint: reviewHint,
+        agentSessionKey,
+      });
+
+      // 记录到会话 + 发送
+      for (const resp of reviewResponses) {
+        addCharacterMessage(session, resp.characterId, resp.displayName, resp.content, true);
+      }
+      await sendReply(formatReviewPhase(reviewResponses));
+    }
+  } else if (!leadResponse.ok) {
+    log.warn(`[Orchestrator] 🤝 Phase 2 执行失败，跳过互检`);
+  }
+
+  log.info(`[Orchestrator] 🤝 协作任务完成`);
 }
 
 // ============================================================================

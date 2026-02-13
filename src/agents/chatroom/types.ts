@@ -249,4 +249,37 @@ export interface ChatRoomHandleParams {
   interactionMode?: InteractionMode | null;
   /** agent session key（用于记忆工具的工作区路径解析） */
   agentSessionKey?: string;
+  /** 复杂度感知提示（由 register.ts 预分析后注入，传递给角色 agent） */
+  complexityHint?: string;
+  /** 协作任务模式（force_decompose 时触发三阶段协作流程：规划→执行→互检） */
+  collaborativeTaskMode?: boolean;
+  /** 协作任务执行上下文（仅 collaborativeTaskMode=true 时需要，提供 agent 全能力上下文） */
+  collaborativeContext?: CollaborativeTaskContext;
+}
+
+/**
+ * 协作任务执行所需的 agent 上下文
+ *
+ * 从 register.ts hook 传入，让领头角色在聊天室内获得
+ * runEmbeddedPiAgent 所需的完整参数，从而拥有全部工具能力。
+ */
+export interface CollaborativeTaskContext {
+  /** 工作区目录 */
+  workspaceDir: string;
+  /** 会话 key */
+  sessionKey: string;
+  /** Agent ID */
+  agentId?: string;
+  /** 消息通道 provider */
+  messageProvider?: string;
+  /** Clawdbot 配置（含 LLM provider/model 等） */
+  config?: import("../../config/config.js").ClawdbotConfig;
+  /** LLM Provider（如 vectorengine） */
+  provider?: string;
+  /** Model ID */
+  model?: string;
+  /** 认证 profile ID */
+  authProfileId?: string;
+  /** 复杂度分析原因（注入领头角色 prompt） */
+  complexityReason?: string;
 }

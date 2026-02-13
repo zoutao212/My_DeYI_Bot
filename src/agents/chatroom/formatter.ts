@@ -166,3 +166,90 @@ export function formatLimitReachedMessage(
   }
   return `⚠️ 聊天室已达到总消息上限，即将自动关闭`;
 }
+
+// ============================================================================
+// 协作任务格式化
+// ============================================================================
+
+/**
+ * 格式化协作任务启动横幅
+ */
+export function formatCollaborativeBanner(
+  participants: string[],
+  displayNames: Record<string, string>,
+  leadCharacterId: string,
+): string {
+  const leadIcon = CHARACTER_ICONS[leadCharacterId]?.icon ?? "💬";
+  const leadName = displayNames[leadCharacterId] ?? leadCharacterId;
+  const allNames = participants
+    .map((id) => {
+      const icon = CHARACTER_ICONS[id]?.icon ?? "💬";
+      return `${icon}${displayNames[id] ?? id}`;
+    })
+    .join(" · ");
+
+  return [
+    `╔══════════════════════════════════════╗`,
+    `║  🤝 协作任务模式启动                   ║`,
+    `║  参与者：${allNames}`,
+    `║  执行主导：${leadIcon}${leadName}`,
+    `╚══════════════════════════════════════╝`,
+  ].join("\n");
+}
+
+/**
+ * 格式化规划阶段结果
+ */
+export function formatPlanningPhase(responses: CharacterResponse[]): string {
+  const parts: string[] = [];
+  parts.push(`📋 **Phase 1 — 姐妹规划讨论** ———`);
+  parts.push(``);
+
+  for (const resp of responses) {
+    const icon = CHARACTER_ICONS[resp.characterId]?.icon ?? "💬";
+    parts.push(`${icon} ${resp.displayName} 的方案：`);
+    parts.push(resp.content);
+    parts.push(``);
+  }
+
+  parts.push(`📋 规划讨论结束 ———`);
+  return parts.join("\n");
+}
+
+/**
+ * 格式化执行阶段结果
+ */
+export function formatExecutionPhase(
+  leadResponse: CharacterResponse,
+  durationMs: number,
+): string {
+  const icon = CHARACTER_ICONS[leadResponse.characterId]?.icon ?? "💬";
+  const seconds = Math.round(durationMs / 1000);
+
+  const parts: string[] = [];
+  parts.push(`⚡ **Phase 2 — ${icon}${leadResponse.displayName} 执行任务** (${seconds}s) ———`);
+  parts.push(``);
+  parts.push(leadResponse.content);
+  parts.push(``);
+  parts.push(`⚡ 执行阶段结束 ———`);
+  return parts.join("\n");
+}
+
+/**
+ * 格式化互检阶段结果
+ */
+export function formatReviewPhase(responses: CharacterResponse[]): string {
+  const parts: string[] = [];
+  parts.push(`🔍 **Phase 3 — 姐妹互检** ———`);
+  parts.push(``);
+
+  for (const resp of responses) {
+    const icon = CHARACTER_ICONS[resp.characterId]?.icon ?? "💬";
+    parts.push(`${icon} ${resp.displayName} 的审查意见：`);
+    parts.push(resp.content);
+    parts.push(``);
+  }
+
+  parts.push(`🔍 互检结束 ———`);
+  return parts.join("\n");
+}

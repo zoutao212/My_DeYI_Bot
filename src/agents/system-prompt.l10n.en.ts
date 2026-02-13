@@ -89,6 +89,13 @@ export type SystemPromptL10n = {
   taskDecompositionStorageLine1: string;
   taskDecompositionStorageLine2: string;
   taskDecompositionStorageLine3: string;
+  // P120: 精简版任务分解指导（minimal + characterName 模式使用）
+  taskDecompositionCompactTitle: string;
+  taskDecompositionCompactIntro: string;
+  taskDecompositionCompactLine1: string;
+  taskDecompositionCompactLine2: string;
+  taskDecompositionCompactLine3: string;
+  taskDecompositionCompactGuideline: string;
   toolParamsQuickRef: string;
   cliQuickRefTitle: string;
   cliQuickRefIntro: string;
@@ -348,6 +355,13 @@ export const SYSTEM_PROMPT_L10N_EN: SystemPromptL10n = {
   taskDecompositionStorageLine1: "**Quality assessment**: System automatically assesses quality, AI autonomously decides (continue/adjust/restart/overthrow)",
   taskDecompositionStorageLine2: "**Failure learning**: System records failure reasons, extracts lessons, injects experience into new task trees",
   taskDecompositionStorageLine3: "**Task tree storage**: Automatically saved to `~/.clawdbot/tasks/{sessionId}/TASK_TREE.json`, supports recovery and version rollback",
+  // P120: 精简版任务分解指导（minimal + characterName 模式使用）
+  taskDecompositionCompactTitle: "## Task Decomposition (Compact)",
+  taskDecompositionCompactIntro: "For complex tasks (multi-step / long text >2000 chars / multi-file / large-scale analysis), use `enqueue_task` to decompose into subtasks.",
+  taskDecompositionCompactLine1: "- Each subtask should be independently executable; the system auto-queues, parallel-executes, reviews, and merges outputs",
+  taskDecompositionCompactLine2: "- Long text creation auto-segments (V4); large file analysis auto-splits via Map-Reduce (V5)",
+  taskDecompositionCompactLine3: "- Use `continue_generation` when single reply cannot complete the output",
+  taskDecompositionCompactGuideline: "- Guideline: prefer enqueue_task for multi-step, long-text (>2000 chars), multi-file, or large-scale analysis tasks",
   toolParamsQuickRef: `## Core Tool Parameters
 - **write(path, content)**: path=file path, content=full content (⚠️ Overwrites entire file!)
 - **edit(path, oldText, newText)**: path=file path, oldText=exact text to replace, newText=replacement text

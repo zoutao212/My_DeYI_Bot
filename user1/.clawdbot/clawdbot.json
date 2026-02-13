@@ -27,7 +27,7 @@
               "cacheRead": 0,
               "cacheWrite": 0
             },
-            "contextWindow": 2000000,
+            "contextWindow": 1000000,
             "maxTokens": 4096,
             "toolCalling": false
           }
@@ -53,7 +53,7 @@
               "cacheRead": 0,
               "cacheWrite": 0
             },
-            "contextWindow": 2000000,
+            "contextWindow": 1000000,
             "maxTokens": 4096,
             "toolCalling": false
           }
@@ -79,7 +79,7 @@
               "cacheRead": 0,
               "cacheWrite": 0
             },
-            "contextWindow": 2000000,
+            "contextWindow": 1000000,
             "maxTokens": 4096,
             "toolCalling": false
           }
@@ -105,7 +105,7 @@
               "cacheRead": 0,
               "cacheWrite": 0
             },
-            "contextWindow": 2000000,
+            "contextWindow": 1000000,
             "maxTokens": 4096
           }
         ]
@@ -130,7 +130,7 @@
               "cacheRead": 0,
               "cacheWrite": 0
             },
-            "contextWindow": 2000000,
+            "contextWindow": 1000000,
             "maxTokens": 4096,
             "toolCalling": false
           }
@@ -156,7 +156,7 @@
               "cacheRead": 0,
               "cacheWrite": 0
             },
-            "contextWindow": 2000000,
+            "contextWindow": 1000000,
             "maxTokens": 4096,
             "toolCalling": false
           }
@@ -182,7 +182,7 @@
               "cacheRead": 0,
               "cacheWrite": 0
             },
-            "contextWindow": 2000000,
+            "contextWindow": 1000000,
             "maxTokens": 4096,
             "toolCalling": false
           }
@@ -208,7 +208,7 @@
               "cacheRead": 0,
               "cacheWrite": 0
             },
-            "contextWindow": 2000000,
+            "contextWindow": 1000000,
             "maxTokens": 4096,
             "toolCalling": false
           }

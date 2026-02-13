@@ -26,8 +26,22 @@ function formatTemplate(template: string, vars: Record<string, string>) {
 function buildTaskDecompositionSection(params: {
   isMinimal: boolean;
   l10n: typeof SYSTEM_PROMPT_L10N_EN;
+  /** P120: 角色名存在时，minimal 模式仍注入精简版任务分解指导 */
+  characterName?: string;
 }) {
-  if (params.isMinimal) return [];
+  if (params.isMinimal && !params.characterName) return [];
+  // P120: minimal + characterName → 精简版（~6行），节省 token 但保留核心指导
+  if (params.isMinimal && params.characterName) {
+    return [
+      params.l10n.taskDecompositionCompactTitle,
+      params.l10n.taskDecompositionCompactIntro,
+      params.l10n.taskDecompositionCompactLine1,
+      params.l10n.taskDecompositionCompactLine2,
+      params.l10n.taskDecompositionCompactLine3,
+      params.l10n.taskDecompositionCompactGuideline,
+      "",
+    ];
+  }
   return [
     params.l10n.taskDecompositionTitle,
     params.l10n.taskDecompositionIntro,
@@ -68,8 +82,11 @@ function buildSkillsSection(params: {
   isMinimal: boolean;
   readToolName: string;
   l10n: typeof SYSTEM_PROMPT_L10N_EN;
+  /** P120: 角色名存在时，minimal 模式仍注入技能段落 */
+  characterName?: string;
 }) {
-  if (params.isMinimal) return [];
+  // P120: 子代理(无 characterName) 跳过；自定义角色保留技能段落
+  if (params.isMinimal && !params.characterName) return [];
   const trimmed = params.skillsPrompt?.trim();
   if (!trimmed) return [];
   return [
@@ -88,8 +105,11 @@ function buildMemorySection(params: {
   isMinimal: boolean;
   availableTools: Set<string>;
   l10n: typeof SYSTEM_PROMPT_L10N_EN;
+  /** P120: 角色名存在时，minimal 模式仍注入记忆段落 */
+  characterName?: string;
 }) {
-  if (params.isMinimal) return [];
+  // P120: 子代理(无 characterName) 跳过；自定义角色保留记忆段落
+  if (params.isMinimal && !params.characterName) return [];
   if (!params.availableTools.has("memory_search") && !params.availableTools.has("memory_get")) {
     return [];
   }
@@ -410,17 +430,20 @@ export function buildAgentSystemPrompt(params: {
   const inlineButtonsEnabled = runtimeCapabilitiesLower.has("inlinebuttons");
   const messageChannelOptions = listDeliverableMessageChannels().join("|");
   const isMinimal = promptMode === "minimal" || promptMode === "none";
+  const characterName = params.characterName;
   const skillsSection = buildSkillsSection({
     skillsPrompt,
     isMinimal,
     readToolName,
     l10n,
+    characterName,
   });
   const taskDecompositionSection = buildTaskDecompositionSection({
     isMinimal,
     l10n,
+    characterName,
   });
-  const memorySection = buildMemorySection({ isMinimal, availableTools, l10n });
+  const memorySection = buildMemorySection({ isMinimal, availableTools, l10n, characterName });
   const docsSection = buildDocsSection({
     docsPath: params.docsPath,
     isMinimal,

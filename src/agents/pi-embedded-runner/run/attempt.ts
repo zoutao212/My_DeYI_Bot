@@ -504,11 +504,21 @@ export async function runEmbeddedAttempt(
         }
       }
       
-      // 🆕 promptMode 逻辑：子代理或角色化对话使用 minimal，否则使用 full
+      // 🆕 promptMode 逻辑：
+      // - 子代理 session → minimal（精简 prompt，节省上下文）
+      // - 系统化身角色（琳娜/德默泽尔/德洛丽丝/丽丝）→ full
+      //   她们是系统的人格化身，需要完整能力：任务分解、记忆工具、技能系统等
+      // - 其他角色 → minimal
+      const SYSTEM_PERSONA_IDS = new Set(["lina", "demerzel", "dolores", "lisi"]);
+      const _isSystemPersona = hookCharacterName ? SYSTEM_PERSONA_IDS.has(hookCharacterName) : false;
       const promptMode = 
-        isSubagentSessionKey(params.sessionKey) || hookCharacterName
+        isSubagentSessionKey(params.sessionKey)
           ? "minimal"
-          : "full";
+          : _isSystemPersona
+            ? "full"
+            : hookCharacterName
+              ? "minimal"
+              : "full";
       
       // Step 3.5: 人格 + 记忆上下文注入（延迟渲染）
       let enhancedExtraSystemPrompt = params.extraSystemPrompt;

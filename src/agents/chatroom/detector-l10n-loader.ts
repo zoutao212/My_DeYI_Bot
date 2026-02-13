@@ -7,8 +7,11 @@
  */
 
 import type { ChatRoomDetectorL10n } from "./detector.l10n.types.js";
+import type { CharacterAgentL10n } from "./character-agent.l10n.types.js";
 import { CHATROOM_DETECTOR_ZH } from "./detector.l10n.zh.js";
 import { CHATROOM_DETECTOR_EN } from "./detector.l10n.en.js";
+import { CHARACTER_AGENT_ZH } from "./character-agent.l10n.zh.js";
+import { CHARACTER_AGENT_EN } from "./character-agent.l10n.en.js";
 
 /** 支持的语言（与 PromptsLoader 一致） */
 export type DetectorLanguage = "zh" | "en";
@@ -35,4 +38,11 @@ export function getDetectorLanguage(): DetectorLanguage {
  */
 export function getDetectorL10n(): ChatRoomDetectorL10n {
   return currentLang === "zh" ? CHATROOM_DETECTOR_ZH : CHATROOM_DETECTOR_EN;
+}
+
+/**
+ * 获取当前语言的角色 Agent 提示词配置
+ */
+export function getCharacterAgentL10n(): CharacterAgentL10n {
+  return currentLang === "zh" ? CHARACTER_AGENT_ZH : CHARACTER_AGENT_EN;
 }

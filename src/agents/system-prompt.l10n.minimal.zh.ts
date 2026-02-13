@@ -130,6 +130,13 @@ export const SYSTEM_PROMPT_L10N_MINIMAL_ZH: SystemPromptL10n = {
   taskDecompositionStorageLine1: "",
   taskDecompositionStorageLine2: "",
   taskDecompositionStorageLine3: "",
+  // P120: 精简版任务分解（子代理不需要，留空）
+  taskDecompositionCompactTitle: "",
+  taskDecompositionCompactIntro: "",
+  taskDecompositionCompactLine1: "",
+  taskDecompositionCompactLine2: "",
+  taskDecompositionCompactLine3: "",
+  taskDecompositionCompactGuideline: "",
   toolParamsQuickRef: "",
   cliQuickRefTitle: "",
   cliQuickRefIntro: "",

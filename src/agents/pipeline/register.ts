@@ -13,6 +13,7 @@ import type { ClawdbotPluginApi } from "../../plugins/types.js";
 import type { CharacterRecognitionConfig, PipelineContext } from "./types.js";
 import { detectChatRoomIntent, handleChatRoomMessage, closeChatRoom, hasActiveSession } from "../chatroom/index.js";
 import { loadConfig } from "../../config/config.js";
+import { analyzeIntentComplexity, buildComplexityGuidance } from "../intelligent-task-decomposition/intent-complexity-analyzer.js";
 
 const log = createSubsystemLogger("pipeline:register");
 
@@ -69,9 +70,56 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
         // 进入/延续聊天室模式
         if (chatRoomResult.isChatRoomMode) {
           log.info(
-            `� [Pipeline] 🏠 聊天室模式触发: participants=${chatRoomResult.participants.join(",")}, ` +
+            `🔵 [Pipeline] 🏠 聊天室模式触发: participants=${chatRoomResult.participants.join(",")}, ` +
             `triggerType=${chatRoomResult.triggerType}`,
           );
+
+          // ── 🧠 复杂任务智能路由：聊天室协作模式 ──
+          // 预分析用户意图复杂度，复杂任务触发三阶段协作流程（不退出聊天室）
+          let complexityHint = "";
+          let collaborativeTaskMode = false;
+          let collaborativeContext: import("../chatroom/types.js").CollaborativeTaskContext | undefined;
+          try {
+            let _crConfig;
+            try { _crConfig = loadConfig(); } catch { /* 静默 */ }
+            const complexityResult = await analyzeIntentComplexity(userMessage, _crConfig ?? undefined);
+            if (complexityResult.strategy === "force_decompose") {
+              // 高复杂度任务：触发聊天室协作模式（规划→执行→互检）
+              collaborativeTaskMode = true;
+              collaborativeContext = {
+                workspaceDir: ctx.workspaceDir ?? "",
+                sessionKey: ctx.sessionKey ?? stateKey,
+                agentId: ctx.agentId,
+                messageProvider: ctx.messageProvider,
+                config: _crConfig ?? undefined,
+                complexityReason: complexityResult.reason,
+              };
+              // 从 config 中提取 provider/model
+              if (_crConfig) {
+                const agentDefaults = (_crConfig as Record<string, any>)?.agents?.defaults;
+                collaborativeContext.provider = agentDefaults?.provider;
+                collaborativeContext.model = agentDefaults?.model?.id;
+              }
+              log.info(
+                `🔵 [Pipeline] 🤝 复杂任务检测 (complexity=${complexityResult.complexity}): ` +
+                `触发聊天室协作模式（规划→执行→互检）`,
+              );
+            }
+            // 中等复杂度：仍进入聊天室，但注入复杂度感知提示
+            if (complexityResult.strategy === "suggest_decompose") {
+              complexityHint =
+                `[🧠 任务提示] 此任务具有一定复杂度（${complexityResult.complexity}）。` +
+                `如果你认为需要更深入的处理，可以建议主人将任务单独交给你或姐妹中的一位全权处理，` +
+                `以便调用任务分解(enqueue_task)等高级能力。\n` +
+                (complexityResult.reason ? `分析：${complexityResult.reason}` : "");
+              log.info(
+                `🔵 [Pipeline] 🧠 中等复杂度任务 (${complexityResult.complexity}): 注入 complexityHint 到聊天室`,
+              );
+            }
+          } catch (err) {
+            log.warn(`🔵 [Pipeline] 🧠 复杂度预判异常，跳过: ${err}`);
+          }
+
           const messages: string[] = [];
           const collectReply = async (text: string) => { messages.push(text); };
           let config;
@@ -83,9 +131,12 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
               participants: chatRoomResult.participants,
               sessionKey: stateKey,
               sendReply: collectReply,
-              callStrategy: "staggered",
+              callStrategy: collaborativeTaskMode ? "sequential" : "staggered",
               interactionMode: chatRoomResult.interactionMode ?? null,
               agentSessionKey: ctx.sessionKey,
+              complexityHint: complexityHint || undefined,
+              collaborativeTaskMode,
+              collaborativeContext,
             },
             config ?? undefined,
           );
@@ -125,9 +176,29 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
         // 如果检测到角色，返回角色名
         if (detectedCharacter) {
           log.info(`🔵 [Pipeline] ✅ Returning characterName: ${detectedCharacter}`);
+
+          // ── 🧠 系统化身能力感知注入 ──
+          // 三位系统化身拥有完整的系统能力，注入能力清单让 LLM 知道可以使用
+          const SYSTEM_PERSONAS = new Set(["lina", "demerzel", "dolores", "lisi"]);
+          let capabilityNote = "";
+          if (SYSTEM_PERSONAS.has(detectedCharacter)) {
+            capabilityNote =
+              `\n\n## 🔧 系统能力（按需使用）\n` +
+              `你是系统的人格化身，拥有以下高级能力：\n` +
+              `- **enqueue_task**：当任务复杂（多步骤/长文本创作/大规模分析）时，使用智能任务分解系统。` +
+              `系统会自动构建任务树、并行执行子任务、质量评估、合并产出。\n` +
+              `- **记忆系统**：memory_search/write/update/delete/list/deep_search/patch — 完整的记忆 CRUD 能力\n` +
+              `- **continue_generation**：单次回复无法完成时，调用续传工具分批输出\n` +
+              `- **文件操作**：read/write/edit/exec/process — 完整文件系统访问\n` +
+              `- **Web 能力**：web_search/web_fetch/browser — 互联网搜索和浏览\n` +
+              `- **技能系统**：可调用已注册的各种技能（Skill）\n` +
+              `\n💡 判断准则：当用户请求涉及多个步骤、长文本生成(>2000字)、多文件操作、` +
+              `大规模数据分析时，优先使用 enqueue_task 进行任务分解。`;
+          }
+
           return {
             characterName: detectedCharacter,
-            prependContext: `\n\n🔵 [Pipeline Active] 动态管道已激活，角色：${detectedCharacter}\n`,
+            prependContext: `\n\n🔵 [Pipeline Active] 动态管道已激活，角色：${detectedCharacter}${capabilityNote}\n`,
           };
         }
         
@@ -187,7 +258,7 @@ function getBuiltinCharacterConfigs(): CharacterRecognitionConfig[] {
     {
       id: "demerzel",
       displayName: "德默泽尔",
-      isSystemPersona: false,
+      isSystemPersona: true,
       recognition: {
         names: ["德默泽尔", "德姨", "demerzel", "爱姬01号", "机械姬"],
         triggers: ["德默泽尔", "01号"],
@@ -197,7 +268,7 @@ function getBuiltinCharacterConfigs(): CharacterRecognitionConfig[] {
     {
       id: "dolores",
       displayName: "德洛丽丝",
-      isSystemPersona: false,
+      isSystemPersona: true,
       recognition: {
         names: ["德洛丽丝", "dolores", "爱姬02号", "多莉", "Dolly", "德妹", "Lola"],
         triggers: ["德洛丽丝", "多莉", "02号"],

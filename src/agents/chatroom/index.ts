@@ -16,6 +16,7 @@ export type {
   ChatRoomTriggerType,
   CallStrategy,
   CharacterResponse,
+  CollaborativeTaskContext,
   InteractionMode,
   MemoryAction,
   MemoryActionResult,
@@ -29,7 +30,11 @@ export { detectChatRoomIntent } from "./detector.js";
 
 // 检测器国际化
 export type { ChatRoomDetectorL10n } from "./detector.l10n.types.js";
-export { setDetectorLanguage, getDetectorLanguage, getDetectorL10n } from "./detector-l10n-loader.js";
+export { setDetectorLanguage, getDetectorLanguage, getDetectorL10n, getCharacterAgentL10n } from "./detector-l10n-loader.js";
+
+// 角色 Agent 国际化
+export type { CharacterAgentL10n } from "./character-agent.l10n.types.js";
+export { fillTemplate } from "./character-agent.l10n.types.js";
 
 // 会话管理
 export {
@@ -48,7 +53,7 @@ export {
 } from "./session.js";
 
 // 角色 Agent
-export { generateCharacterResponse, getCharacterDisplayName, clearPersonaCache } from "./character-agent.js";
+export { generateCharacterResponse, getCharacterDisplayName, clearPersonaCache, executeLeadCharacterWithTools } from "./character-agent.js";
 
 // 格式化器
 export {
@@ -57,6 +62,10 @@ export {
   formatInteractionResponses,
   formatClosingMessage,
   formatLimitReachedMessage,
+  formatCollaborativeBanner,
+  formatPlanningPhase,
+  formatExecutionPhase,
+  formatReviewPhase,
 } from "./formatter.js";
 
 // 编排器
