@@ -157,21 +157,28 @@ export function handleChatEvent(
   } else if (payload.state === "final") {
     const finalText = extractText(payload.message);
     if (typeof finalText === "string" && finalText.trim()) {
-      // 聊天室短路模式下，assistant stream 会先写入带 _chatroomRunId 的临时消息。
-      // chat final 到来时，将最后一条临时消息升级为正式消息（去掉标记字段），
+      // 聊天室短路模式下，assistant stream 会先写入带 _chatroomRunId 的临时消息（每个角色一条）。
+      // chat final 到来时，将所有临时消息升级为正式消息（去掉标记字段），
       // 避免临时消息残留或与正式消息重复。
       const msgs = state.chatMessages as Array<Record<string, unknown>>;
-      let tempIdx = -1;
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i]._chatroomRunId !== undefined) { tempIdx = i; break; }
+      const tempIndices: number[] = [];
+      for (let i = 0; i < msgs.length; i++) {
+        if (msgs[i]._chatroomRunId !== undefined) tempIndices.push(i);
       }
-      if (tempIdx >= 0) {
+      if (tempIndices.length > 0) {
+        // 多条临时消息（聊天室多角色）：逐条升级为正式消息，保留各自的文本内容
         const next = [...msgs];
-        next[tempIdx] = {
-          role: "assistant",
-          content: [{ type: "text", text: finalText }],
-          timestamp: Date.now(),
-        };
+        for (const idx of tempIndices) {
+          const msg = next[idx];
+          const msgText = Array.isArray(msg.content)
+            ? (msg.content[0] as Record<string, unknown>)?.text as string | undefined
+            : undefined;
+          next[idx] = {
+            role: "assistant",
+            content: [{ type: "text", text: msgText ?? finalText }],
+            timestamp: typeof msg.timestamp === "number" ? msg.timestamp : Date.now(),
+          };
+        }
         state.chatMessages = next;
       } else {
         const last = msgs[msgs.length - 1] as

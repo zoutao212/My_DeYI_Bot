@@ -207,20 +207,25 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
       ? payloadSessionKey === host.sessionKey
       : host.chatRunId === payload.runId;
     if (text && sessionMatch) {
-      // 服务端推送的是累积文本（每次 sendReply 都追加），
-      // 需要替换上一条同 runId 的临时消息，而不是每次追加新消息，
-      // 避免重复显示。
-      const tempRunId = payload.runId;
+      // 聊天室多角色模式：每条消息带独立的 messageId，按 messageId 区分不同角色的气泡。
+      // 如果有 messageId，用 messageId 作为临时消息的 key；否则回退到 runId（兼容旧逻辑）。
+      const messageId = typeof data.messageId === "string" ? data.messageId : null;
+      // chatroomMessageText 是本条消息的独立文本（不累积），用于独立气泡显示
+      const chatroomMessageText = typeof data.chatroomMessageText === "string" ? data.chatroomMessageText : null;
+      const tempKey = messageId ?? payload.runId;
       const msgs = host.chatMessages as Array<Record<string, unknown>>;
       let prevIdx = -1;
       for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i]._chatroomRunId === tempRunId) { prevIdx = i; break; }
+        if (msgs[i]._chatroomMsgId === tempKey) { prevIdx = i; break; }
       }
+      // 如果有独立消息文本（chatroomMessageText），用它显示；否则用累积文本
+      const displayText = chatroomMessageText ?? text;
       const message = {
         role: "assistant",
-        content: [{ type: "text", text }],
+        content: [{ type: "text", text: displayText }],
         timestamp: payload.ts,
-        _chatroomRunId: tempRunId,
+        _chatroomRunId: payload.runId,
+        _chatroomMsgId: tempKey,
       };
       if (prevIdx >= 0) {
         const next = [...(host.chatMessages as Array<Record<string, unknown>>)];

@@ -84,6 +84,21 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
           log.info("🔵 [Pipeline] ⚠️ Detected original user message in queue, will still perform character detection");
         }
 
+        // 🛡️ 聊天室系统消息过滤：跳过由聊天室编排器自身生成的系统消息
+        // 这些消息（开场白、"正在思考"提示、互动轮次标题等）不是用户输入，
+        // 不应触发聊天室检测或角色检测，否则 LLM 会自己模拟多角色对话。
+        const isChatRoomSystemMessage =
+          userMessage.trimStart().startsWith("╔") ||
+          userMessage.trimStart().startsWith("║") ||
+          userMessage.trimStart().startsWith("🔄") ||
+          (userMessage.includes("🏠") && userMessage.includes("聊天室")) ||
+          (userMessage.includes("正在思考") && (userMessage.includes("💜") || userMessage.includes("🧡") || userMessage.includes("💙")));
+        
+        if (isChatRoomSystemMessage) {
+          log.info("🔵 [Pipeline] ⚠️ 检测到聊天室系统消息，跳过聊天室/角色检测，直接透传给 LLM");
+          return undefined;
+        }
+
         // ── 聊天室检测（优先级最高，在单角色检测之前） ──
         const characterConfigs = getBuiltinCharacterConfigs();
         const stateKey = ctx.sessionKey ?? ctx.agentId ?? "default";
@@ -174,15 +189,18 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
 
           // 🆕 实时推送：每次 sendReply 时立即通过 emitAgentEvent 推送，
           // 让 UI 在每个角色完成后立即看到内容，而不是等所有角色全部完成。
+          // 每条消息带独立的 messageId，UI 按此区分不同角色的气泡。
+          let collectReplySeq = 0;
           const collectReply = async (text: string) => {
             messages.push(text);
             if (streamRunId) {
               streamAccumulated += (streamAccumulated ? "\n\n" : "") + text;
+              const messageId = `${streamRunId}:msg${collectReplySeq++}`;
               emitAgentEvent({
                 runId: streamRunId,
                 sessionKey: stateKey,
                 stream: "assistant",
-                data: { text: streamAccumulated },
+                data: { text: streamAccumulated, messageId, chatroomMessageText: text },
               });
             }
           };
