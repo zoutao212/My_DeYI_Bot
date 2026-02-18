@@ -33,6 +33,7 @@ type ToolStreamHost = {
   toolStreamById: Map<string, ToolStreamEntry>;
   toolStreamOrder: string[];
   chatToolMessages: Record<string, unknown>[];
+  chatMessages: unknown[];
   toolStreamSyncTimer: number | null;
 };
 
@@ -191,6 +192,34 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
   // Handle compaction events
   if (payload.stream === "compaction") {
     handleCompactionEvent(host as CompactionHost, payload);
+    return;
+  }
+
+  // Handle assistant stream events (chatroom messages)
+  if (payload.stream === "assistant") {
+    const data = payload.data ?? {};
+    const text = typeof data.text === "string" ? data.text : "";
+    if (text && host.chatRunId === payload.runId) {
+      // Add assistant message from chatroom to chat messages
+      const message = {
+        role: "assistant",
+        content: [{ type: "text", text }],
+        timestamp: payload.ts,
+      };
+      // Add to the main chat messages array instead of tool messages
+      host.chatMessages = [...host.chatMessages, message];
+    }
+    return;
+  }
+
+  // Handle lifecycle events
+  if (payload.stream === "lifecycle") {
+    const data = payload.data ?? {};
+    const phase = typeof data.phase === "string" ? data.phase : "";
+    if (phase === "end" && host.chatRunId === payload.runId) {
+      // Clear chat run ID when lifecycle ends
+      host.chatRunId = null;
+    }
     return;
   }
 

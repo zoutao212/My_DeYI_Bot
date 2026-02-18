@@ -1,20 +1,18 @@
-# Clawdbot 快速启动脚本（带智能构建检测）
-# 版本：v20260204_1
-
+# Clawdbot Quick Start Script
 $ErrorActionPreference = "Stop"
 $RepoDir = "E:\myclawdbot"
 $env:CLAWDBOT_CLAUDE_SKIP_PERMISSIONS = "1"
 
 Write-Host "[Start-Clawdbot] Repo: $RepoDir" -ForegroundColor Cyan
 
-# 检查仓库目录
+# Check repo directory
 if (-not (Test-Path "$RepoDir\package.json")) {
     Write-Host "[Start-Clawdbot] ERROR: repo not found at $RepoDir" -ForegroundColor Red
     Read-Host "Press Enter to exit"
     exit 1
 }
 
-# 检查 pnpm
+# Check pnpm
 $pnpmPath = Get-Command pnpm -ErrorAction SilentlyContinue
 if (-not $pnpmPath) {
     Write-Host "[Start-Clawdbot] ERROR: pnpm not found" -ForegroundColor Red
@@ -24,22 +22,20 @@ if (-not $pnpmPath) {
 
 Write-Host "[Start-Clawdbot] pnpm: $($pnpmPath.Source)" -ForegroundColor Gray
 
-# 切换到仓库目录
+# Switch to repo directory
 Push-Location $RepoDir
 
 try {
-    # 停止现有的 Gateway（跳过 - 可能会卡住）
-    Write-Host "[Start-Clawdbot] Skipping gateway stop (use Task Manager if needed)..." -ForegroundColor Yellow
-    # & pnpm run clawdbot gateway stop 2>&1 | Out-Null
-    
     # 智能构建检测
     Write-Host "[Start-Clawdbot] Checking if build is needed..." -ForegroundColor Cyan
     
     $needBuild = $false
+    $needUiBuild = $false
     $distEntry = Join-Path $RepoDir "dist\entry.js"
     $buildStamp = Join-Path $RepoDir "dist\.buildstamp"
+    $controlUiIndex = Join-Path $RepoDir "dist\control-ui\index.html"
     
-    # 检查 dist 和 .buildstamp 是否存在
+    # 检查 TypeScript 构建
     if (-not (Test-Path $distEntry)) {
         Write-Host "[Start-Clawdbot] Build needed: dist\entry.js not found" -ForegroundColor Yellow
         $needBuild = $true
@@ -74,22 +70,64 @@ try {
         }
     }
     
-    # 执行构建（如果需要）
+    # 检查 UI 构建
+    if (-not (Test-Path $controlUiIndex)) {
+        Write-Host "[Start-Clawdbot] UI Build needed: control-ui\index.html not found" -ForegroundColor Yellow
+        $needUiBuild = $true
+    }
+    else {
+        # 检查 ui 目录中的文件是否比构建的UI新
+        if (Test-Path "$RepoDir\ui" -PathType Container) {
+            try {
+                $uiSrcFiles = Get-ChildItem -Path "$RepoDir\ui" -Recurse -File -ErrorAction Stop
+                if ($uiSrcFiles) {
+                    $newestUiSrc = $uiSrcFiles | Measure-Object -Property LastWriteTime -Maximum | Select-Object -ExpandProperty Maximum
+                    $builtUiTime = (Get-Item $controlUiIndex).LastWriteTime
+                    
+                    if ($newestUiSrc -gt $builtUiTime) {
+                        Write-Host "[Start-Clawdbot] UI Build needed: UI source files are newer than build" -ForegroundColor Yellow
+                        $needUiBuild = $true
+                    }
+                }
+            }
+            catch {
+                # UI检查失败，跳过UI构建检查
+                Write-Host "[Start-Clawdbot] UI source check failed, skipping" -ForegroundColor Yellow
+            }
+        }
+    }
+    
+    # 执行 TypeScript 构建（如果需要）
     if ($needBuild) {
         Write-Host "[Start-Clawdbot] Building TypeScript..." -ForegroundColor Yellow
         & pnpm build
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "[Start-Clawdbot] ERROR: Build failed" -ForegroundColor Red
+            Write-Host "[Start-Clawdbot] ERROR: TypeScript build failed" -ForegroundColor Red
             Read-Host "Press Enter to exit"
             exit 1
         }
-        Write-Host "[Start-Clawdbot] Build completed successfully" -ForegroundColor Green
+        Write-Host "[Start-Clawdbot] TypeScript build completed successfully" -ForegroundColor Green
     }
     else {
-        Write-Host "[Start-Clawdbot] Build is up-to-date, skipping build step" -ForegroundColor Green
+        Write-Host "[Start-Clawdbot] TypeScript build is up-to-date, skipping" -ForegroundColor Green
     }
     
-    # 检查并清理端口 18789
+    # 执行 UI 构建（如果需要）
+    if ($needUiBuild) {
+        Write-Host "[Start-Clawdbot] Building Control UI..." -ForegroundColor Yellow
+        & pnpm ui:build
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[Start-Clawdbot] ERROR: UI build failed" -ForegroundColor Red
+            Read-Host "Press Enter to exit"
+            exit 1
+        }
+        Write-Host "[Start-Clawdbot] UI build completed successfully" -ForegroundColor Green
+    }
+    else {
+        Write-Host "[Start-Clawdbot] UI build is up-to-date, skipping" -ForegroundColor Green
+    }
+    
+    # Check and clean port 18789
     Write-Host "[Start-Clawdbot] Checking if port 18789 is still in use..." -ForegroundColor Cyan
     $connections = netstat -ano | Select-String ":18789.*LISTENING"
     if ($connections) {
@@ -99,55 +137,29 @@ try {
         Start-Sleep -Seconds 2
     }
     
-    # 启动 Gateway（新窗口）
+    # Start Gateway in new window
     Write-Host "[Start-Clawdbot] Starting Clawdbot Gateway..." -ForegroundColor Green
     Write-Host "[Start-Clawdbot] Opening a new window for gateway logs..." -ForegroundColor Gray
     
-    # 直接使用 node 运行 dist/entry.js，跳过 pnpm run clawdbot 的自动构建检测
     Start-Process powershell -ArgumentList @(
         "-NoExit",
         "-Command",
-        "cd '$RepoDir'; node dist/entry.js gateway run --bind loopback --port 18789 --force"
+        "cd '$RepoDir'; node dist/entry.js gateway run --bind loopback --port 18789 --allow-unconfigured"
     )
     
-    # 等待 Gateway 健康检查
-    Write-Host "[Start-Clawdbot] Waiting for gateway health..." -ForegroundColor Cyan
-    Write-Host "[Start-Clawdbot] Gateway needs time to initialize (Telegram, plugins, etc.)..." -ForegroundColor Gray
-    Write-Host "[Start-Clawdbot] Waiting 5 seconds for gateway to start..." -ForegroundColor Gray
+    Write-Host "[Start-Clawdbot] Gateway started in new window!" -ForegroundColor Green
+    Write-Host "[Start-Clawdbot] Opening Control UI with token..." -ForegroundColor Gray
     
-    # 先等待 5 秒，让 Gateway 有时间启动
-    for ($i = 1; $i -le 5; $i++) {
-        Start-Sleep -Seconds 1
-        Write-Host "." -NoNewline -ForegroundColor Gray
-    }
-    Write-Host ""
+    # 等待2秒让Gateway完全启动
+    Start-Sleep -Seconds 2
     
-    # 然后开始健康检查
-    $healthy = $false
-    for ($i = 1; $i -le 25; $i++) {
-        Start-Sleep -Seconds 1
-        Write-Host "." -NoNewline -ForegroundColor Gray
-        # 直接使用 node 运行 dist/entry.js，跳过 pnpm run clawdbot 的自动构建检测
-        $healthOutput = & node dist/entry.js gateway health --bind loopback --port 18789 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            $healthy = $true
-            Write-Host ""
-            break
-        }
-    }
-    Write-Host ""
+    # 打开带token的Dashboard
+    $token = "07f14e7c946cd9b4cd521eca7dc602e8560dcfbeb92c0013"
+    Start-Process "http://127.0.0.1:18789/?token=$token"
     
-    if ($healthy) {
-        Write-Host "[Start-Clawdbot] Gateway is healthy!" -ForegroundColor Green
-        Write-Host "[Start-Clawdbot] Gateway is running in the other window." -ForegroundColor Gray
-        Write-Host "[Start-Clawdbot] This window will close in 10 seconds..." -ForegroundColor Gray
-        Start-Sleep -Seconds 10
-    } else {
-        Write-Host "[Start-Clawdbot] Gateway health check timed out after 30 seconds." -ForegroundColor Yellow
-        Write-Host "[Start-Clawdbot] Gateway may still be starting. Check the other window for details." -ForegroundColor Yellow
-        Write-Host "[Start-Clawdbot] Press any key to continue..." -ForegroundColor Gray
-        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-    }
+    Write-Host "[Start-Clawdbot] Control UI opened with authentication!" -ForegroundColor Green
+    Write-Host "[Start-Clawdbot] This window will close in 3 seconds..." -ForegroundColor Gray
+    Start-Sleep -Seconds 3
 }
 finally {
     Pop-Location

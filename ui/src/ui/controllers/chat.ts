@@ -155,6 +155,26 @@ export function handleChatEvent(
       }
     }
   } else if (payload.state === "final") {
+    const finalText = extractText(payload.message);
+    if (typeof finalText === "string" && finalText.trim()) {
+      const last = state.chatMessages[state.chatMessages.length - 1] as
+        | { role?: unknown; content?: unknown }
+        | undefined;
+      const lastRole = typeof last?.role === "string" ? last.role : "";
+      const lastText = last ? extractText(last) : null;
+      const shouldAppend =
+        lastRole !== "assistant" || typeof lastText !== "string" || lastText.trim() !== finalText.trim();
+      if (shouldAppend) {
+        state.chatMessages = [
+          ...state.chatMessages,
+          {
+            role: "assistant",
+            content: [{ type: "text", text: finalText }],
+            timestamp: Date.now(),
+          },
+        ];
+      }
+    }
     state.chatStream = null;
     state.chatRunId = null;
     state.chatStreamStartedAt = null;

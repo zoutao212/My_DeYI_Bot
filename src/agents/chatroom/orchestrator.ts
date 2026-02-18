@@ -132,7 +132,7 @@ export async function handleChatRoomMessage(
   }
 
   // ── 7. 协作任务模式 vs 普通模式 ──
-  if (collaborativeTaskMode && collaborativeContext && activeParticipantsCheck(session, cfg, sendReply, sessionKey, displayNames)) {
+  if (collaborativeTaskMode && collaborativeContext && await activeParticipantsCheck(session, cfg, sendReply, sessionKey, displayNames)) {
     // 🤝 协作任务三阶段流程（force_decompose 触发）
     await executeCollaborativeTask({
       session,
@@ -147,8 +147,6 @@ export async function handleChatRoomMessage(
     });
   } else if (!collaborativeTaskMode) {
     // 普通聊天室模式
-    const recentMessages = getRecentMessages(session, 10);
-
     // 过滤掉已达上限的角色
     const activeParticipants = session.participants.filter((id) =>
       canCharacterReply(session, id, cfg),
@@ -169,37 +167,55 @@ export async function handleChatRoomMessage(
       }
     }
 
-    const responses = await callMultipleAgents({
-      characterIds: activeParticipants,
-      userMessage,
-      participants: session.participants,
-      recentMessages,
-      config,
-      chatroomConfig: cfg,
-      callStrategy,
-      isInteraction: false,
-      agentSessionKey,
-      complexityHint,
-    });
+    // ── 串行调用：每个角色回答后立即写入 session，
+    //    让后发言的角色能在 recentMessages 中看到前面姐妹的内容 ──
+    const responses: CharacterResponse[] = [];
+    for (const characterId of activeParticipants) {
+      const recentMessages = getRecentMessages(session, 10);
+      try {
+        const resp = await generateCharacterResponse({
+          characterId,
+          userMessage,
+          participants: session.participants,
+          recentMessages,
+          config,
+          chatroomConfig: cfg,
+          isInteraction: false,
+          agentSessionKey,
+          complexityHint,
+        });
+        responses.push(resp);
+        // 立即写入 session，让下一个角色能看到
+        addCharacterMessage(session, resp.characterId, resp.displayName, resp.content);
+      } catch (err) {
+        const fallback: CharacterResponse = {
+          characterId,
+          displayName: displayNames[characterId] ?? characterId,
+          content: `（${displayNames[characterId] ?? characterId} 暂时无法回应）`,
+          durationMs: 0,
+          ok: false,
+          error: String(err),
+        };
+        responses.push(fallback);
+      }
+    }
 
     // ── 7.5 汇总记忆动作结果（诊断日志）──
     logMemoryActions(responses);
-
-    // ── 8. 记录角色回答到会话 ──
-    for (const resp of responses) {
-      addCharacterMessage(session, resp.characterId, resp.displayName, resp.content);
-    }
 
     // ── 9. 格式化并发送回答 ──
     const formattedResponse = formatResponses(responses, session);
     await sendReply(formattedResponse);
 
-    // ── 10. 触发互动轮次（如果请求了） ──
-    if (interactionMode && session.interactionRoundsExecuted < cfg.maxInteractionRounds) {
+    // ── 10. 触发互动轮次 ──
+    // 有明确互动模式时用指定模式；普通聊天室消息默认触发一轮 free_chat 互动，
+    // 让角色之间互相回应，形成真正的多轮对话感。
+    const effectiveInteractionMode = interactionMode ?? "free_chat";
+    if (session.interactionRoundsExecuted < cfg.maxInteractionRounds) {
       await executeInteractionRound({
         session,
         responses,
-        mode: interactionMode,
+        mode: effectiveInteractionMode,
         config,
         chatroomConfig: cfg,
         callStrategy,
@@ -419,8 +435,8 @@ async function executeInteractionRound(params: InteractionRoundParams): Promise<
     return;
   }
 
-  // 调用（互评模式：串行更自然；自由聊天/辩论：错峰）
-  const effectiveStrategy: CallStrategy = mode === "review" ? "sequential" : callStrategy;
+  // 统一串行调用：让后发言者能通过 buildProgressiveInteractionHint 看到前面姐妹的互动内容
+  const effectiveStrategy: CallStrategy = "sequential";
 
   const interactionResponses = await callMultipleAgents({
     characterIds: activeParticipants,
@@ -545,21 +561,20 @@ const REVIEW_CONTEXT_MAX_CHARS = 3000;
 /**
  * 检查活跃参与者（公共守卫，协作/普通模式复用）
  */
-function activeParticipantsCheck(
+async function activeParticipantsCheck(
   session: import("./types.js").ChatRoomSession,
   cfg: ChatRoomConfig,
   sendReply: (text: string) => Promise<void>,
   sessionKey: string,
   displayNames: Record<string, string>,
-): boolean {
+): Promise<boolean> {
   const activeParticipants = session.participants.filter((id) =>
     canCharacterReply(session, id, cfg),
   );
   if (activeParticipants.length === 0) {
-    sendReply(formatLimitReachedMessage("", "", "total")).then(() => {
-      sendReply(formatClosingMessage(session));
-      closeSession(sessionKey);
-    });
+    await sendReply(formatLimitReachedMessage("", "", "total"));
+    await sendReply(formatClosingMessage(session));
+    closeSession(sessionKey);
     return false;
   }
   return true;

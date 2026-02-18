@@ -470,14 +470,29 @@ export async function runEmbeddedAttempt(
           if (hookResult?.chatRoomHandled) {
             const chatText = hookResult.chatRoomHandled.responseText;
             log.info(`[attempt] 🏠 聊天室模式短路: ${chatText.length} 字符`);
+            
             // P122: 发出 agent events 让 Web UI 的 server-chat agent event handler 能接收
             // 没有这些事件，Web 网关永远不会调用 emitChatDelta/emitChatFinal
             if (params.runId) {
+              // 首先发出特殊的 chat_room_handled 事件，让 server-chat 提前创建 chat 链接
+              emitAgentEvent({
+                runId: params.runId,
+                stream: "chat_room_handled",
+                data: { 
+                  responseText: chatText,
+                  isChatRoom: true,
+                  participants: hookResult.characterName ? [hookResult.characterName] : undefined
+                },
+              });
+              
+              // 然后发出 assistant stream 事件（用于 chat delta）
               emitAgentEvent({
                 runId: params.runId,
                 stream: "assistant",
                 data: { text: chatText },
               });
+              
+              // 最后发出 lifecycle end 事件（用于 chat final）
               emitAgentEvent({
                 runId: params.runId,
                 stream: "lifecycle",

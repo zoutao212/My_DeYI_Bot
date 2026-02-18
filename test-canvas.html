@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Canvas Connection Test</title>
+</head>
+<body>
+    <h1>Canvas WebSocket Connection Test</h1>
+    <div id="status">Connecting...</div>
+    <div id="messages"></div>
+    
+    <script>
+        const statusEl = document.getElementById('status');
+        const messagesEl = document.getElementById('messages');
+        
+        function log(msg) {
+            console.log(msg);
+            messagesEl.innerHTML += '<div>' + new Date().toLocaleTimeString() + ': ' + msg + '</div>';
+        }
+        
+        // Try to connect to Canvas WebSocket
+        const wsUrl = 'ws://127.0.0.1:18789/__clawdbot/ws';
+        log('Attempting WebSocket connection to: ' + wsUrl);
+        
+        const ws = new WebSocket(wsUrl);
+        
+        ws.onopen = function() {
+            statusEl.textContent = 'Connected!';
+            statusEl.style.color = 'green';
+            log('WebSocket connected successfully');
+            
+            // Send a test message
+            ws.send(JSON.stringify({action: 'hello'}));
+            log('Sent test message: hello');
+        };
+        
+        ws.onmessage = function(event) {
+            log('Received: ' + event.data);
+        };
+        
+        ws.onerror = function(error) {
+            statusEl.textContent = 'Connection Error';
+            statusEl.style.color = 'red';
+            log('WebSocket error: ' + error);
+        };
+        
+        ws.onclose = function(event) {
+            statusEl.textContent = 'Disconnected';
+            statusEl.style.color = 'orange';
+            log('WebSocket closed. Code: ' + event.code + ', Reason: ' + event.reason);
+        };
+        
+        // Test HTTP endpoint
+        fetch('http://127.0.0.1:18789/__clawdbot__/canvas/')
+            .then(response => response.text())
+            .then(html => {
+                log('HTTP Canvas endpoint accessible (status: ' + html.length + ' bytes)');
+            })
+            .catch(error => {
+                log('HTTP Canvas endpoint error: ' + error);
+            });
+    </script>
+</body>
+</html>

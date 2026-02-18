@@ -4,6 +4,9 @@ import { loadSessionEntry } from "./session-utils.js";
 import { formatForLog } from "./ws-log.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../utils/message-channel.js";
 import { appendRuntimeTrace } from "./runtime-log.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
+
+const log = createSubsystemLogger("server-chat");
 
 export type ChatRunEntry = {
   sessionKey: string;
@@ -65,6 +68,7 @@ export type ChatRunState = {
   buffers: Map<string, string>;
   deltaSentAt: Map<string, number>;
   abortedRuns: Map<string, number>;
+  chatRoomHandledRuns: Set<string>;
   clear: () => void;
 };
 
@@ -73,12 +77,14 @@ export function createChatRunState(): ChatRunState {
   const buffers = new Map<string, string>();
   const deltaSentAt = new Map<string, number>();
   const abortedRuns = new Map<string, number>();
+  const chatRoomHandledRuns = new Set<string>();
 
   const clear = () => {
     registry.clear();
     buffers.clear();
     deltaSentAt.clear();
     abortedRuns.clear();
+    chatRoomHandledRuns.clear();
   };
 
   return {
@@ -86,6 +92,7 @@ export function createChatRunState(): ChatRunState {
     buffers,
     deltaSentAt,
     abortedRuns,
+    chatRoomHandledRuns,
     clear,
   };
 }
@@ -264,6 +271,26 @@ export function createAgentEventHandler({
       chatRunState.abortedRuns.has(clientRunId) || chatRunState.abortedRuns.has(evt.runId);
     const agentPayload = sessionKey ? { ...evt, sessionKey } : evt;
     const last = agentRunSeq.get(evt.runId) ?? 0;
+    
+    // 特殊处理聊天室短路模式
+    if (evt.stream === "chat_room_handled" && sessionKey) {
+      log.info(`[server-chat] 🏠 检测到聊天室短路模式，sessionKey=${sessionKey}, runId=${evt.runId}`);
+      
+      // 标记此 runId 为聊天室短路模式
+      chatRunState.chatRoomHandledRuns.add(evt.runId);
+      
+      // 为聊天室模式创建虚拟的 chat 链接（如果不存在）
+      if (!chatLink) {
+        chatRunState.registry.add(evt.runId, {
+          sessionKey,
+          clientRunId,
+        });
+      }
+      
+      // 不直接发送 chat 消息，让后续的 assistant 和 lifecycle 事件处理
+      return;
+    }
+    
     if (evt.stream === "tool" && !shouldEmitToolEvents(evt.runId, sessionKey)) {
       agentRunSeq.set(evt.runId, evt.seq);
       return;
@@ -334,6 +361,11 @@ export function createAgentEventHandler({
     if (sessionKey) {
       nodeSendToSession(sessionKey, "agent", agentPayload);
       if (!isAborted && evt.stream === "assistant" && typeof evt.data?.text === "string") {
+        // 检查是否是聊天室短路模式
+        const isChatRoomHandled = chatRunState.chatRoomHandledRuns.has(evt.runId);
+        if (isChatRoomHandled) {
+          log.info(`[server-chat] 🏠 聊天室短路模式发送 chat delta, sessionKey=${sessionKey}, runId=${evt.runId}`);
+        }
         emitChatDelta(sessionKey, clientRunId, evt.seq, evt.data.text);
       } else if (!isAborted && (lifecyclePhase === "end" || lifecyclePhase === "error")) {
         if (chatLink) {
@@ -341,6 +373,13 @@ export function createAgentEventHandler({
           if (!finished) {
             clearAgentRunContext(evt.runId);
             return;
+          }
+          // 检查是否是聊天室短路模式
+          const isChatRoomHandled = chatRunState.chatRoomHandledRuns.has(evt.runId);
+          if (isChatRoomHandled) {
+            log.info(`[server-chat] 🏠 聊天室短路模式发送 chat final, sessionKey=${finished.sessionKey}, runId=${evt.runId}`);
+            // 清理标记
+            chatRunState.chatRoomHandledRuns.delete(evt.runId);
           }
           emitChatFinal(
             finished.sessionKey,
@@ -350,6 +389,13 @@ export function createAgentEventHandler({
             evt.data?.error,
           );
         } else {
+          // 检查是否是聊天室短路模式
+          const isChatRoomHandled = chatRunState.chatRoomHandledRuns.has(evt.runId);
+          if (isChatRoomHandled) {
+            log.info(`[server-chat] 🏠 聊天室短路模式发送 chat final (no chatLink), sessionKey=${sessionKey}, runId=${evt.runId}`);
+            // 清理标记
+            chatRunState.chatRoomHandledRuns.delete(evt.runId);
+          }
           emitChatFinal(
             sessionKey,
             evt.runId,
@@ -364,6 +410,8 @@ export function createAgentEventHandler({
         chatRunState.buffers.delete(clientRunId);
         chatRunState.deltaSentAt.delete(clientRunId);
         cleanupDeltaTimer(clientRunId);
+        // 清理聊天室标记
+        chatRunState.chatRoomHandledRuns.delete(evt.runId);
         if (chatLink) {
           chatRunState.registry.remove(evt.runId, clientRunId, sessionKey);
         }

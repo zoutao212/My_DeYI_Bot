@@ -72,13 +72,32 @@ function extractText(res: { content: Array<{ type: string; text?: string; thinki
  */
 /**
  * P79: 从 config 中自动检测可用的 provider/model
- * 当未显式指定 provider 时，从 config.models.providers 中查找第一个有配置的 provider，
- * 避免回退到硬编码的 DEFAULT_PROVIDER（anthropic）导致 "No API key found" 错误。
+ * 优先级：1) activeProviderId + activeModelId（UI配置） 2) 第一个有配置的 provider
  */
 function autoDetectProviderFromConfig(config?: ClawdbotConfig): { provider?: string; modelId?: string } {
   if (!config) return {};
   const providers = config.models?.providers;
   if (!providers || typeof providers !== "object") return {};
+  
+  // 优先使用 activeProviderId + activeModelId（UI 配置的选择）
+  const activeProviderId = typeof (config.models as any)?.activeProviderId === "string" 
+    ? (config.models as any).activeProviderId.trim() 
+    : "";
+  const activeModelId = typeof (config.models as any)?.activeModelId === "string" 
+    ? (config.models as any).activeModelId.trim() 
+    : "";
+    
+  if (activeProviderId && activeModelId) {
+    const activeProvider = providers[activeProviderId];
+    if (activeProvider) {
+      const models = (activeProvider as { models?: Array<{ id?: string }> })?.models;
+      if (models && models.some(m => m.id === activeModelId)) {
+        return { provider: activeProviderId, modelId: activeModelId };
+      }
+    }
+  }
+  
+  // 回退：使用第一个有配置的 provider
   for (const [providerKey, providerCfg] of Object.entries(providers)) {
     const trimmed = providerKey.trim();
     if (!trimmed) continue;

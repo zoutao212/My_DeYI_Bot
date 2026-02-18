@@ -139,6 +139,9 @@ export function connectGateway(host: GatewayHost) {
   host.llmApprovalError = null;
 
   host.client?.stop();
+  // 断连时若有活跃 run，记录下来；重连后 onHello 据此跳过 loadChatHistory，
+  // 避免会话文件未落盘时把本地消息（含用户消息）覆盖成空列表。
+  let hadRunOnDisconnect = false;
   host.client = new GatewayBrowserClient({
     url: host.settings.gatewayUrl,
     token: host.settings.token.trim() ? host.settings.token : undefined,
@@ -155,11 +158,19 @@ export function connectGateway(host: GatewayHost) {
       void loadNodes(host as unknown as ClawdbotApp, { quiet: true });
       void loadDevices(host as unknown as ClawdbotApp, { quiet: true });
       void refreshActiveTab(host as unknown as Parameters<typeof refreshActiveTab>[0]);
-      void loadChatHistory(host as unknown as ClawdbotApp);
+      // 重连时若断连前有活跃 run，跳过 loadChatHistory：
+      // 聊天室短路模式下，会话文件尚未落盘，立即回读会把本地消息（含用户消息）覆盖成空列表。
+      // run 结束后 chat.final 事件会负责更新 UI，无需在此回读。
+      const skipLoad = hadRunOnDisconnect || Boolean(host.chatRunId);
+      hadRunOnDisconnect = false;
+      if (!skipLoad) {
+        void loadChatHistory(host as unknown as ClawdbotApp);
+      }
     },
     onClose: ({ code, reason }) => {
       host.connected = false;
       if (host.chatRunId) {
+        hadRunOnDisconnect = true;
         host.chatRunId = null;
         resetToolStream(host as unknown as Parameters<typeof resetToolStream>[0]);
       }
@@ -291,7 +302,12 @@ function handleGatewayEventUnsafe(host: GatewayHost, evt: GatewayEventFrame) {
         host as unknown as Parameters<typeof flushChatQueueForEvent>[0],
       );
     }
-    if (state === "final") void loadChatHistory(host as unknown as ClawdbotApp);
+    // 聊天室短路/流式场景下，final 事件可能先于会话文件落盘；
+    // 立即回读历史会把刚写入的本地消息覆盖成空列表，导致 UI 看起来“没显示”。
+    // 仅当 final 不带 message（本地无可显示内容）时再回读历史兜底。
+    if (state === "final" && !payload?.message) {
+      void loadChatHistory(host as unknown as ClawdbotApp);
+    }
     return;
   }
 

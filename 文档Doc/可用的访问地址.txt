@@ -1,0 +1,16 @@
+Clawdbot Gateway 已经成功运行！
+
+从日志可以看到：
+
+✅ Gateway启动: 监听端口 18789 (PID 24732)
+✅ WebSocket: ws://127.0.0.1:18789
+✅ Canvas服务: http://127.0.0.1:18789/__clawdbot__/canvas/
+✅ 浏览器控制: http://127.0.0.1:18791/
+✅ Telegram机器人: @Lina_2026_bot 已启动
+✅ AI模型: vectorengine/gemini-3-flash-preview 已加载
+✅ Pipeline插件: 已注册
+可用的访问地址：
+
+Gateway主服务: http://127.0.0.1:18789
+浏览器控制面板: http://127.0.0.1:18791
+Canvas画板: http://127.0.0.1:18789/__clawdbot__/canvas/
