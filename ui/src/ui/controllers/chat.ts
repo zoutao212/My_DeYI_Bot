@@ -157,22 +157,40 @@ export function handleChatEvent(
   } else if (payload.state === "final") {
     const finalText = extractText(payload.message);
     if (typeof finalText === "string" && finalText.trim()) {
-      const last = state.chatMessages[state.chatMessages.length - 1] as
-        | { role?: unknown; content?: unknown }
-        | undefined;
-      const lastRole = typeof last?.role === "string" ? last.role : "";
-      const lastText = last ? extractText(last) : null;
-      const shouldAppend =
-        lastRole !== "assistant" || typeof lastText !== "string" || lastText.trim() !== finalText.trim();
-      if (shouldAppend) {
-        state.chatMessages = [
-          ...state.chatMessages,
-          {
-            role: "assistant",
-            content: [{ type: "text", text: finalText }],
-            timestamp: Date.now(),
-          },
-        ];
+      // 聊天室短路模式下，assistant stream 会先写入带 _chatroomRunId 的临时消息。
+      // chat final 到来时，将最后一条临时消息升级为正式消息（去掉标记字段），
+      // 避免临时消息残留或与正式消息重复。
+      const msgs = state.chatMessages as Array<Record<string, unknown>>;
+      let tempIdx = -1;
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i]._chatroomRunId !== undefined) { tempIdx = i; break; }
+      }
+      if (tempIdx >= 0) {
+        const next = [...msgs];
+        next[tempIdx] = {
+          role: "assistant",
+          content: [{ type: "text", text: finalText }],
+          timestamp: Date.now(),
+        };
+        state.chatMessages = next;
+      } else {
+        const last = msgs[msgs.length - 1] as
+          | { role?: unknown; content?: unknown }
+          | undefined;
+        const lastRole = typeof last?.role === "string" ? last.role : "";
+        const lastText = last ? extractText(last) : null;
+        const shouldAppend =
+          lastRole !== "assistant" || typeof lastText !== "string" || lastText.trim() !== finalText.trim();
+        if (shouldAppend) {
+          state.chatMessages = [
+            ...state.chatMessages,
+            {
+              role: "assistant",
+              content: [{ type: "text", text: finalText }],
+              timestamp: Date.now(),
+            },
+          ];
+        }
       }
     }
     state.chatStream = null;

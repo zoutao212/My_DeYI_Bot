@@ -199,15 +199,36 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
   if (payload.stream === "assistant") {
     const data = payload.data ?? {};
     const text = typeof data.text === "string" ? data.text : "";
-    if (text && host.chatRunId === payload.runId) {
-      // Add assistant message from chatroom to chat messages
+    // 聊天室短路模式下，payload.runId 是服务端 streamRunId，
+    // 而 host.chatRunId 是客户端 idempotencyKey，两者不同。
+    // 改为：有 sessionKey 时按 sessionKey 匹配，否则按 runId 匹配（兜底）。
+    const payloadSessionKey = typeof payload.sessionKey === "string" ? payload.sessionKey : null;
+    const sessionMatch = payloadSessionKey
+      ? payloadSessionKey === host.sessionKey
+      : host.chatRunId === payload.runId;
+    if (text && sessionMatch) {
+      // 服务端推送的是累积文本（每次 sendReply 都追加），
+      // 需要替换上一条同 runId 的临时消息，而不是每次追加新消息，
+      // 避免重复显示。
+      const tempRunId = payload.runId;
+      const msgs = host.chatMessages as Array<Record<string, unknown>>;
+      let prevIdx = -1;
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i]._chatroomRunId === tempRunId) { prevIdx = i; break; }
+      }
       const message = {
         role: "assistant",
         content: [{ type: "text", text }],
         timestamp: payload.ts,
+        _chatroomRunId: tempRunId,
       };
-      // Add to the main chat messages array instead of tool messages
-      host.chatMessages = [...host.chatMessages, message];
+      if (prevIdx >= 0) {
+        const next = [...(host.chatMessages as Array<Record<string, unknown>>)];
+        next[prevIdx] = message;
+        host.chatMessages = next;
+      } else {
+        host.chatMessages = [...host.chatMessages, message];
+      }
     }
     return;
   }

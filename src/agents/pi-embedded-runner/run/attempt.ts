@@ -448,6 +448,7 @@ export async function runEmbeddedAttempt(
               prompt: actualPrompt,
               metadata: {
                 isQueueTask,  // 🆕 传递 isQueueTask 标记
+                runId: params.runId,  // 🆕 传递 runId，让聊天室 hook 能实时推送
               },
             },
             {
@@ -477,6 +478,7 @@ export async function runEmbeddedAttempt(
               // 首先发出特殊的 chat_room_handled 事件，让 server-chat 提前创建 chat 链接
               emitAgentEvent({
                 runId: params.runId,
+                sessionKey: params.sessionKey,
                 stream: "chat_room_handled",
                 data: { 
                   responseText: chatText,
@@ -485,16 +487,20 @@ export async function runEmbeddedAttempt(
                 },
               });
               
-              // 然后发出 assistant stream 事件（用于 chat delta）
+              // register.ts 的 collectReply 已在每次 sendReply 时实时推送了 assistant delta，
+              // 这里只需发最终完整内容（确保 server-chat buffer 持有正确的 final 内容），
+              // 然后发 lifecycle:end 触发 emitChatFinal。
               emitAgentEvent({
                 runId: params.runId,
+                sessionKey: params.sessionKey,
                 stream: "assistant",
                 data: { text: chatText },
               });
               
-              // 最后发出 lifecycle end 事件（用于 chat final）
+              // 发出 lifecycle end 事件（触发 chat final，UI 把 chatStream 追加到消息列表）
               emitAgentEvent({
                 runId: params.runId,
+                sessionKey: params.sessionKey,
                 stream: "lifecycle",
                 data: { phase: "end", endedAt: Date.now() },
               });
@@ -711,10 +717,14 @@ export async function runEmbeddedAttempt(
         model: params.model,
       });
 
-      const { builtInTools, customTools } = splitSdkTools({
+      const { builtInTools: _builtInToolsRaw, customTools } = splitSdkTools({
         tools,
         sandboxEnabled: !!sandbox?.enabled,
       });
+      // 文本工具模式下，工具已通过 system prompt 文本描述传递，
+      // 不能再把原生工具定义传给 createAgentSession，
+      // 否则 pi-ai 在 Google Generative AI API 下处理工具 schema 时会崩溃。
+      const builtInTools = _isTextToolMode ? [] : _builtInToolsRaw;
 
       // Add client tools (OpenResponses hosted tools) to customTools
       let clientToolCallDetected: { name: string; params: Record<string, unknown> } | null = null;
@@ -724,7 +734,7 @@ export async function runEmbeddedAttempt(
           })
         : [];
 
-      const allCustomTools = [...customTools, ...clientToolDefs];
+      const allCustomTools = _isTextToolMode ? [] : [...customTools, ...clientToolDefs];
 
       ({ session } = await createAgentSession({
         cwd: resolvedWorkspace,

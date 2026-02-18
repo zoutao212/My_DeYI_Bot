@@ -85,6 +85,7 @@ export async function handleChatRoomMessage(
     complexityHint,
     collaborativeTaskMode,
     collaborativeContext,
+    abortSignal,
   } = params;
 
   log.info(
@@ -167,11 +168,27 @@ export async function handleChatRoomMessage(
       }
     }
 
-    // ── 串行调用：每个角色回答后立即写入 session，
-    //    让后发言的角色能在 recentMessages 中看到前面姐妹的内容 ──
+    // ── 串行调用：每个角色回答后立即写入 session 并推送给用户，
+    //    让后发言的角色能在 recentMessages 中看到前面姐妹的内容。
+    //    每轮开始前检查中断信号，中断后停止后续角色的调用。
     const responses: CharacterResponse[] = [];
+    let abortedBySignal = false;
+
     for (const characterId of activeParticipants) {
+      // 中断检查：用户点击"中断"后停止后续角色
+      if (abortSignal?.aborted) {
+        abortedBySignal = true;
+        log.info(`[Orchestrator] 🛑 中断信号触发，跳过角色: ${characterId}`);
+        break;
+      }
+
       const recentMessages = getRecentMessages(session, 10);
+      const icon = CHARACTER_ICONS[characterId]?.icon ?? "💬";
+      const displayName = displayNames[characterId] ?? characterId;
+
+      // 发送"角色正在思考"的即时提示，让用户知道当前在等哪个角色
+      await sendReply(`${icon} **${displayName}** 正在思考…`);
+
       try {
         const resp = await generateCharacterResponse({
           characterId,
@@ -187,42 +204,49 @@ export async function handleChatRoomMessage(
         responses.push(resp);
         // 立即写入 session，让下一个角色能看到
         addCharacterMessage(session, resp.characterId, resp.displayName, resp.content);
+        // 立即推送该角色的回答（不等其他角色）
+        await sendReply(formatSingleCharacterResponse(resp, session, cfg));
       } catch (err) {
         const fallback: CharacterResponse = {
           characterId,
-          displayName: displayNames[characterId] ?? characterId,
-          content: `（${displayNames[characterId] ?? characterId} 暂时无法回应）`,
+          displayName,
+          content: `（${displayName} 暂时无法回应）`,
           durationMs: 0,
           ok: false,
           error: String(err),
         };
         responses.push(fallback);
+        await sendReply(`${icon} **${displayName}**：（暂时无法回应）`);
       }
+    }
+
+    // 中断时发送提示
+    if (abortedBySignal) {
+      await sendReply(`🛑 **聊天室已中断**\n\n您可以继续发送新消息，角色们会重新回应。`);
     }
 
     // ── 7.5 汇总记忆动作结果（诊断日志）──
     logMemoryActions(responses);
 
-    // ── 9. 格式化并发送回答 ──
-    const formattedResponse = formatResponses(responses, session);
-    await sendReply(formattedResponse);
-
-    // ── 10. 触发互动轮次 ──
+    // ── 10. 触发互动轮次（未中断时才执行）──
     // 有明确互动模式时用指定模式；普通聊天室消息默认触发一轮 free_chat 互动，
     // 让角色之间互相回应，形成真正的多轮对话感。
-    const effectiveInteractionMode = interactionMode ?? "free_chat";
-    if (session.interactionRoundsExecuted < cfg.maxInteractionRounds) {
-      await executeInteractionRound({
-        session,
-        responses,
-        mode: effectiveInteractionMode,
-        config,
-        chatroomConfig: cfg,
-        callStrategy,
-        sendReply,
-        agentSessionKey,
-      });
-      session.interactionRoundsExecuted++;
+    if (!abortedBySignal && responses.length > 0) {
+      const effectiveInteractionMode = interactionMode ?? "free_chat";
+      if (session.interactionRoundsExecuted < cfg.maxInteractionRounds) {
+        await executeInteractionRound({
+          session,
+          responses,
+          mode: effectiveInteractionMode,
+          config,
+          chatroomConfig: cfg,
+          callStrategy,
+          sendReply,
+          agentSessionKey,
+          abortSignal,
+        });
+        session.interactionRoundsExecuted++;
+      }
     }
   }
 
@@ -407,6 +431,7 @@ interface InteractionRoundParams {
   callStrategy: CallStrategy;
   sendReply: (text: string) => Promise<void>;
   agentSessionKey?: string;
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -415,12 +440,9 @@ interface InteractionRoundParams {
  * 将前一轮所有回答注入每位角色的上下文，让她们"看到"彼此的回答。
  */
 async function executeInteractionRound(params: InteractionRoundParams): Promise<void> {
-  const { session, responses, mode, config, chatroomConfig, callStrategy, sendReply } = params;
+  const { session, responses, mode, config, chatroomConfig, sendReply, abortSignal } = params;
 
   log.info(`[Orchestrator] 互动轮次: mode=${mode}, round=${session.interactionRoundsExecuted + 1}`);
-
-  // 构建互动上下文提示
-  const interactionHint = buildInteractionHint(responses, mode);
 
   // 收集最近消息（含刚才的回答）
   const recentMessages = getRecentMessages(session, 15);
@@ -435,32 +457,78 @@ async function executeInteractionRound(params: InteractionRoundParams): Promise<
     return;
   }
 
-  // 统一串行调用：让后发言者能通过 buildProgressiveInteractionHint 看到前面姐妹的互动内容
-  const effectiveStrategy: CallStrategy = "sequential";
+  // 发送互动轮次标题
+  await sendReply(`🔄 **${getModeLabel(mode)}** ———`);
 
-  const interactionResponses = await callMultipleAgents({
-    characterIds: activeParticipants,
-    userMessage: `（互动轮次 — ${getModeLabel(mode)}）`,
-    participants: session.participants,
-    recentMessages,
-    config,
-    chatroomConfig,
-    callStrategy: effectiveStrategy,
-    isInteraction: true,
-    interactionHint,
-    previousResponses: responses,
-    interactionMode: mode,
-    agentSessionKey: params.agentSessionKey,
-  });
+  // 串行调用：逐角色推送，后发言者能看到前面姐妹的互动内容
+  const interactionResponses: CharacterResponse[] = [];
 
-  // 记录到会话
-  for (const resp of interactionResponses) {
-    addCharacterMessage(session, resp.characterId, resp.displayName, resp.content, true);
+  for (let i = 0; i < activeParticipants.length; i++) {
+    const characterId = activeParticipants[i];
+
+    // 中断检查
+    if (abortSignal?.aborted) {
+      log.info(`[Orchestrator] 🛑 互动轮次中断，跳过角色: ${characterId}`);
+      break;
+    }
+
+    const icon = CHARACTER_ICONS[characterId]?.icon ?? "💬";
+    const displayName = session.displayNames?.[characterId] ?? characterId;
+
+    // 渐进式上下文：后发言者能看到前面姐妹已完成的互评内容
+    const interactionHint = i === 0
+      ? buildInteractionHint(responses, mode)
+      : buildProgressiveInteractionHint(
+          responses,
+          interactionResponses.filter((r) => r.ok),
+          mode,
+        );
+
+    // 发送"正在思考"提示
+    await sendReply(`${icon} **${displayName}** 正在回应…`);
+
+    try {
+      const resp = await generateCharacterResponse({
+        characterId,
+        userMessage: `（互动轮次 — ${getModeLabel(mode)}）`,
+        participants: session.participants,
+        recentMessages,
+        config,
+        chatroomConfig,
+        isInteraction: true,
+        interactionHint,
+        agentSessionKey: params.agentSessionKey,
+      });
+      interactionResponses.push(resp);
+      addCharacterMessage(session, resp.characterId, resp.displayName, resp.content, true);
+
+      // 立即推送该角色的互动回复
+      const otherNames = responses
+        .filter((r) => r.characterId !== resp.characterId)
+        .map((r) => {
+          const rIcon = CHARACTER_ICONS[r.characterId]?.icon ?? "💬";
+          return `${rIcon}${r.displayName}`;
+        })
+        .join(" & ");
+      const header = (mode === "review" || mode === "debate")
+        ? `${icon} **${resp.displayName}** → 评 ${otherNames}：`
+        : `${icon} **${resp.displayName}**：`;
+      await sendReply(`${header}\n\n${resp.content}`);
+    } catch (err) {
+      const fallback: CharacterResponse = {
+        characterId,
+        displayName,
+        content: `（${displayName} 暂时无法回应）`,
+        durationMs: 0,
+        ok: false,
+        error: String(err),
+      };
+      interactionResponses.push(fallback);
+      await sendReply(`${icon} **${displayName}**：（暂时无法回应）`);
+    }
   }
 
-  // 格式化并发送
-  const formatted = formatInteractionResponses(interactionResponses, mode);
-  await sendReply(formatted);
+  await sendReply(`🔄 ${getModeLabel(mode)}结束 ———`);
 }
 
 /**
@@ -781,4 +849,34 @@ function getModeLabel(mode: InteractionMode): string {
     debate: "观点辩论",
   };
   return labels[mode] ?? mode;
+}
+
+/**
+ * 格式化单个角色的回答（逐角色即时推送专用）
+ *
+ * 与 formatResponses 不同，此函数只格式化一个角色的内容，
+ * 用于串行调用时每个角色完成后立即推送。
+ */
+function formatSingleCharacterResponse(
+  resp: CharacterResponse,
+  session: import("./types.js").ChatRoomSession,
+  cfg: ChatRoomConfig,
+): string {
+  const icon = CHARACTER_ICONS[resp.characterId]?.icon ?? "💬";
+  const parts: string[] = [];
+
+  parts.push(`${icon} **${resp.displayName}**：`);
+  parts.push(resp.content);
+
+  // 记忆操作提示
+  if (resp.memoryActions?.length) {
+    const okCount = resp.memoryActions.filter((a) => a.ok).length;
+    parts.push(`\n📝 记忆操作 ×${okCount}`);
+  }
+
+  // 发言统计（仅在最后一个角色时显示，通过 session 判断）
+  const count = session.replyCounters[resp.characterId] ?? 0;
+  parts.push(`\n📊 ${icon}${resp.displayName} ${count}/${cfg.maxRepliesPerCharacter}`);
+
+  return parts.join("\n");
 }

@@ -112,7 +112,8 @@ function applySessionDefaults(host: GatewayHost, defaults?: SessionDefaultsSnaps
     host.settings.lastActiveSessionKey,
     defaults,
   );
-  const nextSessionKey = resolvedSessionKey || resolvedSettingsSessionKey || host.sessionKey;
+  // 优先用 lastActiveSessionKey（上次活跃 session），避免把用户上次的 session 覆盖为 main
+  const nextSessionKey = resolvedLastActiveSessionKey || resolvedSessionKey || resolvedSettingsSessionKey || host.sessionKey;
   const nextSettings = {
     ...host.settings,
     sessionKey: resolvedSettingsSessionKey || nextSessionKey,

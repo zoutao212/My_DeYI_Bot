@@ -255,6 +255,11 @@ export interface ChatRoomHandleParams {
   collaborativeTaskMode?: boolean;
   /** 协作任务执行上下文（仅 collaborativeTaskMode=true 时需要，提供 agent 全能力上下文） */
   collaborativeContext?: CollaborativeTaskContext;
+  /**
+   * 中断信号：用户点击"中断"按钮后触发，编排器检测到后停止后续角色的 LLM 调用。
+   * 当前角色的调用会继续完成（LLM 不支持中途取消），但不再启动新角色的调用。
+   */
+  abortSignal?: AbortSignal;
 }
 
 /**

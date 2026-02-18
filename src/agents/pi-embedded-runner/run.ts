@@ -92,7 +92,8 @@ export async function runEmbeddedPiAgent(
       const prevCwd = process.cwd();
 
       const provider = (params.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
-      const modelId = (params.model ?? DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+      const rawModelId = (params.model ?? "").trim();
+      const modelId = rawModelId || (provider === DEFAULT_PROVIDER ? DEFAULT_MODEL : "");
       const agentDir = params.agentDir ?? resolveClawdbotAgentDir();
       const fallbackConfigured =
         (params.config?.agents?.defaults?.model?.fallbacks?.length ?? 0) > 0;

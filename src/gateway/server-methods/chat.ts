@@ -37,6 +37,7 @@ import {
   isChatStopCommandText,
   resolveChatRunExpiresAtMs,
 } from "../chat-abort.js";
+import { abortChatRoomSession } from "../../agents/pipeline/register.js";
 import { type ChatImageContent, parseMessageWithAttachments } from "../chat-attachments.js";
 import {
   ErrorCodes,
@@ -981,6 +982,9 @@ export const chatHandlers: GatewayRequestHandlers = {
       broadcast: context.broadcast,
       nodeSendToSession: context.nodeSendToSession,
     };
+
+    // 同时尝试中断聊天室会话（若当前有正在执行的群聊轮次）
+    abortChatRoomSession(sessionKey);
 
     if (!runId) {
       const res = abortChatRunsForSessionKey(ops, {

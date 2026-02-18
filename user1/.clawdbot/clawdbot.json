@@ -230,7 +230,12 @@
           "baseUrl": "http://127.0.0.1:12345/v1",
           "apiKey": ""
         },
-        "model": "text-embedding-jina-embeddings-v3"
+        "model": "text-embedding-jina-embeddings-v3",
+        "store": {
+          "vector": {
+            "enabled": false
+          }
+        }
       },
       "maxConcurrent": 4,
       "showLlmProgress": false,

@@ -291,6 +291,7 @@ export class MemoryIndexManager {
         ? this.searchKeyword(cleaned, candidates).catch(() => [])
         : Promise.resolve([]),
       (async () => {
+        if (!this.vector.enabled) return [];
         const queryVec = await this.embedQueryWithTimeout(cleaned);
         const hasVector = queryVec.some((v) => v !== 0);
         return hasVector
@@ -2140,7 +2141,10 @@ export class MemoryIndexManager {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const attempts = (err as { batchAttempts?: number }).batchAttempts ?? 1;
-      const forceDisable = /asyncBatchEmbedContent not available/i.test(message);
+      const forceDisable =
+        /asyncBatchEmbedContent not available/i.test(message) ||
+        /batch file upload failed: 415/i.test(message) ||
+        /Unsupported Media Type/i.test(message);
       const failure = await this.recordBatchFailure({
         provider: params.provider,
         message,

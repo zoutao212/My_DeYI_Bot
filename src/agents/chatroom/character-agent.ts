@@ -462,13 +462,20 @@ export async function executeLeadCharacterWithTools(params: {
     const extraSystemPrompt = extraParts.filter(Boolean).join("\n");
 
     // 4. 解析 provider/model（优先使用显式指定，回退到 config 默认值）
+    // 严格使用用户配置的 primaryProviderId/primaryModelId，不私自 fallback 到任何硬编码模型。
     const effectiveConfig = collaborativeContext.config ?? config;
+    const agentDefaults = (effectiveConfig as Record<string, any>)?.agents?.defaults;
+    const modelCfg = agentDefaults?.model;
     const provider =
       collaborativeContext.provider ??
-      (effectiveConfig as Record<string, any>)?.agents?.defaults?.provider;
+      modelCfg?.primaryProviderId ??
+      agentDefaults?.provider ??
+      "pi-ai";
     const model =
       collaborativeContext.model ??
-      (effectiveConfig as Record<string, any>)?.agents?.defaults?.model?.id;
+      modelCfg?.primaryModelId ??
+      modelCfg?.id ??
+      undefined;
 
     log.info(
       `[CharacterAgent] 🤝 协作任务执行: ${characterId} (${loaded.displayName}), ` +

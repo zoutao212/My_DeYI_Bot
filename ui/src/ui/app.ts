@@ -131,7 +131,7 @@ export class ClawdbotApp extends LitElement {
   @state() assistantAvatar = injectedAssistantIdentity.avatar;
   @state() assistantAgentId = injectedAssistantIdentity.agentId ?? null;
 
-  @state() sessionKey = this.settings.sessionKey;
+  @state() sessionKey = this.settings.lastActiveSessionKey || this.settings.sessionKey;
   @state() chatLoading = false;
   @state() chatSending = false;
   @state() chatMessage = "";

@@ -316,6 +316,7 @@ export type PluginHookBeforeAgentStartEvent = {
   messages?: unknown[];
   metadata?: {
     isQueueTask?: boolean;  // 🆕 标记是否是队列任务
+    runId?: string;         // 🆕 传递 runId，让聊天室 hook 能实时推送
   };
 };
 
