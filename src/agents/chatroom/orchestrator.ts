@@ -48,6 +48,7 @@ import type {
   CollaborativeTaskContext,
   InteractionMode,
   MemoryActionResult,
+  ReplyStyle,
 } from "./types.js";
 import { DEFAULT_CHATROOM_CONFIG, CHARACTER_ICONS } from "./types.js";
 
@@ -81,12 +82,14 @@ export async function handleChatRoomMessage(
     sendReply,
     callStrategy = "staggered",
     interactionMode = null,
+    replyStyle,
     agentSessionKey,
     complexityHint,
     collaborativeTaskMode,
     collaborativeContext,
     abortSignal,
   } = params;
+  const effectiveReplyStyle = resolveReplyStyle(userMessage, replyStyle);
 
   log.info(
     `[Orchestrator] 聊天室消息: participants=${participants.join(",")}, ` +
@@ -117,6 +120,8 @@ export async function handleChatRoomMessage(
 
   // ── 4. 记录用户消息 ──
   addUserMessage(session, userMessage);
+  // 每次唤醒都重置互动轮次计数，避免历史会话把本轮互动“吃掉”。
+  session.interactionRoundsExecuted = 0;
 
   // ── 5. 检查是否还能继续 ──
   if (!canContinue(session, cfg)) {
@@ -198,6 +203,7 @@ export async function handleChatRoomMessage(
           config,
           chatroomConfig: cfg,
           isInteraction: false,
+          replyStyle: effectiveReplyStyle,
           agentSessionKey,
           complexityHint,
         });
@@ -233,18 +239,28 @@ export async function handleChatRoomMessage(
     // 让角色之间互相回应，形成真正的多轮对话感。
     if (!abortedBySignal && responses.length > 0) {
       const effectiveInteractionMode = interactionMode ?? "free_chat";
-      if (session.interactionRoundsExecuted < cfg.maxInteractionRounds) {
-        await executeInteractionRound({
+      const desiredInteractionRounds = Math.max(
+        0,
+        Math.min(cfg.maxInteractionRounds, cfg.defaultTurnsPerCharacterPerWake - 1),
+      );
+      let seedResponses = responses;
+      for (let round = 0; round < desiredInteractionRounds; round++) {
+        if (abortSignal?.aborted) break;
+        const interactionResponses = await executeInteractionRound({
           session,
-          responses,
+          responses: seedResponses,
           mode: effectiveInteractionMode,
           config,
           chatroomConfig: cfg,
           callStrategy,
           sendReply,
+          replyStyle: effectiveReplyStyle,
           agentSessionKey,
           abortSignal,
         });
+        if (interactionResponses.length === 0) break;
+        logMemoryActions(interactionResponses);
+        seedResponses = interactionResponses;
         session.interactionRoundsExecuted++;
       }
     }
@@ -426,6 +442,7 @@ interface InteractionRoundParams {
   session: import("./types.js").ChatRoomSession;
   responses: CharacterResponse[];
   mode: InteractionMode;
+  replyStyle: ReplyStyle;
   config?: ClawdbotConfig;
   chatroomConfig: ChatRoomConfig;
   callStrategy: CallStrategy;
@@ -439,8 +456,8 @@ interface InteractionRoundParams {
  *
  * 将前一轮所有回答注入每位角色的上下文，让她们"看到"彼此的回答。
  */
-async function executeInteractionRound(params: InteractionRoundParams): Promise<void> {
-  const { session, responses, mode, config, chatroomConfig, sendReply, abortSignal } = params;
+async function executeInteractionRound(params: InteractionRoundParams): Promise<CharacterResponse[]> {
+  const { session, responses, mode, replyStyle, config, chatroomConfig, sendReply, abortSignal } = params;
 
   log.info(`[Orchestrator] 互动轮次: mode=${mode}, round=${session.interactionRoundsExecuted + 1}`);
 
@@ -454,7 +471,7 @@ async function executeInteractionRound(params: InteractionRoundParams): Promise<
 
   if (activeParticipants.length < 2) {
     log.info(`[Orchestrator] 活跃参与者不足 2 人，跳过互动轮次`);
-    return;
+    return [];
   }
 
   // 发送互动轮次标题
@@ -496,6 +513,7 @@ async function executeInteractionRound(params: InteractionRoundParams): Promise<
         config,
         chatroomConfig,
         isInteraction: true,
+        replyStyle,
         interactionHint,
         agentSessionKey: params.agentSessionKey,
       });
@@ -529,6 +547,7 @@ async function executeInteractionRound(params: InteractionRoundParams): Promise<
   }
 
   await sendReply(`🔄 ${getModeLabel(mode)}结束 ———`);
+  return interactionResponses;
 }
 
 /**
@@ -840,6 +859,18 @@ function logMemoryActions(responses: CharacterResponse[]): void {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function resolveReplyStyle(userMessage: string, explicitStyle?: ReplyStyle | null): ReplyStyle {
+  if (explicitStyle) return explicitStyle;
+  const text = userMessage.toLowerCase();
+  if (/\b(action|narration|stage)\b/.test(text) || /动作|旁白|舞台|描写/.test(userMessage)) {
+    return "action";
+  }
+  if (/\b(dialogue|speak)\b/.test(text) || /对话|台词|说话|口语/.test(userMessage)) {
+    return "dialogue";
+  }
+  return "mixed";
 }
 
 function getModeLabel(mode: InteractionMode): string {

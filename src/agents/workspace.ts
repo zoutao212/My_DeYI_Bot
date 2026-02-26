@@ -1,7 +1,6 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { isSubagentSessionKey } from "../routing/session-key.js";
 import { runCommandWithTimeout } from "../process/exec.js";
@@ -27,31 +26,14 @@ export const DEFAULT_USER_FILENAME = "USER.md";
 export const DEFAULT_HEARTBEAT_FILENAME = "HEARTBEAT.md";
 export const DEFAULT_BOOTSTRAP_FILENAME = "BOOTSTRAP.md";
 
-const TEMPLATE_DIR = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "../../docs/reference/templates",
-);
-
-function stripFrontMatter(content: string): string {
-  if (!content.startsWith("---")) return content;
-  const endIndex = content.indexOf("\n---", 3);
-  if (endIndex === -1) return content;
-  const start = endIndex + "\n---".length;
-  let trimmed = content.slice(start);
-  trimmed = trimmed.replace(/^\s+/, "");
-  return trimmed;
-}
-
-async function loadTemplate(name: string): Promise<string> {
-  const templatePath = path.join(TEMPLATE_DIR, name);
-  try {
-    const content = await fs.readFile(templatePath, "utf-8");
-    return stripFrontMatter(content);
-  } catch {
-    throw new Error(
-      `Missing workspace template: ${name} (${templatePath}). Ensure docs/reference/templates are packaged.`,
-    );
-  }
+function getDefaultBootstrapContent(name: WorkspaceBootstrapFileName): string {
+  return [
+    `# ${name}`,
+    "",
+    "此文件由 clawdbot 在本地工作区自动创建。",
+    "请在你的用户目录工作区中按需自定义内容。",
+    "",
+  ].join("\n");
 }
 
 export type WorkspaceBootstrapFileName =
@@ -181,13 +163,13 @@ export async function ensureAgentWorkspace(params?: {
     return existing.every((v) => !v);
   })();
 
-  const agentsTemplate = await loadTemplate(DEFAULT_AGENTS_FILENAME);
-  const soulTemplate = await loadTemplate(DEFAULT_SOUL_FILENAME);
-  const toolsTemplate = await loadTemplate(DEFAULT_TOOLS_FILENAME);
-  const identityTemplate = await loadTemplate(DEFAULT_IDENTITY_FILENAME);
-  const userTemplate = await loadTemplate(DEFAULT_USER_FILENAME);
-  const heartbeatTemplate = await loadTemplate(DEFAULT_HEARTBEAT_FILENAME);
-  const bootstrapTemplate = await loadTemplate(DEFAULT_BOOTSTRAP_FILENAME);
+  const agentsTemplate = getDefaultBootstrapContent(DEFAULT_AGENTS_FILENAME);
+  const soulTemplate = getDefaultBootstrapContent(DEFAULT_SOUL_FILENAME);
+  const toolsTemplate = getDefaultBootstrapContent(DEFAULT_TOOLS_FILENAME);
+  const identityTemplate = getDefaultBootstrapContent(DEFAULT_IDENTITY_FILENAME);
+  const userTemplate = getDefaultBootstrapContent(DEFAULT_USER_FILENAME);
+  const heartbeatTemplate = getDefaultBootstrapContent(DEFAULT_HEARTBEAT_FILENAME);
+  const bootstrapTemplate = getDefaultBootstrapContent(DEFAULT_BOOTSTRAP_FILENAME);
 
   await writeFileIfMissing(agentsPath, agentsTemplate);
   await writeFileIfMissing(soulPath, soulTemplate);

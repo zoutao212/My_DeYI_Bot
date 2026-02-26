@@ -22,6 +22,8 @@ export type ChatEventPayload = {
   runId: string;
   sessionKey: string;
   state: "delta" | "final" | "aborted" | "error";
+  messageId?: string;
+  chatroomMessageText?: string;
   message?: unknown;
   errorMessage?: string;
 };
@@ -140,13 +142,47 @@ export function handleChatEvent(
   payload?: ChatEventPayload,
 ) {
   if (!payload) return null;
-  if (payload.sessionKey !== state.sessionKey) return null;
+  const isSameSession = payload.sessionKey === state.sessionKey;
+  const isActiveRunMatch = Boolean(state.chatRunId && payload.runId === state.chatRunId);
+  if (!isSameSession && !isActiveRunMatch) return null;
 
   // NOTE: The gateway may emit a different runId than the client-side idempotencyKey.
   // Do not drop events solely due to runId mismatch, otherwise the UI can get stuck
   // in a loading state until a manual refresh rehydrates history.
 
   if (payload.state === "delta") {
+    const chatroomMessageId = typeof payload.messageId === "string" ? payload.messageId : null;
+    const chatroomMessageText =
+      typeof payload.chatroomMessageText === "string" ? payload.chatroomMessageText : null;
+    if (chatroomMessageId && chatroomMessageText) {
+      const msgs = state.chatMessages as Array<Record<string, unknown>>;
+      let prevIdx = -1;
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i]._chatroomMsgId === chatroomMessageId) {
+          prevIdx = i;
+          break;
+        }
+      }
+      const message = {
+        role: "assistant",
+        messageId: chatroomMessageId,
+        content: [{ type: "text", text: chatroomMessageText }],
+        timestamp: Date.now(),
+        _chatroomRunId: payload.runId,
+        _chatroomMsgId: chatroomMessageId,
+      };
+      if (prevIdx >= 0) {
+        const next = [...msgs];
+        next[prevIdx] = message;
+        state.chatMessages = next;
+      } else {
+        state.chatMessages = [...msgs, message];
+      }
+      // 聊天室分条推送时，优先展示落地气泡，不再额外显示累计 stream 气泡。
+      state.chatStream = null;
+      return payload.state;
+    }
+
     const next = extractText(payload.message);
     if (typeof next === "string") {
       const current = state.chatStream ?? "";
@@ -173,8 +209,10 @@ export function handleChatEvent(
           const msgText = Array.isArray(msg.content)
             ? (msg.content[0] as Record<string, unknown>)?.text as string | undefined
             : undefined;
+          const msgId = typeof msg._chatroomMsgId === "string" ? msg._chatroomMsgId : undefined;
           next[idx] = {
             role: "assistant",
+            messageId: msgId,
             content: [{ type: "text", text: msgText ?? finalText }],
             timestamp: typeof msg.timestamp === "number" ? msg.timestamp : Date.now(),
           };

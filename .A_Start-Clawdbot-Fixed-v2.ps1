@@ -1,6 +1,6 @@
 # Clawdbot Quick Start Script - Version 2
 $ErrorActionPreference = "Stop"
-$RepoDir = "E:\myclawdbot"
+$RepoDir = "D:\Git_GitHub\clawdbot"
 $env:CLAWDBOT_CLAUDE_SKIP_PERMISSIONS = "1"
 
 Write-Host "[Start-Clawdbot] Repo: $RepoDir" -ForegroundColor Cyan

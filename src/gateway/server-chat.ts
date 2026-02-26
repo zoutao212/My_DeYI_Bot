@@ -126,13 +126,21 @@ export function createAgentEventHandler({
   // 避免最后一个 delta 被吞掉导致前端文字滞后
   const deltaTrailingTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-  const sendDeltaNow = (sessionKey: string, clientRunId: string, seq: number, text: string) => {
+  const sendDeltaNow = (
+    sessionKey: string,
+    clientRunId: string,
+    seq: number,
+    text: string,
+    extras?: { messageId?: string; chatroomMessageText?: string },
+  ) => {
     chatRunState.deltaSentAt.set(clientRunId, Date.now());
     const payload = {
       runId: clientRunId,
       sessionKey,
       seq,
       state: "delta" as const,
+      messageId: extras?.messageId,
+      chatroomMessageText: extras?.chatroomMessageText,
       message: {
         role: "assistant",
         content: [{ type: "text", text }],
@@ -143,7 +151,13 @@ export function createAgentEventHandler({
     nodeSendToSession(sessionKey, "chat", payload);
   };
 
-  const emitChatDelta = (sessionKey: string, clientRunId: string, seq: number, text: string) => {
+  const emitChatDelta = (
+    sessionKey: string,
+    clientRunId: string,
+    seq: number,
+    text: string,
+    extras?: { messageId?: string; chatroomMessageText?: string },
+  ) => {
     // 首个 chunk 接收日志：在 deltaSentAt 中还没有记录时输出
     const isFirstChunk = !chatRunState.deltaSentAt.has(clientRunId);
     if (isFirstChunk) {
@@ -165,7 +179,7 @@ export function createAgentEventHandler({
 
     if (elapsed >= 150) {
       // 超过节流窗口，立即发送
-      sendDeltaNow(sessionKey, clientRunId, seq, text);
+      sendDeltaNow(sessionKey, clientRunId, seq, text, extras);
     } else {
       // 在节流窗口内，设置 trailing timer 确保窗口结束后发送
       const delay = 150 - elapsed;
@@ -175,7 +189,7 @@ export function createAgentEventHandler({
           deltaTrailingTimers.delete(clientRunId);
           const latestText = chatRunState.buffers.get(clientRunId);
           if (latestText != null) {
-            sendDeltaNow(sessionKey, clientRunId, seq, latestText);
+            sendDeltaNow(sessionKey, clientRunId, seq, latestText, extras);
           }
         }, delay),
       );
@@ -369,7 +383,13 @@ export function createAgentEventHandler({
         if (isChatRoomHandled) {
           log.info(`[server-chat] 🏠 聊天室短路模式发送 chat delta, sessionKey=${sessionKey}, runId=${evt.runId}`);
         }
-        emitChatDelta(sessionKey, clientRunId, evt.seq, evt.data.text);
+        const messageId = typeof evt.data?.messageId === "string" ? evt.data.messageId : undefined;
+        const chatroomMessageText =
+          typeof evt.data?.chatroomMessageText === "string" ? evt.data.chatroomMessageText : undefined;
+        emitChatDelta(sessionKey, clientRunId, evt.seq, evt.data.text, {
+          messageId,
+          chatroomMessageText,
+        });
       } else if (!isAborted && (lifecyclePhase === "end" || lifecyclePhase === "error")) {
         if (chatLink) {
           const finished = chatRunState.registry.shift(evt.runId);

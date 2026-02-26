@@ -18,6 +18,21 @@ import { emitAgentEvent } from "../../infra/agent-events.js";
 
 const log = createSubsystemLogger("pipeline:register");
 
+function resolveStreamRunId(params: {
+  metadataRunId?: string;
+  userMessage: string;
+}): string | undefined {
+  if (typeof params.metadataRunId === "string" && params.metadataRunId.trim()) {
+    return params.metadataRunId.trim();
+  }
+  const markerMatch = params.userMessage.match(/\[message_id:\s*([^\]]+)\]/i);
+  const markerId = markerMatch?.[1]?.trim();
+  if (markerId) return markerId;
+  const runIdMatch = params.userMessage.match(/runId\s*[:=]\s*([0-9a-f-]{16,})/i);
+  const runId = runIdMatch?.[1]?.trim();
+  return runId || undefined;
+}
+
 // ============================================================================
 // 聊天室会话级中断控制器
 // ============================================================================
@@ -170,7 +185,13 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
           }
 
           const messages: string[] = [];
-          const streamRunId = event.metadata?.runId;
+          const streamRunId = resolveStreamRunId({
+            metadataRunId: event.metadata?.runId,
+            userMessage,
+          });
+          if (!event.metadata?.runId && streamRunId) {
+            log.info(`🔵 [Pipeline] 使用消息标记回退 runId: ${streamRunId}`);
+          }
           let streamAccumulated = "";
           let config;
           try { config = loadConfig(); } catch { /* 静默 */ }

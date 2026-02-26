@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-set "REPO_DIR=E:\myclawdbot"
+set "REPO_DIR=D:\Git_GitHub\clawdbot"
 
 echo ========================================
 echo   Clawdbot Full Build

@@ -23,6 +23,8 @@ export const CHATROOM_DETECTOR_ZH: ChatRoomDetectorL10n = {
     /@(?:all|三位|全体)/,
     // P119b: 直接关键词唤醒聊天室
     /聊天室模式/,
+    /群聊模式/,
+    /群聊测试/,
     /聊天模式/,
     /闲聊模式/,
     /闲谈模式/,

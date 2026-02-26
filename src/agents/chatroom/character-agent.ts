@@ -19,7 +19,13 @@ import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { runEmbeddedPiAgent } from "../pi-embedded.js";
 import { getCharacterService } from "../pipeline/characters/character-service.js";
 import { createSystemLLMCaller } from "../intelligent-task-decomposition/system-llm-caller.js";
-import type { ChatRoomMessage, CharacterResponse, ChatRoomConfig, CollaborativeTaskContext } from "./types.js";
+import type {
+  ChatRoomMessage,
+  CharacterResponse,
+  ChatRoomConfig,
+  CollaborativeTaskContext,
+  ReplyStyle,
+} from "./types.js";
 import { DEFAULT_CHATROOM_CONFIG, CHARACTER_ICONS } from "./types.js";
 import {
   fetchMemoryContext,
@@ -40,6 +46,30 @@ const log = createSubsystemLogger("chatroom:agent");
 interface CachedPersona {
   systemPrompt: string;
   displayName: string;
+}
+
+function buildReplyStyleInstruction(style: ReplyStyle): string {
+  switch (style) {
+    case "dialogue":
+      return [
+        "## 🎭 回复风格要求",
+        "本轮优先使用自然口语化对话回复，不要大段舞台动作描写。",
+        "可以有少量动作点缀，但主体必须是角色说的话。",
+      ].join("\n");
+    case "action":
+      return [
+        "## 🎭 回复风格要求",
+        "本轮优先使用动作/场景描写式表达（可含心理活动与舞台说明）。",
+        "可以夹带少量台词，但主体应是动作与氛围描写。",
+      ].join("\n");
+    case "mixed":
+    default:
+      return [
+        "## 🎭 回复风格要求",
+        "本轮允许你自由选择“对话”或“动作描写”风格，也可以混合使用。",
+        "根据上下文选择最自然、最有角色感的表达方式。",
+      ].join("\n");
+  }
 }
 
 /** 角色 persona 缓存：characterId → { systemPrompt, displayName } */
@@ -177,6 +207,8 @@ export async function generateCharacterResponse(params: {
   config?: ClawdbotConfig;
   chatroomConfig?: Partial<ChatRoomConfig>;
   isInteraction?: boolean;
+  /** 回复风格（dialogue/action/mixed） */
+  replyStyle?: ReplyStyle;
   interactionHint?: string;
   /** agent session key（用于记忆工具的工作区路径解析） */
   agentSessionKey?: string;
@@ -193,6 +225,7 @@ export async function generateCharacterResponse(params: {
     config,
     chatroomConfig,
     isInteraction = false,
+    replyStyle = "mixed",
     interactionHint,
     agentSessionKey,
     enableMemory = true,
@@ -264,6 +297,7 @@ export async function generateCharacterResponse(params: {
     if (complexityHint) {
       promptParts.push(`\n\n${complexityHint}`);
     }
+    promptParts.push(`\n\n${buildReplyStyleInstruction(replyStyle)}`);
     promptParts.push(`\n\n${t.masterMessageTitle}\n\n${userMessage}`);
     promptParts.push(`\n\n${fillTemplate(t.replyInstruction, { displayName: loaded.displayName })}`);
     const fullPrompt = promptParts.join("");

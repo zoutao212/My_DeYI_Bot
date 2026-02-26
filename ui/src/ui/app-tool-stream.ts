@@ -203,9 +203,9 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
     // 而 host.chatRunId 是客户端 idempotencyKey，两者不同。
     // 改为：有 sessionKey 时按 sessionKey 匹配，否则按 runId 匹配（兜底）。
     const payloadSessionKey = typeof payload.sessionKey === "string" ? payload.sessionKey : null;
-    const sessionMatch = payloadSessionKey
-      ? payloadSessionKey === host.sessionKey
-      : host.chatRunId === payload.runId;
+    const sessionMatch =
+      (payloadSessionKey ? payloadSessionKey === host.sessionKey : false) ||
+      host.chatRunId === payload.runId;
     if (text && sessionMatch) {
       // 聊天室多角色模式：每条消息带独立的 messageId，按 messageId 区分不同角色的气泡。
       // 如果有 messageId，用 messageId 作为临时消息的 key；否则回退到 runId（兼容旧逻辑）。

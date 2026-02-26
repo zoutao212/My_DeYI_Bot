@@ -22,7 +22,13 @@
 import type { ClawdbotConfig } from "../../config/config.js";
 import { deepGrepSearch, getDefaultMemoryDirs } from "../../memory/local-search.js";
 import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "../agent-scope.js";
-import { createMemoryWriteTool, createMemoryUpdateTool } from "../tools/memory-crud-tool.js";
+import {
+  createMemoryWriteTool,
+  createMemoryUpdateTool,
+  createMemoryDeleteTool,
+  createMemoryListTool,
+  createMemoryDeepSearchTool,
+} from "../tools/memory-crud-tool.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import type {
   MemoryAction,
@@ -45,8 +51,14 @@ const SNIPPET_MAX_CHARS = 400;
 /** 预取记忆搜索超时（ms） */
 const MEMORY_SEARCH_TIMEOUT_MS = 8_000;
 
-/** 记忆动作块的正则（支持 write/append/update 三种类型） */
-const MEMORY_ACTION_PATTERN = /<memory_(write|append|update)\s+path=["']([^"']+)["'](?:\s+old=["']([^"']*?)["'])?>([\s\S]*?)<\/memory_\1>/g;
+/** 写入类记忆动作（write/append/update） */
+const MEMORY_WRITE_ACTION_PATTERN = /<memory_(write|append|update)\s+path=["']([^"']+)["'](?:\s+old=["']([^"']*?)["'])?>([\s\S]*?)<\/memory_\1>/g;
+/** 删除动作（delete） */
+const MEMORY_DELETE_ACTION_PATTERN = /<memory_delete\s+path=["']([^"']+)["']\s*\/?>/g;
+/** 深度搜索动作（search） */
+const MEMORY_SEARCH_ACTION_PATTERN = /<memory_search\s+query=["']([^"']+)["']\s*\/?>/g;
+/** 列表动作（list） */
+const MEMORY_LIST_ACTION_PATTERN = /<memory_list(?:\s+subdir=["']([^"']+)["'])?\s*\/?>/g;
 
 // ============================================================================
 // Phase A: 预取记忆上下文
@@ -156,7 +168,7 @@ export function formatMemoryContextForPrompt(
 export function buildMemoryWriteGuide(characterId: string): string {
   return [
     `## 📝 记忆操作能力`,
-    `你拥有记忆读写权限。如果你认为当前对话中有值得记住的信息（主人的偏好、重要决定、新知识等），`,
+    `你拥有记忆读写查删权限。如果你认为当前对话中有值得记住的信息（主人的偏好、重要决定、新知识等），`,
     `可以在回复末尾添加记忆操作块。系统会自动解析并执行，不会显示给主人。`,
     ``,
     `支持的操作格式：`,
@@ -176,6 +188,15 @@ export function buildMemoryWriteGuide(characterId: string): string {
     `新文本`,
     `</memory_update>`,
     ``,
+    `删除记忆文件：`,
+    `<memory_delete path="characters/${characterId}/memory/obsolete.md" />`,
+    ``,
+    `搜索相关记忆：`,
+    `<memory_search query="主人的最新偏好" />`,
+    ``,
+    `列出记忆目录：`,
+    `<memory_list subdir="characters/${characterId}/memory" />`,
+    ``,
     `注意：`,
     `- 路径相对于工作区根目录`,
     `- 只在确实有值得记住的信息时才使用，不要滥用`,
@@ -191,10 +212,13 @@ export function buildMemoryWriteGuide(characterId: string): string {
 /**
  * 从 LLM 输出文本中解析记忆动作块
  *
- * 支持三种格式：
+ * 支持六种格式：
  * - <memory_write path="...">content</memory_write>
  * - <memory_append path="...">content</memory_append>
  * - <memory_update path="..." old="...">new content</memory_update>
+ * - <memory_delete path="..." />
+ * - <memory_search query="..." />
+ * - <memory_list subdir="..." />
  */
 export function parseMemoryActions(text: string): {
   actions: MemoryAction[];
@@ -204,10 +228,13 @@ export function parseMemoryActions(text: string): {
   let cleanedText = text;
 
   // 重置 lastIndex（全局正则）
-  MEMORY_ACTION_PATTERN.lastIndex = 0;
+  MEMORY_WRITE_ACTION_PATTERN.lastIndex = 0;
+  MEMORY_DELETE_ACTION_PATTERN.lastIndex = 0;
+  MEMORY_SEARCH_ACTION_PATTERN.lastIndex = 0;
+  MEMORY_LIST_ACTION_PATTERN.lastIndex = 0;
 
   let match: RegExpExecArray | null;
-  while ((match = MEMORY_ACTION_PATTERN.exec(text)) !== null) {
+  while ((match = MEMORY_WRITE_ACTION_PATTERN.exec(text)) !== null) {
     const [fullMatch, type, filePath, oldText, content] = match;
     actions.push({
       type: type as MemoryAction["type"],
@@ -216,6 +243,33 @@ export function parseMemoryActions(text: string): {
       oldText: oldText?.trim() || undefined,
     });
     // 从输出文本中移除记忆动作块（不发送给用户）
+    cleanedText = cleanedText.replace(fullMatch, "");
+  }
+
+  while ((match = MEMORY_DELETE_ACTION_PATTERN.exec(text)) !== null) {
+    const [fullMatch, filePath] = match;
+    actions.push({
+      type: "delete",
+      filePath: filePath.trim(),
+    });
+    cleanedText = cleanedText.replace(fullMatch, "");
+  }
+
+  while ((match = MEMORY_SEARCH_ACTION_PATTERN.exec(text)) !== null) {
+    const [fullMatch, query] = match;
+    actions.push({
+      type: "search",
+      query: query.trim(),
+    });
+    cleanedText = cleanedText.replace(fullMatch, "");
+  }
+
+  while ((match = MEMORY_LIST_ACTION_PATTERN.exec(text)) !== null) {
+    const [fullMatch, subDir] = match;
+    actions.push({
+      type: "list",
+      subDir: subDir?.trim() || undefined,
+    });
     cleanedText = cleanedText.replace(fullMatch, "");
   }
 
@@ -251,6 +305,9 @@ export async function executeMemoryActions(
   // 创建工具实例（复用 memory-crud-tool 的完整实现）
   const writeTool = createMemoryWriteTool({ config, agentSessionKey });
   const updateTool = createMemoryUpdateTool({ config, agentSessionKey });
+  const deleteTool = createMemoryDeleteTool({ config, agentSessionKey });
+  const listTool = createMemoryListTool({ config, agentSessionKey });
+  const searchTool = createMemoryDeepSearchTool({ config, agentSessionKey });
 
   for (const action of actions) {
     try {
@@ -260,9 +317,10 @@ export async function executeMemoryActions(
       switch (action.type) {
         case "write":
           if (!writeTool) throw new Error("memory_write 工具不可用");
+          if (!action.filePath) throw new Error("write 操作需要 filePath");
           details = extractToolDetails(await writeTool.execute("chatroom-memory", {
             filePath: action.filePath,
-            content: action.content,
+            content: action.content ?? "",
             mode: "overwrite",
             createDirs: true,
           }));
@@ -270,9 +328,10 @@ export async function executeMemoryActions(
 
         case "append":
           if (!writeTool) throw new Error("memory_write 工具不可用");
+          if (!action.filePath) throw new Error("append 操作需要 filePath");
           details = extractToolDetails(await writeTool.execute("chatroom-memory", {
             filePath: action.filePath,
-            content: action.content,
+            content: action.content ?? "",
             mode: "append",
             createDirs: true,
           }));
@@ -280,12 +339,40 @@ export async function executeMemoryActions(
 
         case "update":
           if (!updateTool) throw new Error("memory_update 工具不可用");
+          if (!action.filePath) throw new Error("update 操作需要 filePath");
           if (!action.oldText) throw new Error("update 操作需要 oldText");
           details = extractToolDetails(await updateTool.execute("chatroom-memory", {
             filePath: action.filePath,
             oldText: action.oldText,
-            newText: action.content,
+            newText: action.content ?? "",
             replaceAll: false,
+          }));
+          break;
+
+        case "delete":
+          if (!deleteTool) throw new Error("memory_delete 工具不可用");
+          if (!action.filePath) throw new Error("delete 操作需要 filePath");
+          details = extractToolDetails(await deleteTool.execute("chatroom-memory", {
+            filePath: action.filePath,
+            confirm: true,
+          }));
+          break;
+
+        case "search":
+          if (!searchTool) throw new Error("memory_deep_search 工具不可用");
+          if (!action.query) throw new Error("search 操作需要 query");
+          details = extractToolDetails(await searchTool.execute("chatroom-memory", {
+            query: action.query,
+            maxResults: 8,
+          }));
+          break;
+
+        case "list":
+          if (!listTool) throw new Error("memory_list 工具不可用");
+          details = extractToolDetails(await listTool.execute("chatroom-memory", {
+            subDir: action.subDir,
+            includeLineCount: false,
+            maxDepth: 3,
           }));
           break;
       }

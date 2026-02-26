@@ -19,8 +19,10 @@ export interface ChatRoomConfig {
   maxRepliesPerCharacter: number;
   /** 单次聊天室会话的最大总消息数（默认 30） */
   maxTotalMessages: number;
-  /** 互动轮次上限（默认 3） */
+  /** 单次唤醒的互动轮次上限（默认 3） */
   maxInteractionRounds: number;
+  /** 每次唤醒每位角色默认发言轮次（含首轮回答，默认 3） */
+  defaultTurnsPerCharacterPerWake: number;
   /** 自由聊天模式的最大总轮次（默认 5） */
   maxFreeChatRounds: number;
   /** 每轮互动中每位角色的最大发言次数（默认 1） */
@@ -44,6 +46,7 @@ export const DEFAULT_CHATROOM_CONFIG: ChatRoomConfig = {
   maxRepliesPerCharacter: 10,
   maxTotalMessages: 30,
   maxInteractionRounds: 3,
+  defaultTurnsPerCharacterPerWake: 3,
   maxFreeChatRounds: 5,
   maxTurnsPerInteractionRound: 1,
   callStaggerDelayMs: 1500,
@@ -68,6 +71,9 @@ export type ChatRoomTriggerType =
 
 /** 互动模式 */
 export type InteractionMode = "review" | "free_chat" | "debate";
+
+/** 回复风格 */
+export type ReplyStyle = "dialogue" | "action" | "mixed";
 
 /**
  * 聊天室检测结果
@@ -179,7 +185,7 @@ export const CHARACTER_ICONS: Record<string, { icon: string; color: string }> = 
 // ============================================================================
 
 /** 记忆动作类型 */
-export type MemoryActionType = "write" | "update" | "append";
+export type MemoryActionType = "write" | "update" | "append" | "delete" | "search" | "list";
 
 /**
  * 角色 LLM 输出中解析出的记忆动作
@@ -188,11 +194,15 @@ export interface MemoryAction {
   /** 动作类型 */
   type: MemoryActionType;
   /** 目标文件路径（相对于工作区） */
-  filePath: string;
+  filePath?: string;
   /** 写入/追加的内容 */
-  content: string;
+  content?: string;
   /** 更新时的旧文本（仅 update 类型） */
   oldText?: string;
+  /** 搜索查询（仅 search 类型） */
+  query?: string;
+  /** 列表子目录（仅 list 类型） */
+  subDir?: string;
 }
 
 /**
@@ -247,6 +257,8 @@ export interface ChatRoomHandleParams {
   callStrategy?: CallStrategy;
   /** 互动模式（null = 仅回答不互动） */
   interactionMode?: InteractionMode | null;
+  /** 回复风格（dialogue=语言为主，action=动作为主，mixed=自由选择） */
+  replyStyle?: ReplyStyle;
   /** agent session key（用于记忆工具的工作区路径解析） */
   agentSessionKey?: string;
   /** 复杂度感知提示（由 register.ts 预分析后注入，传递给角色 agent） */
