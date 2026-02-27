@@ -142,9 +142,24 @@ export function handleChatEvent(
   payload?: ChatEventPayload,
 ) {
   if (!payload) return null;
+  const hasChatroomSplitPayload =
+    typeof payload.messageId === "string" && typeof payload.chatroomMessageText === "string";
   const isSameSession = payload.sessionKey === state.sessionKey;
   const isActiveRunMatch = Boolean(state.chatRunId && payload.runId === state.chatRunId);
-  if (!isSameSession && !isActiveRunMatch) return null;
+  const isActiveChatroomRun = Boolean(state.chatRunId && payload.state === "delta");
+  const shouldAcceptChatroomSplit = hasChatroomSplitPayload && isActiveChatroomRun;
+  if (!isSameSession && !isActiveRunMatch && !shouldAcceptChatroomSplit) {
+    if (hasChatroomSplitPayload) {
+      console.debug("[chat-ui] drop split delta", {
+        reason: "session/run mismatch",
+        payloadRunId: payload.runId,
+        payloadSessionKey: payload.sessionKey,
+        stateSessionKey: state.sessionKey,
+        activeRunId: state.chatRunId,
+      });
+    }
+    return null;
+  }
 
   // NOTE: The gateway may emit a different runId than the client-side idempotencyKey.
   // Do not drop events solely due to runId mismatch, otherwise the UI can get stuck
@@ -155,6 +170,13 @@ export function handleChatEvent(
     const chatroomMessageText =
       typeof payload.chatroomMessageText === "string" ? payload.chatroomMessageText : null;
     if (chatroomMessageId && chatroomMessageText) {
+      console.debug("[chat-ui] accept split delta", {
+        payloadRunId: payload.runId,
+        payloadSessionKey: payload.sessionKey,
+        messageId: chatroomMessageId,
+        textLength: chatroomMessageText.length,
+        activeRunId: state.chatRunId,
+      });
       const msgs = state.chatMessages as Array<Record<string, unknown>>;
       let prevIdx = -1;
       for (let i = msgs.length - 1; i >= 0; i--) {
@@ -192,11 +214,17 @@ export function handleChatEvent(
     }
   } else if (payload.state === "final") {
     const finalText = extractText(payload.message);
+    const msgs = state.chatMessages as Array<Record<string, unknown>>;
+    const hasMatchingTempMessage = msgs.some(
+      (m) => typeof m._chatroomRunId === "string" && m._chatroomRunId === payload.runId,
+    );
+    const shouldCloseActiveRun = Boolean(
+      (state.chatRunId && payload.runId === state.chatRunId) || hasMatchingTempMessage,
+    );
     if (typeof finalText === "string" && finalText.trim()) {
       // 聊天室短路模式下，assistant stream 会先写入带 _chatroomRunId 的临时消息（每个角色一条）。
       // chat final 到来时，将所有临时消息升级为正式消息（去掉标记字段），
       // 避免临时消息残留或与正式消息重复。
-      const msgs = state.chatMessages as Array<Record<string, unknown>>;
       const tempIndices: number[] = [];
       for (let i = 0; i < msgs.length; i++) {
         if (msgs[i]._chatroomRunId !== undefined) tempIndices.push(i);
@@ -239,16 +267,22 @@ export function handleChatEvent(
       }
     }
     state.chatStream = null;
-    state.chatRunId = null;
-    state.chatStreamStartedAt = null;
+    if (shouldCloseActiveRun) {
+      state.chatRunId = null;
+      state.chatStreamStartedAt = null;
+    }
   } else if (payload.state === "aborted") {
     state.chatStream = null;
-    state.chatRunId = null;
-    state.chatStreamStartedAt = null;
+    if (state.chatRunId && payload.runId === state.chatRunId) {
+      state.chatRunId = null;
+      state.chatStreamStartedAt = null;
+    }
   } else if (payload.state === "error") {
     state.chatStream = null;
-    state.chatRunId = null;
-    state.chatStreamStartedAt = null;
+    if (state.chatRunId && payload.runId === state.chatRunId) {
+      state.chatRunId = null;
+      state.chatStreamStartedAt = null;
+    }
     state.lastError = payload.errorMessage ?? "chat error";
   }
   return payload.state;

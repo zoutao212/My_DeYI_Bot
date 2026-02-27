@@ -230,6 +230,7 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
           const abortController = new AbortController();
           CHATROOM_ABORT_CONTROLLERS.set(stateKey, abortController);
 
+          let chatRoomError: unknown = null;
           try {
             await handleChatRoomMessage(
               {
@@ -247,9 +248,23 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
               },
               config ?? undefined,
             );
+          } catch (err) {
+            chatRoomError = err;
+            log.error(`🔵 [Pipeline] 聊天室执行异常: ${err}`);
           } finally {
             // 无论正常完成还是异常，都清理 controller
             CHATROOM_ABORT_CONTROLLERS.delete(stateKey);
+          }
+
+          if (streamRunId) {
+            emitAgentEvent({
+              runId: streamRunId,
+              sessionKey: stateKey,
+              stream: "lifecycle",
+              data: chatRoomError
+                ? { phase: "error", error: String(chatRoomError) }
+                : { phase: "end" },
+            });
           }
 
           log.info(

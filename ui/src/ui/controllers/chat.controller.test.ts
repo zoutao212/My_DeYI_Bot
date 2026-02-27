@@ -73,4 +73,42 @@ describe("handleChatEvent session fallback", () => {
     const first = state.chatMessages[0] as Record<string, unknown>;
     expect(first._chatroomMsgId).toBe("run-1:msg0");
   });
+
+  it("accepts split chatroom delta when session/run both mismatch but active run exists", () => {
+    const state = createState({
+      chatRunId: "run-active",
+      chatMessages: [],
+    });
+
+    const nextState = handleChatEvent(state, {
+      runId: "server-run-x",
+      sessionKey: "alias-mismatch",
+      state: "delta",
+      messageId: "server-run-x:msg9",
+      chatroomMessageText: "琳娜：这条应即时显示",
+    });
+
+    expect(nextState).toBe("delta");
+    expect(state.chatMessages).toHaveLength(1);
+    const first = state.chatMessages[0] as Record<string, unknown>;
+    expect(first._chatroomMsgId).toBe("server-run-x:msg9");
+  });
+
+  it("drops split chatroom delta when no active run", () => {
+    const state = createState({
+      chatRunId: null,
+      chatMessages: [],
+    });
+
+    const nextState = handleChatEvent(state, {
+      runId: "server-run-y",
+      sessionKey: "alias-mismatch",
+      state: "delta",
+      messageId: "server-run-y:msg1",
+      chatroomMessageText: "这条不应被接收",
+    });
+
+    expect(nextState).toBeNull();
+    expect(state.chatMessages).toHaveLength(0);
+  });
 });

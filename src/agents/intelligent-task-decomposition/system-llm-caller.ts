@@ -14,6 +14,8 @@ import { resolveClawdbotAgentDir } from "../agent-paths.js";
 import { getApiKeyForModel, requireApiKey } from "../model-auth.js";
 import { resolveModel } from "../pi-embedded-runner/model.js";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../defaults.js";
+import { FailoverError } from "../failover-error.js";
+import { runWithModelFallback } from "../model-fallback.js";
 import type { LLMCaller } from "./batch-executor.js";
 
 /**
@@ -129,64 +131,51 @@ export function createSystemLLMCaller(params?: SystemLLMCallerConfig): LLMCaller
   return {
     async call(prompt: string): Promise<string> {
       const agentDir = resolveClawdbotAgentDir();
-      const { model, error } = resolveModel(provider, modelId, agentDir, config);
-      if (!model) {
-        throw new Error(`[SystemLLMCaller] 模型解析失败: ${error ?? "未知错误"}`);
-      }
+      const startedAt = Date.now();
 
-      const auth = await getApiKeyForModel({ model, cfg: config, agentDir });
-      const apiKey = requireApiKey(auth, provider);
+      const result = await runWithModelFallback({
+        cfg: config,
+        provider,
+        model: modelId,
+        onError: async (attempt) => {
+          const message = attempt.error instanceof Error ? attempt.error.message : String(attempt.error);
+          console.warn(
+            `[SystemLLMCaller] ⚠️ 模型失败，尝试切换 (${attempt.attempt}/${attempt.total}) ` +
+              `${attempt.provider}/${attempt.model}: ${message}`,
+          );
+        },
+        run: async (attemptProvider, attemptModelId) => {
+          const { model, error } = resolveModel(attemptProvider, attemptModelId, agentDir, config);
+          if (!model) {
+            throw new FailoverError(`[SystemLLMCaller] 模型解析失败: ${error ?? "未知错误"}`, {
+              reason: "format",
+              provider: attemptProvider,
+              model: attemptModelId,
+            });
+          }
 
-      console.log(
-        `[SystemLLMCaller] 调用 LLM: provider=${provider}, model=${modelId}, ` +
-        `api=${model.api}, reasoning=${(model as any).reasoning ?? false}, ` +
-        `prompt长度=${prompt.length}, maxTokens=${maxTokens}`,
-      );
+          const auth = await getApiKeyForModel({ model, cfg: config, agentDir });
+          const apiKey = requireApiKey(auth, attemptProvider);
 
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+          console.log(
+            `[SystemLLMCaller] 调用 LLM: provider=${attemptProvider}, model=${attemptModelId}, ` +
+              `api=${model.api}, reasoning=${(model as any).reasoning ?? false}, ` +
+              `prompt长度=${prompt.length}, maxTokens=${maxTokens}`,
+          );
 
-      // 🆕 长等待控制台日志：每 15 秒输出一次"仍在等待"，避免控制台长时间静默
-      const llmStartTime = Date.now();
-      const waitLogInterval = setInterval(() => {
-        const elapsed = Math.round((Date.now() - llmStartTime) / 1000);
-        console.log(
-          `[SystemLLMCaller] ⏳ 等待 LLM 响应中... (${elapsed}s) ` +
-          `provider=${provider}, model=${modelId}`,
-        );
-      }, 15_000);
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), timeoutMs);
+          const waitLogInterval = setInterval(() => {
+            const elapsed = Math.round((Date.now() - startedAt) / 1000);
+            console.log(
+              `[SystemLLMCaller] ⏳ 等待 LLM 响应中... (${elapsed}s) ` +
+                `provider=${attemptProvider}, model=${attemptModelId}`,
+            );
+          }, 15_000);
 
-      try {
-        const res = await completeSimple(
-          model,
-          {
-            messages: [
-              {
-                role: "user" as const,
-                content: prompt,
-                timestamp: Date.now(),
-              },
-            ],
-          },
-          {
-            apiKey,
-            maxTokens,
-            temperature,
-            signal: controller.signal,
-          },
-        );
-
-        const text = extractText(res as { content: Array<{ type: string; text?: string; thinking?: string }> });
-        console.log(`[SystemLLMCaller] LLM 响应长度: ${text.length}`);
-
-        if (!text) {
-          // P81: 空响应时，如果模型有 reasoning=true，关闭 reasoning 重试一次
-          // Gemini flash 等模型可能不兼容 thinking mode，导致空 text + 空 thinking
-          if ((model as any).reasoning) {
-            console.warn("[SystemLLMCaller] ⚠️ LLM 返回空响应（reasoning=true），关闭 reasoning 重试一次");
-            const noReasoningModel = { ...model, reasoning: false } as typeof model;
-            const retryRes = await completeSimple(
-              noReasoningModel,
+          try {
+            const res = await completeSimple(
+              model,
               {
                 messages: [
                   {
@@ -203,19 +192,51 @@ export function createSystemLLMCaller(params?: SystemLLMCallerConfig): LLMCaller
                 signal: controller.signal,
               },
             );
-            const retryText = extractText(retryRes as { content: Array<{ type: string; text?: string; thinking?: string }> });
-            console.log(`[SystemLLMCaller] P81 重试响应长度: ${retryText.length}`);
-            if (retryText) return retryText;
-          }
-          console.warn("[SystemLLMCaller] ⚠️ LLM 返回空响应，使用默认降级");
-          throw new Error("LLM 返回空响应");
-        }
 
-        return text;
-      } finally {
-        clearInterval(waitLogInterval);
-        clearTimeout(timeout);
-      }
+            const text = extractText(res as { content: Array<{ type: string; text?: string; thinking?: string }> });
+            console.log(`[SystemLLMCaller] LLM 响应长度: ${text.length}`);
+
+            if (text) return text;
+
+            if ((model as any).reasoning) {
+              console.warn("[SystemLLMCaller] ⚠️ LLM 返回空响应（reasoning=true），关闭 reasoning 重试一次");
+              const noReasoningModel = { ...model, reasoning: false } as typeof model;
+              const retryRes = await completeSimple(
+                noReasoningModel,
+                {
+                  messages: [
+                    {
+                      role: "user" as const,
+                      content: prompt,
+                      timestamp: Date.now(),
+                    },
+                  ],
+                },
+                {
+                  apiKey,
+                  maxTokens,
+                  temperature,
+                  signal: controller.signal,
+                },
+              );
+              const retryText = extractText(retryRes as { content: Array<{ type: string; text?: string; thinking?: string }> });
+              console.log(`[SystemLLMCaller] P81 重试响应长度: ${retryText.length}`);
+              if (retryText) return retryText;
+            }
+
+            throw new FailoverError("LLM 返回空响应", {
+              reason: "format",
+              provider: attemptProvider,
+              model: attemptModelId,
+            });
+          } finally {
+            clearInterval(waitLogInterval);
+            clearTimeout(timeout);
+          }
+        },
+      });
+
+      return result.result;
     },
   };
 }

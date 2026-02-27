@@ -191,6 +191,7 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
             ? `${acc.prependContext}\n\n${next.prependContext}`
             : (next.prependContext ?? acc?.prependContext),
         characterName: next.characterName ?? acc?.characterName,  // 🆕 合并 characterName
+        chatRoomHandled: next.chatRoomHandled ?? acc?.chatRoomHandled,
       }),
     );
   }

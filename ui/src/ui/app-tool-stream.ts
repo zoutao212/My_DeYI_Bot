@@ -199,6 +199,9 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
   if (payload.stream === "assistant") {
     const data = payload.data ?? {};
     const text = typeof data.text === "string" ? data.text : "";
+    const messageId = typeof data.messageId === "string" ? data.messageId : null;
+    const chatroomMessageText = typeof data.chatroomMessageText === "string" ? data.chatroomMessageText : null;
+    const hasChatroomSplitPayload = Boolean(messageId && chatroomMessageText);
     // 聊天室短路模式下，payload.runId 是服务端 streamRunId，
     // 而 host.chatRunId 是客户端 idempotencyKey，两者不同。
     // 改为：有 sessionKey 时按 sessionKey 匹配，否则按 runId 匹配（兜底）。
@@ -206,12 +209,21 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
     const sessionMatch =
       (payloadSessionKey ? payloadSessionKey === host.sessionKey : false) ||
       host.chatRunId === payload.runId;
-    if (text && sessionMatch) {
+    const shouldAcceptSplitPayload = hasChatroomSplitPayload && Boolean(host.chatRunId);
+    if (text && (sessionMatch || shouldAcceptSplitPayload)) {
+      if (hasChatroomSplitPayload) {
+        console.debug("[tool-stream] accept split assistant", {
+          payloadRunId: payload.runId,
+          payloadSessionKey,
+          hostSessionKey: host.sessionKey,
+          activeRunId: host.chatRunId,
+          messageId,
+          textLength: chatroomMessageText?.length ?? text.length,
+        });
+      }
       // 聊天室多角色模式：每条消息带独立的 messageId，按 messageId 区分不同角色的气泡。
       // 如果有 messageId，用 messageId 作为临时消息的 key；否则回退到 runId（兼容旧逻辑）。
-      const messageId = typeof data.messageId === "string" ? data.messageId : null;
       // chatroomMessageText 是本条消息的独立文本（不累积），用于独立气泡显示
-      const chatroomMessageText = typeof data.chatroomMessageText === "string" ? data.chatroomMessageText : null;
       const tempKey = messageId ?? payload.runId;
       const msgs = host.chatMessages as Array<Record<string, unknown>>;
       let prevIdx = -1;
@@ -234,6 +246,15 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
       } else {
         host.chatMessages = [...host.chatMessages, message];
       }
+    } else if (hasChatroomSplitPayload) {
+      console.debug("[tool-stream] drop split assistant", {
+        reason: text ? "session/run mismatch" : "empty text",
+        payloadRunId: payload.runId,
+        payloadSessionKey,
+        hostSessionKey: host.sessionKey,
+        activeRunId: host.chatRunId,
+        messageId,
+      });
     }
     return;
   }

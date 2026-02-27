@@ -2,8 +2,11 @@
 $ErrorActionPreference = "Stop"
 $RepoDir = "D:\Git_GitHub\clawdbot"
 $env:CLAWDBOT_CLAUDE_SKIP_PERMISSIONS = "1"
+$env:CLAWDBOT_DEBUG_AGENT_EVENTS = "1"
 
 Write-Host "[Start-Clawdbot] Repo: $RepoDir" -ForegroundColor Cyan
+Write-Host "[Start-Clawdbot] Script: $PSCommandPath" -ForegroundColor DarkGray
+Write-Host "[Start-Clawdbot] ScriptVersion: 2026-02-26-force-build-v3" -ForegroundColor DarkGray
 
 # Check repo directory
 if (-not (Test-Path "$RepoDir\package.json")) {
@@ -29,42 +32,24 @@ try {
     # Smart build detection
     Write-Host "[Start-Clawdbot] Checking if build is needed..." -ForegroundColor Cyan
     
-    $needBuild = $false
-    $needUiBuild = $false
+    # 彻底止损：无条件重建，避免命中旧 dist 导致“代码看似改了但运行没变”
+    $needBuild = $true
+    $needUiBuild = $true
     $distEntry = Join-Path $RepoDir "dist\entry.js"
     $buildStamp = Join-Path $RepoDir "dist\.buildstamp"
     $controlUiIndex = Join-Path $RepoDir "dist\control-ui\index.html"
     
-    # Check TypeScript build
-    if (-not (Test-Path $distEntry)) {
-        Write-Host "[Start-Clawdbot] Build needed: dist\entry.js not found" -ForegroundColor Yellow
-        $needBuild = $true
-    }
-    elseif (-not (Test-Path $buildStamp)) {
-        Write-Host "[Start-Clawdbot] Build needed: .buildstamp not found" -ForegroundColor Yellow
-        $needBuild = $true
-    }
+    Write-Host "[Start-Clawdbot] Force rebuild: pnpm build + pnpm ui:build" -ForegroundColor Yellow
     
-    # Check UI build
-    if (-not (Test-Path $controlUiIndex)) {
-        Write-Host "[Start-Clawdbot] UI Build needed: control-ui\index.html not found" -ForegroundColor Yellow
-        $needUiBuild = $true
+    # 后端构建：无条件执行（止损，避免跑旧 dist）
+    Write-Host "[Start-Clawdbot] Building TypeScript (forced)..." -ForegroundColor Yellow
+    & pnpm build
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[Start-Clawdbot] ERROR: TypeScript build failed" -ForegroundColor Red
+        Read-Host "Press Enter to exit"
+        exit 1
     }
-    
-    # Execute TypeScript build if needed
-    if ($needBuild) {
-        Write-Host "[Start-Clawdbot] Building TypeScript..." -ForegroundColor Yellow
-        & pnpm build
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "[Start-Clawdbot] ERROR: TypeScript build failed" -ForegroundColor Red
-            Read-Host "Press Enter to exit"
-            exit 1
-        }
-        Write-Host "[Start-Clawdbot] TypeScript build completed successfully" -ForegroundColor Green
-    }
-    else {
-        Write-Host "[Start-Clawdbot] TypeScript build is up-to-date, skipping" -ForegroundColor Green
-    }
+    Write-Host "[Start-Clawdbot] TypeScript build completed successfully" -ForegroundColor Green
     
     # Execute UI build if needed
     if ($needUiBuild) {
@@ -114,6 +99,11 @@ try {
     Write-Host "[Start-Clawdbot] Control UI opened with authentication!" -ForegroundColor Green
     Write-Host "[Start-Clawdbot] This window will close in 3 seconds..." -ForegroundColor Gray
     Start-Sleep -Seconds 3
+}
+catch {
+    Write-Host "[Start-Clawdbot] ERROR: $_" -ForegroundColor Red
+    Read-Host "Press Enter to exit"
+    exit 1
 }
 finally {
     Pop-Location

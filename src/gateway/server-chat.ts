@@ -149,6 +149,18 @@ export function createAgentEventHandler({
     };
     broadcast("chat", payload, { dropIfSlow: true });
     nodeSendToSession(sessionKey, "chat", payload);
+
+    // 关键诊断：确保后台一定能看到“chat delta 已发送”
+    if (extras?.messageId && extras?.chatroomMessageText) {
+      const preview =
+        extras.chatroomMessageText.length > 60
+          ? extras.chatroomMessageText.slice(0, 60) + "..."
+          : extras.chatroomMessageText;
+      console.log(
+        `[server-chat] ✅ split-delta sent session=${sessionKey} runId=${clientRunId} seq=${seq} ` +
+          `messageId=${extras.messageId} textLen=${extras.chatroomMessageText.length} preview="${preview}"`,
+      );
+    }
   };
 
   const emitChatDelta = (
@@ -331,6 +343,17 @@ export function createAgentEventHandler({
         }
       } catch {
       }
+    } else if (evt.stream === "assistant" && typeof evt.data?.text === "string") {
+      const messageId = typeof evt.data?.messageId === "string" ? evt.data.messageId : undefined;
+      const chatroomMessageText =
+        typeof evt.data?.chatroomMessageText === "string" ? evt.data.chatroomMessageText : undefined;
+      if (messageId && chatroomMessageText) {
+        // 关键诊断：如果这里出现，说明 agent 事件到了 server-chat，但拿不到 sessionKey，所以无法推送到 Web
+        console.log(
+          `[server-chat] ❌ NO_SESSION_KEY split-delta runId=${evt.runId} clientRunId=${clientRunId} ` +
+            `seq=${evt.seq} messageId=${messageId} textLen=${chatroomMessageText.length}`,
+        );
+      }
     }
 
     if (evt.stream === "lifecycle") {
@@ -386,6 +409,14 @@ export function createAgentEventHandler({
         const messageId = typeof evt.data?.messageId === "string" ? evt.data.messageId : undefined;
         const chatroomMessageText =
           typeof evt.data?.chatroomMessageText === "string" ? evt.data.chatroomMessageText : undefined;
+        if (messageId && chatroomMessageText) {
+          // 关键诊断：log.info 可能被日志级别吞掉，这里强制 console.log
+          console.log(
+            `[server-chat] 🧩 split-delta recv runId=${evt.runId} clientRunId=${clientRunId} ` +
+              `sessionKey=${sessionKey} seq=${evt.seq} messageId=${messageId} ` +
+              `textLen=${chatroomMessageText.length} totalLen=${evt.data.text.length}`,
+          );
+        }
         emitChatDelta(sessionKey, clientRunId, evt.seq, evt.data.text, {
           messageId,
           chatroomMessageText,

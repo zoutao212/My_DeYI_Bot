@@ -4,6 +4,7 @@ setlocal
 set "REPO_DIR=D:\Git_GitHub\clawdbot"
 set CLAWDBOT_CLAUDE_SKIP_PERMISSIONS=1
 set CLAWDBOT_FORCE_BUILD=1
+set CLAWDBOT_DEBUG_AGENT_EVENTS=1
 
 echo [Start-Clawdbot-WebDev] Repo: "%REPO_DIR%"
 
