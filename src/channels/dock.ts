@@ -1,6 +1,7 @@
 import type { ClawdbotConfig } from "../config/config.js";
 import { resolveDiscordAccount } from "../discord/accounts.js";
 import { resolveIMessageAccount } from "../imessage/accounts.js";
+import { resolveSafewAccount } from "../safew/accounts.js";
 import { resolveSignalAccount } from "../signal/accounts.js";
 import { resolveSlackAccount, resolveSlackReplyToMode } from "../slack/accounts.js";
 import { buildSlackThreadingToolContext } from "../slack/threading-tool-context.js";
@@ -17,6 +18,8 @@ import {
   resolveGoogleChatGroupToolPolicy,
   resolveIMessageGroupRequireMention,
   resolveIMessageGroupToolPolicy,
+  resolveSafewGroupRequireMention,
+  resolveSafewGroupToolPolicy,
   resolveSlackGroupRequireMention,
   resolveSlackGroupToolPolicy,
   resolveTelegramGroupRequireMention,
@@ -115,6 +118,42 @@ const DOCKS: Record<ChatChannelId, ChannelDock> = {
     },
     threading: {
       resolveReplyToMode: ({ cfg }) => cfg.channels?.telegram?.replyToMode ?? "first",
+      buildToolContext: ({ context, hasRepliedRef }) => {
+        const threadId = context.MessageThreadId ?? context.ReplyToId;
+        return {
+          currentChannelId: context.To?.trim() || undefined,
+          currentThreadTs: threadId != null ? String(threadId) : undefined,
+          hasRepliedRef,
+        };
+      },
+    },
+  },
+  safew: {
+    id: "safew",
+    capabilities: {
+      chatTypes: ["direct", "group", "channel", "thread"],
+      nativeCommands: true,
+      blockStreaming: true,
+    },
+    outbound: { textChunkLimit: 4000 },
+    config: {
+      resolveAllowFrom: ({ cfg, accountId }) =>
+        (resolveSafewAccount({ cfg, accountId }).config.allowFrom ?? []).map((entry) =>
+          String(entry),
+        ),
+      formatAllowFrom: ({ allowFrom }) =>
+        allowFrom
+          .map((entry) => String(entry).trim())
+          .filter(Boolean)
+          .map((entry) => entry.replace(/^(safew|sw):/i, ""))
+          .map((entry) => entry.toLowerCase()),
+    },
+    groups: {
+      resolveRequireMention: resolveSafewGroupRequireMention,
+      resolveToolPolicy: resolveSafewGroupToolPolicy,
+    },
+    threading: {
+      resolveReplyToMode: ({ cfg }) => cfg.channels?.safew?.replyToMode ?? "first",
       buildToolContext: ({ context, hasRepliedRef }) => {
         const threadId = context.MessageThreadId ?? context.ReplyToId;
         return {

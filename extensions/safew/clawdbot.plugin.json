@@ -1,0 +1,11 @@
+﻿{
+  "id": "safew",
+  "channels": [
+    "safew"
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

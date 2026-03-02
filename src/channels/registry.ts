@@ -6,6 +6,7 @@ import { requireActivePluginRegistry } from "../plugins/runtime.js";
 // register the plugin in its extension entrypoint and keep protocol IDs in sync.
 export const CHAT_CHANNEL_ORDER = [
   "telegram",
+  "safew",
   "whatsapp",
   "discord",
   "googlechat",
@@ -37,6 +38,18 @@ const CHAT_CHANNEL_META: Record<ChatChannelId, ChannelMeta> = {
     selectionDocsPrefix: "",
     selectionDocsOmitLabel: true,
     selectionExtras: [WEBSITE_URL],
+  },
+  safew: {
+    id: "safew",
+    label: "SafeW",
+    selectionLabel: "SafeW (Bot API)",
+    detailLabel: "SafeW Bot",
+    docsPath: "/channels/safew",
+    docsLabel: "safew",
+    blurb: "SafeW Bot API — similar to Telegram, register with @BotFather.",
+    systemImage: "paperplane",
+    selectionDocsPrefix: "",
+    selectionDocsOmitLabel: true,
   },
   whatsapp: {
     id: "whatsapp",
