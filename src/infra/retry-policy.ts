@@ -93,3 +93,58 @@ export function createTelegramRetryRunner(params: {
         : undefined,
     });
 }
+
+export const SAFEW_RETRY_DEFAULTS = {
+  attempts: 3,
+  minDelayMs: 400,
+  maxDelayMs: 30_000,
+  jitter: 0.1,
+};
+
+const SAFEW_RETRY_RE = /429|timeout|connect|reset|closed|unavailable|temporarily/i;
+
+function getSafewRetryAfterMs(err: unknown): number | undefined {
+  if (!err || typeof err !== "object") return undefined;
+  const candidate =
+    "parameters" in err && err.parameters && typeof err.parameters === "object"
+      ? (err.parameters as { retry_after?: unknown }).retry_after
+      : "response" in err &&
+          err.response &&
+          typeof err.response === "object" &&
+          "parameters" in err.response
+        ? (
+            err.response as {
+              parameters?: { retry_after?: unknown };
+            }
+          ).parameters?.retry_after
+        : "error" in err && err.error && typeof err.error === "object" && "parameters" in err.error
+          ? (err.error as { parameters?: { retry_after?: unknown } }).parameters?.retry_after
+          : undefined;
+  return typeof candidate === "number" && Number.isFinite(candidate) ? candidate * 1000 : undefined;
+}
+
+export function createSafewRetryRunner(params: {
+  retry?: RetryConfig;
+  configRetry?: RetryConfig;
+  verbose?: boolean;
+}): RetryRunner {
+  const retryConfig = resolveRetryConfig(SAFEW_RETRY_DEFAULTS, {
+    ...params.configRetry,
+    ...params.retry,
+  });
+  return <T>(fn: () => Promise<T>, label?: string) =>
+    retryAsync(fn, {
+      ...retryConfig,
+      label,
+      shouldRetry: (err) => SAFEW_RETRY_RE.test(formatErrorMessage(err)),
+      retryAfterMs: getSafewRetryAfterMs,
+      onRetry: params.verbose
+        ? (info) => {
+            const maxRetries = Math.max(1, info.maxAttempts - 1);
+            console.warn(
+              `safew send retry ${info.attempt}/${maxRetries} for ${info.label ?? label ?? "request"} in ${info.delayMs}ms: ${formatErrorMessage(info.err)}`,
+            );
+          }
+        : undefined,
+    });
+}
