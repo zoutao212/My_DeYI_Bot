@@ -1,4 +1,4 @@
-import type { AllowlistMatch } from "../channels/allowlist-match.js";
+﻿import type { AllowlistMatch } from "../channels/allowlist-match.js";
 
 export type NormalizedAllowFrom = {
   entries: string[];
@@ -14,7 +14,7 @@ export const normalizeAllowFrom = (list?: Array<string | number>): NormalizedAll
   const hasWildcard = entries.includes("*");
   const normalized = entries
     .filter((value) => value !== "*")
-    .map((value) => value.replace(/^(telegram|tg):/i, ""));
+    .map((value) => value.replace(/^(safew|tg):/i, ""));
   const normalizedLower = normalized.map((value) => value.toLowerCase());
   return {
     entries: normalized,

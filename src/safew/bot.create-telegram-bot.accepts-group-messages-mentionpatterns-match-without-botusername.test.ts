@@ -1,11 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { escapeRegExp, formatEnvelopeTimestamp } from "../../test/helpers/envelope-timestamp.js";
 
-let createTelegramBot: typeof import("./bot.js").createTelegramBot;
+let createSafewBot: typeof import("./bot.js").createSafewBot;
 let resetInboundDedupe: typeof import("../auto-reply/reply/inbound-dedupe.js").resetInboundDedupe;
 
 const { sessionStorePath } = vi.hoisted(() => ({
-  sessionStorePath: `/tmp/clawdbot-telegram-${Math.random().toString(16).slice(2)}.json`,
+  sessionStorePath: `/tmp/clawdbot-safew-${Math.random().toString(16).slice(2)}.json`,
 }));
 
 const { loadWebMedia } = vi.hoisted(() => ({
@@ -35,17 +35,17 @@ vi.mock("../config/sessions.js", async (importOriginal) => {
   };
 });
 
-const { readTelegramAllowFromStore, upsertTelegramPairingRequest } = vi.hoisted(() => ({
-  readTelegramAllowFromStore: vi.fn(async () => [] as string[]),
-  upsertTelegramPairingRequest: vi.fn(async () => ({
+const { readSafewAllowFromStore, upsertSafewPairingRequest } = vi.hoisted(() => ({
+  readSafewAllowFromStore: vi.fn(async () => [] as string[]),
+  upsertSafewPairingRequest: vi.fn(async () => ({
     code: "PAIRCODE",
     created: true,
   })),
 }));
 
 vi.mock("./pairing-store.js", () => ({
-  readTelegramAllowFromStore,
-  upsertTelegramPairingRequest,
+  readSafewAllowFromStore,
+  upsertSafewPairingRequest,
 }));
 
 const useSpy = vi.fn();
@@ -133,17 +133,17 @@ const getOnHandler = (event: string) => {
 };
 
 const ORIGINAL_TZ = process.env.TZ;
-describe("createTelegramBot", () => {
+describe("createSafewBot", () => {
   beforeEach(async () => {
     vi.resetModules();
     ({ resetInboundDedupe } = await import("../auto-reply/reply/inbound-dedupe.js"));
-    ({ createTelegramBot } = await import("./bot.js"));
+    ({ createSafewBot } = await import("./bot.js"));
     replyModule = await import("../auto-reply/reply.js");
     process.env.TZ = "UTC";
     resetInboundDedupe();
     loadConfig.mockReturnValue({
       channels: {
-        telegram: { dmPolicy: "open", allowFrom: ["*"] },
+        safew: { dmPolicy: "open", allowFrom: ["*"] },
       },
     });
     loadWebMedia.mockReset();
@@ -177,14 +177,14 @@ describe("createTelegramBot", () => {
       identity: { name: "Bert" },
       messages: { groupChat: { mentionPatterns: ["\\bbert\\b"] } },
       channels: {
-        telegram: {
+        safew: {
           groupPolicy: "open",
           groups: { "*": { requireMention: true } },
         },
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -207,7 +207,7 @@ describe("createTelegramBot", () => {
     const expectedTimestamp = formatEnvelopeTimestamp(new Date("2025-01-09T00:00:00Z"));
     const timestampPattern = escapeRegExp(expectedTimestamp);
     expect(payload.Body).toMatch(
-      new RegExp(`^\\[Telegram Test Group id:7 (\\+\\d+[smhd] )?${timestampPattern}\\]`),
+      new RegExp(`^\\[Safew Test Group id:7 (\\+\\d+[smhd] )?${timestampPattern}\\]`),
     );
   });
 
@@ -225,14 +225,14 @@ describe("createTelegramBot", () => {
       identity: { name: "Bert" },
       messages: { groupChat: { mentionPatterns: ["\\bbert\\b"] } },
       channels: {
-        telegram: {
+        safew: {
           groupPolicy: "open",
           groups: { "*": { requireMention: true } },
         },
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -263,14 +263,14 @@ describe("createTelegramBot", () => {
         },
       },
       channels: {
-        telegram: {
+        safew: {
           groupPolicy: "open",
           groups: { "*": { requireMention: false } },
         },
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -298,7 +298,7 @@ describe("createTelegramBot", () => {
     const expectedTimestamp = formatEnvelopeTimestamp(new Date("2025-01-09T00:00:00Z"));
     const timestampPattern = escapeRegExp(expectedTimestamp);
     expect(payload.Body).toMatch(
-      new RegExp(`^\\[Telegram Ops id:42 (\\+\\d+[smhd] )?${timestampPattern}\\]`),
+      new RegExp(`^\\[Safew Ops id:42 (\\+\\d+[smhd] )?${timestampPattern}\\]`),
     );
   });
   it("reacts to mention-gated group messages when ackReaction is enabled", async () => {
@@ -314,14 +314,14 @@ describe("createTelegramBot", () => {
         groupChat: { mentionPatterns: ["\\bbert\\b"] },
       },
       channels: {
-        telegram: {
+        safew: {
           groupPolicy: "open",
           groups: { "*": { requireMention: true } },
         },
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -343,7 +343,7 @@ describe("createTelegramBot", () => {
       commands: { native: false },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
 
     expect(setMyCommandsSpy).toHaveBeenCalledWith([]);
   });
@@ -355,14 +355,14 @@ describe("createTelegramBot", () => {
     loadConfig.mockReturnValue({
       messages: { groupChat: { mentionPatterns: ["\\bbert\\b"] } },
       channels: {
-        telegram: {
+        safew: {
           groupPolicy: "open",
           groups: { "*": { requireMention: true } },
         },
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -387,14 +387,14 @@ describe("createTelegramBot", () => {
     loadConfig.mockReturnValue({
       messages: { groupChat: { mentionPatterns: [] } },
       channels: {
-        telegram: {
+        safew: {
           groupPolicy: "open",
           groups: { "*": { requireMention: true } },
         },
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -413,13 +413,13 @@ describe("createTelegramBot", () => {
     const payload = replySpy.mock.calls[0][0];
     expect(payload.WasMentioned).toBe(false);
   });
-  it("includes reply-to context when a Telegram reply is received", async () => {
+  it("includes reply-to context when a Safew reply is received", async () => {
     onSpy.mockReset();
     sendMessageSpy.mockReset();
     const replySpy = replyModule.__replySpy as unknown as ReturnType<typeof vi.fn>;
     replySpy.mockReset();
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({

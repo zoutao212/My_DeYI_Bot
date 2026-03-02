@@ -1,13 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { beforeEach, describe, expect, it, vi } from "vitest";
 
-describe("telegram audit", () => {
+describe("safew audit", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
   });
 
   it("collects unmentioned numeric group ids and flags wildcard", async () => {
-    const { collectTelegramUnmentionedGroupIds } = await import("./audit.js");
-    const res = collectTelegramUnmentionedGroupIds({
+    const { collectSafewUnmentionedGroupIds } = await import("./audit.js");
+    const res = collectSafewUnmentionedGroupIds({
       "*": { requireMention: false },
       "-1001": { requireMention: false },
       "@group": { requireMention: false },
@@ -20,7 +20,7 @@ describe("telegram audit", () => {
   });
 
   it("audits membership via getChatMember", async () => {
-    const { auditTelegramGroupMembership } = await import("./audit.js");
+    const { auditSafewGroupMembership } = await import("./audit.js");
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValueOnce(
@@ -30,7 +30,7 @@ describe("telegram audit", () => {
         }),
       ),
     );
-    const res = await auditTelegramGroupMembership({
+    const res = await auditSafewGroupMembership({
       token: "t",
       botId: 123,
       groupIds: ["-1001"],
@@ -42,7 +42,7 @@ describe("telegram audit", () => {
   });
 
   it("reports bot not in group when status is left", async () => {
-    const { auditTelegramGroupMembership } = await import("./audit.js");
+    const { auditSafewGroupMembership } = await import("./audit.js");
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValueOnce(
@@ -52,7 +52,7 @@ describe("telegram audit", () => {
         }),
       ),
     );
-    const res = await auditTelegramGroupMembership({
+    const res = await auditSafewGroupMembership({
       token: "t",
       botId: 123,
       groupIds: ["-1001"],

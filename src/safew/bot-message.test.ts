@@ -1,29 +1,29 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const buildTelegramMessageContext = vi.hoisted(() => vi.fn());
-const dispatchTelegramMessage = vi.hoisted(() => vi.fn());
+const buildSafewMessageContext = vi.hoisted(() => vi.fn());
+const dispatchSafewMessage = vi.hoisted(() => vi.fn());
 
 vi.mock("./bot-message-context.js", () => ({
-  buildTelegramMessageContext,
+  buildSafewMessageContext,
 }));
 
 vi.mock("./bot-message-dispatch.js", () => ({
-  dispatchTelegramMessage,
+  dispatchSafewMessage,
 }));
 
-import { createTelegramMessageProcessor } from "./bot-message.js";
+import { createSafewMessageProcessor } from "./bot-message.js";
 
-describe("telegram bot message processor", () => {
+describe("safew bot message processor", () => {
   beforeEach(() => {
-    buildTelegramMessageContext.mockReset();
-    dispatchTelegramMessage.mockReset();
+    buildSafewMessageContext.mockReset();
+    dispatchSafewMessage.mockReset();
   });
 
   const baseDeps = {
     bot: {},
     cfg: {},
     account: {},
-    telegramCfg: {},
+    safewCfg: {},
     historyLimit: 0,
     groupHistories: {},
     dmPolicy: {},
@@ -33,7 +33,7 @@ describe("telegram bot message processor", () => {
     logger: {},
     resolveGroupActivation: () => true,
     resolveGroupRequireMention: () => false,
-    resolveTelegramGroupConfig: () => ({}),
+    resolveSafewGroupConfig: () => ({}),
     runtime: {},
     replyToMode: "auto",
     streamMode: "auto",
@@ -43,18 +43,18 @@ describe("telegram bot message processor", () => {
   };
 
   it("dispatches when context is available", async () => {
-    buildTelegramMessageContext.mockResolvedValue({ route: { sessionKey: "agent:main:main" } });
+    buildSafewMessageContext.mockResolvedValue({ route: { sessionKey: "agent:main:main" } });
 
-    const processMessage = createTelegramMessageProcessor(baseDeps);
+    const processMessage = createSafewMessageProcessor(baseDeps);
     await processMessage({ message: { chat: { id: 123 }, message_id: 456 } }, [], [], {});
 
-    expect(dispatchTelegramMessage).toHaveBeenCalledTimes(1);
+    expect(dispatchSafewMessage).toHaveBeenCalledTimes(1);
   });
 
   it("skips dispatch when no context is produced", async () => {
-    buildTelegramMessageContext.mockResolvedValue(null);
-    const processMessage = createTelegramMessageProcessor(baseDeps);
+    buildSafewMessageContext.mockResolvedValue(null);
+    const processMessage = createSafewMessageProcessor(baseDeps);
     await processMessage({ message: { chat: { id: 123 }, message_id: 456 } }, [], [], {});
-    expect(dispatchTelegramMessage).not.toHaveBeenCalled();
+    expect(dispatchSafewMessage).not.toHaveBeenCalled();
   });
 });

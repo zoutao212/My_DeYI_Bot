@@ -1,97 +1,97 @@
-import { describe, expect, it } from "vitest";
+﻿import { describe, expect, it } from "vitest";
 
 import type { ClawdbotConfig } from "../config/config.js";
-import { resolveTelegramAccount } from "./accounts.js";
+import { resolveSafewAccount } from "./accounts.js";
 
-describe("resolveTelegramAccount", () => {
+describe("resolveSafewAccount", () => {
   it("falls back to the first configured account when accountId is omitted", () => {
-    const prevTelegramToken = process.env.TELEGRAM_BOT_TOKEN;
-    process.env.TELEGRAM_BOT_TOKEN = "";
+    const prevSafewToken = process.env.SAFEW_BOT_TOKEN;
+    process.env.SAFEW_BOT_TOKEN = "";
     try {
       const cfg: ClawdbotConfig = {
         channels: {
-          telegram: { accounts: { work: { botToken: "tok-work" } } },
+          safew: { accounts: { work: { botToken: "tok-work" } } },
         },
       };
 
-      const account = resolveTelegramAccount({ cfg });
+      const account = resolveSafewAccount({ cfg });
       expect(account.accountId).toBe("work");
       expect(account.token).toBe("tok-work");
       expect(account.tokenSource).toBe("config");
     } finally {
-      if (prevTelegramToken === undefined) {
-        delete process.env.TELEGRAM_BOT_TOKEN;
+      if (prevSafewToken === undefined) {
+        delete process.env.SAFEW_BOT_TOKEN;
       } else {
-        process.env.TELEGRAM_BOT_TOKEN = prevTelegramToken;
+        process.env.SAFEW_BOT_TOKEN = prevSafewToken;
       }
     }
   });
 
-  it("uses TELEGRAM_BOT_TOKEN when default account config is missing", () => {
-    const prevTelegramToken = process.env.TELEGRAM_BOT_TOKEN;
-    process.env.TELEGRAM_BOT_TOKEN = "tok-env";
+  it("uses SAFEW_BOT_TOKEN when default account config is missing", () => {
+    const prevSafewToken = process.env.SAFEW_BOT_TOKEN;
+    process.env.SAFEW_BOT_TOKEN = "tok-env";
     try {
       const cfg: ClawdbotConfig = {
         channels: {
-          telegram: { accounts: { work: { botToken: "tok-work" } } },
+          safew: { accounts: { work: { botToken: "tok-work" } } },
         },
       };
 
-      const account = resolveTelegramAccount({ cfg });
+      const account = resolveSafewAccount({ cfg });
       expect(account.accountId).toBe("default");
       expect(account.token).toBe("tok-env");
       expect(account.tokenSource).toBe("env");
     } finally {
-      if (prevTelegramToken === undefined) {
-        delete process.env.TELEGRAM_BOT_TOKEN;
+      if (prevSafewToken === undefined) {
+        delete process.env.SAFEW_BOT_TOKEN;
       } else {
-        process.env.TELEGRAM_BOT_TOKEN = prevTelegramToken;
+        process.env.SAFEW_BOT_TOKEN = prevSafewToken;
       }
     }
   });
 
-  it("prefers default config token over TELEGRAM_BOT_TOKEN", () => {
-    const prevTelegramToken = process.env.TELEGRAM_BOT_TOKEN;
-    process.env.TELEGRAM_BOT_TOKEN = "tok-env";
+  it("prefers default config token over SAFEW_BOT_TOKEN", () => {
+    const prevSafewToken = process.env.SAFEW_BOT_TOKEN;
+    process.env.SAFEW_BOT_TOKEN = "tok-env";
     try {
       const cfg: ClawdbotConfig = {
         channels: {
-          telegram: { botToken: "tok-config" },
+          safew: { botToken: "tok-config" },
         },
       };
 
-      const account = resolveTelegramAccount({ cfg });
+      const account = resolveSafewAccount({ cfg });
       expect(account.accountId).toBe("default");
       expect(account.token).toBe("tok-config");
       expect(account.tokenSource).toBe("config");
     } finally {
-      if (prevTelegramToken === undefined) {
-        delete process.env.TELEGRAM_BOT_TOKEN;
+      if (prevSafewToken === undefined) {
+        delete process.env.SAFEW_BOT_TOKEN;
       } else {
-        process.env.TELEGRAM_BOT_TOKEN = prevTelegramToken;
+        process.env.SAFEW_BOT_TOKEN = prevSafewToken;
       }
     }
   });
 
   it("does not fall back when accountId is explicitly provided", () => {
-    const prevTelegramToken = process.env.TELEGRAM_BOT_TOKEN;
-    process.env.TELEGRAM_BOT_TOKEN = "";
+    const prevSafewToken = process.env.SAFEW_BOT_TOKEN;
+    process.env.SAFEW_BOT_TOKEN = "";
     try {
       const cfg: ClawdbotConfig = {
         channels: {
-          telegram: { accounts: { work: { botToken: "tok-work" } } },
+          safew: { accounts: { work: { botToken: "tok-work" } } },
         },
       };
 
-      const account = resolveTelegramAccount({ cfg, accountId: "default" });
+      const account = resolveSafewAccount({ cfg, accountId: "default" });
       expect(account.accountId).toBe("default");
       expect(account.tokenSource).toBe("none");
       expect(account.token).toBe("");
     } finally {
-      if (prevTelegramToken === undefined) {
-        delete process.env.TELEGRAM_BOT_TOKEN;
+      if (prevSafewToken === undefined) {
+        delete process.env.SAFEW_BOT_TOKEN;
       } else {
-        process.env.TELEGRAM_BOT_TOKEN = prevTelegramToken;
+        process.env.SAFEW_BOT_TOKEN = prevSafewToken;
       }
     }
   });

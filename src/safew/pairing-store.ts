@@ -1,4 +1,4 @@
-import type { ClawdbotConfig } from "../config/config.js";
+﻿import type { ClawdbotConfig } from "../config/config.js";
 import {
   addChannelAllowFromStoreEntry,
   approveChannelPairingCode,
@@ -7,7 +7,7 @@ import {
   upsertChannelPairingRequest,
 } from "../pairing/pairing-store.js";
 
-export type TelegramPairingListEntry = {
+export type SafewPairingListEntry = {
   chatId: string;
   username?: string;
   firstName?: string;
@@ -17,15 +17,15 @@ export type TelegramPairingListEntry = {
   lastSeenAt: string;
 };
 
-const PROVIDER = "telegram" as const;
+const PROVIDER = "safew" as const;
 
-export async function readTelegramAllowFromStore(
+export async function readSafewAllowFromStore(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<string[]> {
   return readChannelAllowFromStore(PROVIDER, env);
 }
 
-export async function addTelegramAllowFromStoreEntry(params: {
+export async function addSafewAllowFromStoreEntry(params: {
   entry: string | number;
   env?: NodeJS.ProcessEnv;
 }): Promise<{ changed: boolean; allowFrom: string[] }> {
@@ -36,9 +36,9 @@ export async function addTelegramAllowFromStoreEntry(params: {
   });
 }
 
-export async function listTelegramPairingRequests(
+export async function listSafewPairingRequests(
   env: NodeJS.ProcessEnv = process.env,
-): Promise<TelegramPairingListEntry[]> {
+): Promise<SafewPairingListEntry[]> {
   const list = await listChannelPairingRequests(PROVIDER, env);
   return list.map((r) => ({
     chatId: r.id,
@@ -51,7 +51,7 @@ export async function listTelegramPairingRequests(
   }));
 }
 
-export async function upsertTelegramPairingRequest(params: {
+export async function upsertSafewPairingRequest(params: {
   chatId: string | number;
   username?: string;
   firstName?: string;
@@ -70,10 +70,10 @@ export async function upsertTelegramPairingRequest(params: {
   });
 }
 
-export async function approveTelegramPairingCode(params: {
+export async function approveSafewPairingCode(params: {
   code: string;
   env?: NodeJS.ProcessEnv;
-}): Promise<{ chatId: string; entry?: TelegramPairingListEntry } | null> {
+}): Promise<{ chatId: string; entry?: SafewPairingListEntry } | null> {
   const res = await approveChannelPairingCode({
     channel: PROVIDER,
     code: params.code,
@@ -94,22 +94,22 @@ export async function approveTelegramPairingCode(params: {
   return { chatId: res.id, entry };
 }
 
-export async function resolveTelegramEffectiveAllowFrom(params: {
+export async function resolveSafewEffectiveAllowFrom(params: {
   cfg: ClawdbotConfig;
   env?: NodeJS.ProcessEnv;
 }): Promise<{ dm: string[]; group: string[] }> {
   const env = params.env ?? process.env;
-  const cfgAllowFrom = (params.cfg.channels?.telegram?.allowFrom ?? [])
+  const cfgAllowFrom = (params.cfg.channels?.safew?.allowFrom ?? [])
     .map((v) => String(v).trim())
     .filter(Boolean)
-    .map((v) => v.replace(/^(telegram|tg):/i, ""))
+    .map((v) => v.replace(/^(safew|tg):/i, ""))
     .filter((v) => v !== "*");
-  const cfgGroupAllowFrom = (params.cfg.channels?.telegram?.groupAllowFrom ?? [])
+  const cfgGroupAllowFrom = (params.cfg.channels?.safew?.groupAllowFrom ?? [])
     .map((v) => String(v).trim())
     .filter(Boolean)
-    .map((v) => v.replace(/^(telegram|tg):/i, ""))
+    .map((v) => v.replace(/^(safew|tg):/i, ""))
     .filter((v) => v !== "*");
-  const storeAllowFrom = await readTelegramAllowFromStore(env);
+  const storeAllowFrom = await readSafewAllowFromStore(env);
 
   const dm = Array.from(new Set([...cfgAllowFrom, ...storeAllowFrom]));
   const group = Array.from(

@@ -1,34 +1,34 @@
-import { createDedupeCache } from "../infra/dedupe.js";
-import type { TelegramContext, TelegramMessage } from "./bot/types.js";
+﻿import { createDedupeCache } from "../infra/dedupe.js";
+import type { SafewContext, SafewMessage } from "./bot/types.js";
 
 const MEDIA_GROUP_TIMEOUT_MS = 500;
-const RECENT_TELEGRAM_UPDATE_TTL_MS = 5 * 60_000;
-const RECENT_TELEGRAM_UPDATE_MAX = 2000;
+const RECENT_SAFEW_UPDATE_TTL_MS = 5 * 60_000;
+const RECENT_SAFEW_UPDATE_MAX = 2000;
 
 export type MediaGroupEntry = {
   messages: Array<{
-    msg: TelegramMessage;
-    ctx: TelegramContext;
+    msg: SafewMessage;
+    ctx: SafewContext;
   }>;
   timer: ReturnType<typeof setTimeout>;
 };
 
-export type TelegramUpdateKeyContext = {
+export type SafewUpdateKeyContext = {
   update?: {
     update_id?: number;
-    message?: TelegramMessage;
-    edited_message?: TelegramMessage;
+    message?: SafewMessage;
+    edited_message?: SafewMessage;
   };
   update_id?: number;
-  message?: TelegramMessage;
-  callbackQuery?: { id?: string; message?: TelegramMessage };
+  message?: SafewMessage;
+  callbackQuery?: { id?: string; message?: SafewMessage };
 };
 
-export const resolveTelegramUpdateId = (ctx: TelegramUpdateKeyContext) =>
+export const resolveSafewUpdateId = (ctx: SafewUpdateKeyContext) =>
   ctx.update?.update_id ?? ctx.update_id;
 
-export const buildTelegramUpdateKey = (ctx: TelegramUpdateKeyContext) => {
-  const updateId = resolveTelegramUpdateId(ctx);
+export const buildSafewUpdateKey = (ctx: SafewUpdateKeyContext) => {
+  const updateId = resolveSafewUpdateId(ctx);
   if (typeof updateId === "number") return `update:${updateId}`;
   const callbackId = ctx.callbackQuery?.id;
   if (callbackId) return `callback:${callbackId}`;
@@ -42,10 +42,10 @@ export const buildTelegramUpdateKey = (ctx: TelegramUpdateKeyContext) => {
   return undefined;
 };
 
-export const createTelegramUpdateDedupe = () =>
+export const createSafewUpdateDedupe = () =>
   createDedupeCache({
-    ttlMs: RECENT_TELEGRAM_UPDATE_TTL_MS,
-    maxSize: RECENT_TELEGRAM_UPDATE_MAX,
+    ttlMs: RECENT_SAFEW_UPDATE_TTL_MS,
+    maxSize: RECENT_SAFEW_UPDATE_MAX,
   });
 
 export { MEDIA_GROUP_TIMEOUT_MS };

@@ -1,19 +1,19 @@
-export type TelegramTarget = {
+﻿export type SafewTarget = {
   chatId: string;
   messageThreadId?: number;
 };
 
-export function stripTelegramInternalPrefixes(to: string): string {
+export function stripSafewInternalPrefixes(to: string): string {
   let trimmed = to.trim();
-  let strippedTelegramPrefix = false;
+  let strippedSafewPrefix = false;
   while (true) {
     const next = (() => {
-      if (/^(telegram|tg):/i.test(trimmed)) {
-        strippedTelegramPrefix = true;
-        return trimmed.replace(/^(telegram|tg):/i, "").trim();
+      if (/^(safew|tg):/i.test(trimmed)) {
+        strippedSafewPrefix = true;
+        return trimmed.replace(/^(safew|tg):/i, "").trim();
       }
-      // Legacy internal form: `telegram:group:<id>` (still emitted by session keys).
-      if (strippedTelegramPrefix && /^group:/i.test(trimmed)) {
+      // Legacy internal form: `safew:group:<id>` (still emitted by session keys).
+      if (strippedSafewPrefix && /^group:/i.test(trimmed)) {
         return trimmed.replace(/^group:/i, "").trim();
       }
       return trimmed;
@@ -24,15 +24,15 @@ export function stripTelegramInternalPrefixes(to: string): string {
 }
 
 /**
- * Parse a Telegram delivery target into chatId and optional topic/thread ID.
+ * Parse a Safew delivery target into chatId and optional topic/thread ID.
  *
  * Supported formats:
- * - `chatId` (plain chat ID, t.me link, @username, or internal prefixes like `telegram:...`)
+ * - `chatId` (plain chat ID, t.me link, @username, or internal prefixes like `safew:...`)
  * - `chatId:topicId` (numeric topic/thread ID)
  * - `chatId:topic:topicId` (explicit topic marker; preferred)
  */
-export function parseTelegramTarget(to: string): TelegramTarget {
-  const normalized = stripTelegramInternalPrefixes(to);
+export function parseSafewTarget(to: string): SafewTarget {
+  const normalized = stripSafewInternalPrefixes(to);
 
   const topicMatch = /^(.+?):topic:(\d+)$/.exec(normalized);
   if (topicMatch) {

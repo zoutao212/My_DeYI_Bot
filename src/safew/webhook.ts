@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+﻿import { createServer } from "node:http";
 
 import { webhookCallback } from "grammy";
 import type { ClawdbotConfig } from "../config/config.js";
@@ -13,10 +13,10 @@ import {
   startDiagnosticHeartbeat,
   stopDiagnosticHeartbeat,
 } from "../logging/diagnostic.js";
-import { resolveTelegramAllowedUpdates } from "./allowed-updates.js";
-import { createTelegramBot } from "./bot.js";
+import { resolveSafewAllowedUpdates } from "./allowed-updates.js";
+import { createSafewBot } from "./bot.js";
 
-export async function startTelegramWebhook(opts: {
+export async function startSafewWebhook(opts: {
   token: string;
   accountId?: string;
   config?: ClawdbotConfig;
@@ -30,13 +30,13 @@ export async function startTelegramWebhook(opts: {
   healthPath?: string;
   publicUrl?: string;
 }) {
-  const path = opts.path ?? "/telegram-webhook";
+  const path = opts.path ?? "/safew-webhook";
   const healthPath = opts.healthPath ?? "/healthz";
   const port = opts.port ?? 8787;
   const host = opts.host ?? "0.0.0.0";
   const runtime = opts.runtime ?? defaultRuntime;
   const diagnosticsEnabled = isDiagnosticsEnabled(opts.config);
-  const bot = createTelegramBot({
+  const bot = createSafewBot({
     token: opts.token,
     runtime,
     proxyFetch: opts.fetch,
@@ -64,7 +64,7 @@ export async function startTelegramWebhook(opts: {
     }
     const startTime = Date.now();
     if (diagnosticsEnabled) {
-      logWebhookReceived({ channel: "telegram", updateType: "telegram-post" });
+      logWebhookReceived({ channel: "safew", updateType: "safew-post" });
     }
     const handled = handler(req, res);
     if (handled && typeof (handled as Promise<void>).catch === "function") {
@@ -72,8 +72,8 @@ export async function startTelegramWebhook(opts: {
         .then(() => {
           if (diagnosticsEnabled) {
             logWebhookProcessed({
-              channel: "telegram",
-              updateType: "telegram-post",
+              channel: "safew",
+              updateType: "safew-post",
               durationMs: Date.now() - startTime,
             });
           }
@@ -82,8 +82,8 @@ export async function startTelegramWebhook(opts: {
           const errMsg = formatErrorMessage(err);
           if (diagnosticsEnabled) {
             logWebhookError({
-              channel: "telegram",
-              updateType: "telegram-post",
+              channel: "safew",
+              updateType: "safew-post",
               error: errMsg,
             });
           }
@@ -99,7 +99,7 @@ export async function startTelegramWebhook(opts: {
 
   await bot.api.setWebhook(publicUrl, {
     secret_token: opts.secret,
-    allowed_updates: resolveTelegramAllowedUpdates(),
+    allowed_updates: resolveSafewAllowedUpdates(),
   });
 
   await new Promise<void>((resolve) => server.listen(port, host, resolve));

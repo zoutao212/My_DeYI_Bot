@@ -1,4 +1,4 @@
-import crypto from "node:crypto";
+﻿import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,7 +7,7 @@ import { resolveStateDir } from "../config/paths.js";
 
 const STORE_VERSION = 1;
 
-type TelegramUpdateOffsetState = {
+type SafewUpdateOffsetState = {
   version: number;
   lastUpdateId: number | null;
 };
@@ -18,18 +18,18 @@ function normalizeAccountId(accountId?: string) {
   return trimmed.replace(/[^a-z0-9._-]+/gi, "_");
 }
 
-function resolveTelegramUpdateOffsetPath(
+function resolveSafewUpdateOffsetPath(
   accountId?: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   const stateDir = resolveStateDir(env, os.homedir);
   const normalized = normalizeAccountId(accountId);
-  return path.join(stateDir, "telegram", `update-offset-${normalized}.json`);
+  return path.join(stateDir, "safew", `update-offset-${normalized}.json`);
 }
 
-function safeParseState(raw: string): TelegramUpdateOffsetState | null {
+function safeParseState(raw: string): SafewUpdateOffsetState | null {
   try {
-    const parsed = JSON.parse(raw) as TelegramUpdateOffsetState;
+    const parsed = JSON.parse(raw) as SafewUpdateOffsetState;
     if (parsed?.version !== STORE_VERSION) return null;
     if (parsed.lastUpdateId !== null && typeof parsed.lastUpdateId !== "number") {
       return null;
@@ -40,11 +40,11 @@ function safeParseState(raw: string): TelegramUpdateOffsetState | null {
   }
 }
 
-export async function readTelegramUpdateOffset(params: {
+export async function readSafewUpdateOffset(params: {
   accountId?: string;
   env?: NodeJS.ProcessEnv;
 }): Promise<number | null> {
-  const filePath = resolveTelegramUpdateOffsetPath(params.accountId, params.env);
+  const filePath = resolveSafewUpdateOffsetPath(params.accountId, params.env);
   try {
     const raw = await fs.readFile(filePath, "utf-8");
     const parsed = safeParseState(raw);
@@ -56,16 +56,16 @@ export async function readTelegramUpdateOffset(params: {
   }
 }
 
-export async function writeTelegramUpdateOffset(params: {
+export async function writeSafewUpdateOffset(params: {
   accountId?: string;
   updateId: number;
   env?: NodeJS.ProcessEnv;
 }): Promise<void> {
-  const filePath = resolveTelegramUpdateOffsetPath(params.accountId, params.env);
+  const filePath = resolveSafewUpdateOffsetPath(params.accountId, params.env);
   const dir = path.dirname(filePath);
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   const tmp = path.join(dir, `${path.basename(filePath)}.${crypto.randomUUID()}.tmp`);
-  const payload: TelegramUpdateOffsetState = {
+  const payload: SafewUpdateOffsetState = {
     version: STORE_VERSION,
     lastUpdateId: params.updateId,
   };

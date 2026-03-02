@@ -1,39 +1,39 @@
-import { formatLocationText, type NormalizedLocation } from "../../channels/location.js";
-import type { TelegramAccountConfig } from "../../config/types.telegram.js";
+﻿import { formatLocationText, type NormalizedLocation } from "../../channels/location.js";
+import type { SafewAccountConfig } from "../../config/types.safew.js";
 import type {
-  TelegramForwardChat,
-  TelegramForwardOrigin,
-  TelegramForwardUser,
-  TelegramForwardedMessage,
-  TelegramLocation,
-  TelegramMessage,
-  TelegramStreamMode,
-  TelegramVenue,
+  SafewForwardChat,
+  SafewForwardOrigin,
+  SafewForwardUser,
+  SafewForwardedMessage,
+  SafewLocation,
+  SafewMessage,
+  SafewStreamMode,
+  SafewVenue,
 } from "./types.js";
 
-const TELEGRAM_GENERAL_TOPIC_ID = 1;
+const SAFEW_GENERAL_TOPIC_ID = 1;
 
-export function resolveTelegramForumThreadId(params: {
+export function resolveSafewForumThreadId(params: {
   isForum?: boolean;
   messageThreadId?: number | null;
 }) {
   if (params.isForum && params.messageThreadId == null) {
-    return TELEGRAM_GENERAL_TOPIC_ID;
+    return SAFEW_GENERAL_TOPIC_ID;
   }
   return params.messageThreadId ?? undefined;
 }
 
 /**
- * Build thread params for Telegram API calls (messages, media).
+ * Build thread params for Safew API calls (messages, media).
  * General forum topic (id=1) must be treated like a regular supergroup send:
- * Telegram rejects sendMessage/sendMedia with message_thread_id=1 ("thread not found").
+ * Safew rejects sendMessage/sendMedia with message_thread_id=1 ("thread not found").
  */
-export function buildTelegramThreadParams(messageThreadId?: number) {
+export function buildSafewThreadParams(messageThreadId?: number) {
   if (messageThreadId == null) {
     return undefined;
   }
   const normalized = Math.trunc(messageThreadId);
-  if (normalized === TELEGRAM_GENERAL_TOPIC_ID) {
+  if (normalized === SAFEW_GENERAL_TOPIC_ID) {
     return undefined;
   }
   return { message_thread_id: normalized };
@@ -50,30 +50,30 @@ export function buildTypingThreadParams(messageThreadId?: number) {
   return { message_thread_id: Math.trunc(messageThreadId) };
 }
 
-export function resolveTelegramStreamMode(
-  telegramCfg: Pick<TelegramAccountConfig, "streamMode"> | undefined,
-): TelegramStreamMode {
-  const raw = telegramCfg?.streamMode?.trim().toLowerCase();
+export function resolveSafewStreamMode(
+  safewCfg: Pick<SafewAccountConfig, "streamMode"> | undefined,
+): SafewStreamMode {
+  const raw = safewCfg?.streamMode?.trim().toLowerCase();
   if (raw === "off" || raw === "partial" || raw === "block") return raw;
   return "partial";
 }
 
-export function buildTelegramGroupPeerId(chatId: number | string, messageThreadId?: number) {
+export function buildSafewGroupPeerId(chatId: number | string, messageThreadId?: number) {
   return messageThreadId != null ? `${chatId}:topic:${messageThreadId}` : String(chatId);
 }
 
-export function buildTelegramGroupFrom(chatId: number | string, messageThreadId?: number) {
-  return `telegram:group:${buildTelegramGroupPeerId(chatId, messageThreadId)}`;
+export function buildSafewGroupFrom(chatId: number | string, messageThreadId?: number) {
+  return `safew:group:${buildSafewGroupPeerId(chatId, messageThreadId)}`;
 }
 
-export function buildSenderName(msg: TelegramMessage) {
+export function buildSenderName(msg: SafewMessage) {
   const name =
     [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(" ").trim() ||
     msg.from?.username;
   return name || undefined;
 }
 
-export function buildSenderLabel(msg: TelegramMessage, senderId?: number | string) {
+export function buildSenderLabel(msg: SafewMessage, senderId?: number | string) {
   const name = buildSenderName(msg);
   const username = msg.from?.username ? `@${msg.from.username}` : undefined;
   let label = name;
@@ -92,7 +92,7 @@ export function buildSenderLabel(msg: TelegramMessage, senderId?: number | strin
 }
 
 export function buildGroupLabel(
-  msg: TelegramMessage,
+  msg: SafewMessage,
   chatId: number | string,
   messageThreadId?: number,
 ) {
@@ -102,7 +102,7 @@ export function buildGroupLabel(
   return `group:${chatId}${topicSuffix}`;
 }
 
-export function hasBotMention(msg: TelegramMessage, botUsername: string) {
+export function hasBotMention(msg: SafewMessage, botUsername: string) {
   const text = (msg.text ?? msg.caption ?? "").toLowerCase();
   if (text.includes(`@${botUsername}`)) return true;
   const entities = msg.entities ?? msg.caption_entities ?? [];
@@ -114,19 +114,19 @@ export function hasBotMention(msg: TelegramMessage, botUsername: string) {
   return false;
 }
 
-type TelegramTextLinkEntity = {
+type SafewTextLinkEntity = {
   type: string;
   offset: number;
   length: number;
   url?: string;
 };
 
-export function expandTextLinks(text: string, entities?: TelegramTextLinkEntity[] | null): string {
+export function expandTextLinks(text: string, entities?: SafewTextLinkEntity[] | null): string {
   if (!text || !entities?.length) return text;
 
   const textLinks = entities
     .filter(
-      (entity): entity is TelegramTextLinkEntity & { url: string } =>
+      (entity): entity is SafewTextLinkEntity & { url: string } =>
         entity.type === "text_link" && Boolean(entity.url),
     )
     .sort((a, b) => b.offset - a.offset);
@@ -143,14 +143,14 @@ export function expandTextLinks(text: string, entities?: TelegramTextLinkEntity[
   return result;
 }
 
-export function resolveTelegramReplyId(raw?: string): number | undefined {
+export function resolveSafewReplyId(raw?: string): number | undefined {
   if (!raw) return undefined;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) return undefined;
   return parsed;
 }
 
-export function describeReplyTarget(msg: TelegramMessage) {
+export function describeReplyTarget(msg: SafewMessage) {
   const reply = msg.reply_to_message;
   if (!reply) return null;
   const replyBody = (reply.text ?? reply.caption ?? "").trim();
@@ -161,7 +161,7 @@ export function describeReplyTarget(msg: TelegramMessage) {
     else if (reply.audio || reply.voice) body = "<media:audio>";
     else if (reply.document) body = "<media:document>";
     else {
-      const locationData = extractTelegramLocation(reply);
+      const locationData = extractSafewLocation(reply);
       if (locationData) body = formatLocationText(locationData);
     }
   }
@@ -175,7 +175,7 @@ export function describeReplyTarget(msg: TelegramMessage) {
   };
 }
 
-export type TelegramForwardedContext = {
+export type SafewForwardedContext = {
   from: string;
   date?: number;
   fromType: string;
@@ -185,7 +185,7 @@ export type TelegramForwardedContext = {
   fromSignature?: string;
 };
 
-function normalizeForwardedUserLabel(user: TelegramForwardUser) {
+function normalizeForwardedUserLabel(user: SafewForwardUser) {
   const name = [user.first_name, user.last_name].filter(Boolean).join(" ").trim();
   const username = user.username?.trim() || undefined;
   const id = user.id != null ? String(user.id) : undefined;
@@ -196,7 +196,7 @@ function normalizeForwardedUserLabel(user: TelegramForwardUser) {
   return { display, name: name || undefined, username, id };
 }
 
-function normalizeForwardedChatLabel(chat: TelegramForwardChat, fallbackKind: "chat" | "channel") {
+function normalizeForwardedChatLabel(chat: SafewForwardChat, fallbackKind: "chat" | "channel") {
   const title = chat.title?.trim() || undefined;
   const username = chat.username?.trim() || undefined;
   const id = chat.id != null ? String(chat.id) : undefined;
@@ -206,10 +206,10 @@ function normalizeForwardedChatLabel(chat: TelegramForwardChat, fallbackKind: "c
 }
 
 function buildForwardedContextFromUser(params: {
-  user: TelegramForwardUser;
+  user: SafewForwardUser;
   date?: number;
   type: string;
-}): TelegramForwardedContext | null {
+}): SafewForwardedContext | null {
   const { display, name, username, id } = normalizeForwardedUserLabel(params.user);
   if (!display) return null;
   return {
@@ -226,7 +226,7 @@ function buildForwardedContextFromHiddenName(params: {
   name?: string;
   date?: number;
   type: string;
-}): TelegramForwardedContext | null {
+}): SafewForwardedContext | null {
   const trimmed = params.name?.trim();
   if (!trimmed) return null;
   return {
@@ -238,11 +238,11 @@ function buildForwardedContextFromHiddenName(params: {
 }
 
 function buildForwardedContextFromChat(params: {
-  chat: TelegramForwardChat;
+  chat: SafewForwardChat;
   date?: number;
   type: string;
   signature?: string;
-}): TelegramForwardedContext | null {
+}): SafewForwardedContext | null {
   const fallbackKind =
     params.type === "channel" || params.type === "legacy_channel" ? "channel" : "chat";
   const { display, title, username, id } = normalizeForwardedChatLabel(params.chat, fallbackKind);
@@ -261,9 +261,9 @@ function buildForwardedContextFromChat(params: {
 }
 
 function resolveForwardOrigin(
-  origin: TelegramForwardOrigin,
+  origin: SafewForwardOrigin,
   signature?: string,
-): TelegramForwardedContext | null {
+): SafewForwardedContext | null {
   if (origin.type === "user" && origin.sender_user) {
     return buildForwardedContextFromUser({
       user: origin.sender_user,
@@ -298,11 +298,11 @@ function resolveForwardOrigin(
 }
 
 /**
- * Extract forwarded message origin info from Telegram message.
+ * Extract forwarded message origin info from Safew message.
  * Supports both new forward_origin API and legacy forward_from/forward_from_chat fields.
  */
-export function normalizeForwardedContext(msg: TelegramMessage): TelegramForwardedContext | null {
-  const forwardMsg = msg as TelegramForwardedMessage;
+export function normalizeForwardedContext(msg: SafewMessage): SafewForwardedContext | null {
+  const forwardMsg = msg as SafewForwardedMessage;
   const signature = forwardMsg.forward_signature?.trim() || undefined;
 
   if (forwardMsg.forward_origin) {
@@ -341,10 +341,10 @@ export function normalizeForwardedContext(msg: TelegramMessage): TelegramForward
   return null;
 }
 
-export function extractTelegramLocation(msg: TelegramMessage): NormalizedLocation | null {
+export function extractSafewLocation(msg: SafewMessage): NormalizedLocation | null {
   const msgWithLocation = msg as {
-    location?: TelegramLocation;
-    venue?: TelegramVenue;
+    location?: SafewLocation;
+    venue?: SafewVenue;
   };
   const { venue, location } = msgWithLocation;
 

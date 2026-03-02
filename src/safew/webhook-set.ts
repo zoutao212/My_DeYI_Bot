@@ -1,13 +1,13 @@
-import { type ApiClientOptions, Bot } from "grammy";
-import { resolveTelegramFetch } from "./fetch.js";
+﻿import { type ApiClientOptions, Bot } from "grammy";
+import { resolveSafewFetch } from "./fetch.js";
 
-export async function setTelegramWebhook(opts: {
+export async function setSafewWebhook(opts: {
   token: string;
   url: string;
   secret?: string;
   dropPendingUpdates?: boolean;
 }) {
-  const fetchImpl = resolveTelegramFetch();
+  const fetchImpl = resolveSafewFetch();
   const client: ApiClientOptions | undefined = fetchImpl
     ? { fetch: fetchImpl as unknown as ApiClientOptions["fetch"] }
     : undefined;
@@ -18,8 +18,8 @@ export async function setTelegramWebhook(opts: {
   });
 }
 
-export async function deleteTelegramWebhook(opts: { token: string }) {
-  const fetchImpl = resolveTelegramFetch();
+export async function deleteSafewWebhook(opts: { token: string }) {
+  const fetchImpl = resolveSafewFetch();
   const client: ApiClientOptions | undefined = fetchImpl
     ? { fetch: fetchImpl as unknown as ApiClientOptions["fetch"] }
     : undefined;

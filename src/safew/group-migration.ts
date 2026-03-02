@@ -1,12 +1,12 @@
-import type { ClawdbotConfig } from "../config/config.js";
-import type { TelegramGroupConfig } from "../config/types.telegram.js";
+﻿import type { ClawdbotConfig } from "../config/config.js";
+import type { SafewGroupConfig } from "../config/types.safew.js";
 import { normalizeAccountId } from "../routing/session-key.js";
 
-type TelegramGroups = Record<string, TelegramGroupConfig>;
+type SafewGroups = Record<string, SafewGroupConfig>;
 
 type MigrationScope = "account" | "global";
 
-export type TelegramGroupMigrationResult = {
+export type SafewGroupMigrationResult = {
   migrated: boolean;
   skippedExisting: boolean;
   scopes: MigrationScope[];
@@ -15,10 +15,10 @@ export type TelegramGroupMigrationResult = {
 function resolveAccountGroups(
   cfg: ClawdbotConfig,
   accountId?: string | null,
-): { groups?: TelegramGroups } {
+): { groups?: SafewGroups } {
   if (!accountId) return {};
   const normalized = normalizeAccountId(accountId);
-  const accounts = cfg.channels?.telegram?.accounts;
+  const accounts = cfg.channels?.safew?.accounts;
   if (!accounts || typeof accounts !== "object") return {};
   const exact = accounts[normalized];
   if (exact?.groups) return { groups: exact.groups };
@@ -28,8 +28,8 @@ function resolveAccountGroups(
   return { groups: matchKey ? accounts[matchKey]?.groups : undefined };
 }
 
-export function migrateTelegramGroupsInPlace(
-  groups: TelegramGroups | undefined,
+export function migrateSafewGroupsInPlace(
+  groups: SafewGroups | undefined,
   oldChatId: string,
   newChatId: string,
 ): { migrated: boolean; skippedExisting: boolean } {
@@ -42,19 +42,19 @@ export function migrateTelegramGroupsInPlace(
   return { migrated: true, skippedExisting: false };
 }
 
-export function migrateTelegramGroupConfig(params: {
+export function migrateSafewGroupConfig(params: {
   cfg: ClawdbotConfig;
   accountId?: string | null;
   oldChatId: string;
   newChatId: string;
-}): TelegramGroupMigrationResult {
+}): SafewGroupMigrationResult {
   const scopes: MigrationScope[] = [];
   let migrated = false;
   let skippedExisting = false;
 
   const accountGroups = resolveAccountGroups(params.cfg, params.accountId).groups;
   if (accountGroups) {
-    const result = migrateTelegramGroupsInPlace(accountGroups, params.oldChatId, params.newChatId);
+    const result = migrateSafewGroupsInPlace(accountGroups, params.oldChatId, params.newChatId);
     if (result.migrated) {
       migrated = true;
       scopes.push("account");
@@ -62,9 +62,9 @@ export function migrateTelegramGroupConfig(params: {
     if (result.skippedExisting) skippedExisting = true;
   }
 
-  const globalGroups = params.cfg.channels?.telegram?.groups;
+  const globalGroups = params.cfg.channels?.safew?.groups;
   if (globalGroups) {
-    const result = migrateTelegramGroupsInPlace(globalGroups, params.oldChatId, params.newChatId);
+    const result = migrateSafewGroupsInPlace(globalGroups, params.oldChatId, params.newChatId);
     if (result.migrated) {
       migrated = true;
       scopes.push("global");

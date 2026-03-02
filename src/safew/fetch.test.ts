@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+﻿import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { resolveTelegramFetch } from "./fetch.js";
+import { resolveSafewFetch } from "./fetch.js";
 
-describe("resolveTelegramFetch", () => {
+describe("resolveSafewFetch", () => {
   const originalFetch = globalThis.fetch;
 
   afterEach(() => {
@@ -16,13 +16,13 @@ describe("resolveTelegramFetch", () => {
   it("returns wrapped global fetch when available", () => {
     const fetchMock = vi.fn(async () => ({}));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    const resolved = resolveTelegramFetch();
+    const resolved = resolveSafewFetch();
     expect(resolved).toBeTypeOf("function");
   });
 
   it("prefers proxy fetch when provided", () => {
     const fetchMock = vi.fn(async () => ({}));
-    const resolved = resolveTelegramFetch(fetchMock as unknown as typeof fetch);
+    const resolved = resolveSafewFetch(fetchMock as unknown as typeof fetch);
     expect(resolved).toBeTypeOf("function");
   });
 });

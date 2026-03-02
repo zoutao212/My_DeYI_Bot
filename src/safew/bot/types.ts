@@ -1,55 +1,55 @@
-import type { Message } from "@grammyjs/types";
+﻿import type { Message } from "@grammyjs/types";
 
-export type TelegramMessage = Message;
+export type SafewMessage = Message;
 
-export type TelegramStreamMode = "off" | "partial" | "block";
+export type SafewStreamMode = "off" | "partial" | "block";
 
-export type TelegramForwardOriginType = "user" | "hidden_user" | "chat" | "channel";
+export type SafewForwardOriginType = "user" | "hidden_user" | "chat" | "channel";
 
-export type TelegramForwardUser = {
+export type SafewForwardUser = {
   first_name?: string;
   last_name?: string;
   username?: string;
   id?: number;
 };
 
-export type TelegramForwardChat = {
+export type SafewForwardChat = {
   title?: string;
   id?: number;
   username?: string;
   type?: string;
 };
 
-export type TelegramForwardOrigin = {
-  type: TelegramForwardOriginType;
-  sender_user?: TelegramForwardUser;
+export type SafewForwardOrigin = {
+  type: SafewForwardOriginType;
+  sender_user?: SafewForwardUser;
   sender_user_name?: string;
-  sender_chat?: TelegramForwardChat;
-  chat?: TelegramForwardChat;
+  sender_chat?: SafewForwardChat;
+  chat?: SafewForwardChat;
   date?: number;
 };
 
-export type TelegramForwardMetadata = {
-  forward_origin?: TelegramForwardOrigin;
-  forward_from?: TelegramForwardUser;
-  forward_from_chat?: TelegramForwardChat;
+export type SafewForwardMetadata = {
+  forward_origin?: SafewForwardOrigin;
+  forward_from?: SafewForwardUser;
+  forward_from_chat?: SafewForwardChat;
   forward_sender_name?: string;
   forward_signature?: string;
   forward_date?: number;
 };
 
-export type TelegramForwardedMessage = TelegramMessage & TelegramForwardMetadata;
+export type SafewForwardedMessage = SafewMessage & SafewForwardMetadata;
 
-export type TelegramContext = {
-  message: TelegramMessage;
+export type SafewContext = {
+  message: SafewMessage;
   me?: { id?: number; username?: string };
   getFile: () => Promise<{
     file_path?: string;
   }>;
 };
 
-/** Telegram Location object */
-export interface TelegramLocation {
+/** Safew Location object */
+export interface SafewLocation {
   latitude: number;
   longitude: number;
   horizontal_accuracy?: number;
@@ -57,9 +57,9 @@ export interface TelegramLocation {
   heading?: number;
 }
 
-/** Telegram Venue object */
-export interface TelegramVenue {
-  location: TelegramLocation;
+/** Safew Venue object */
+export interface SafewVenue {
+  location: SafewLocation;
   title: string;
   address: string;
   foursquare_id?: string;

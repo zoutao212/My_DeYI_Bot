@@ -1,4 +1,4 @@
-import {
+﻿import {
   chunkMarkdownIR,
   markdownToIR,
   type MarkdownLinkSpan,
@@ -7,7 +7,7 @@ import {
 import { renderMarkdownWithMarkers } from "../markdown/render.js";
 import type { MarkdownTableMode } from "../config/types.base.js";
 
-export type TelegramFormattedChunk = {
+export type SafewFormattedChunk = {
   html: string;
   text: string;
 };
@@ -20,7 +20,7 @@ function escapeHtmlAttr(text: string): string {
   return escapeHtml(text).replace(/"/g, "&quot;");
 }
 
-function buildTelegramLink(link: MarkdownLinkSpan, _text: string) {
+function buildSafewLink(link: MarkdownLinkSpan, _text: string) {
   const href = link.href.trim();
   if (!href) return null;
   if (link.start === link.end) return null;
@@ -33,7 +33,7 @@ function buildTelegramLink(link: MarkdownLinkSpan, _text: string) {
   };
 }
 
-function renderTelegramHtml(ir: MarkdownIR): string {
+function renderSafewHtml(ir: MarkdownIR): string {
   return renderMarkdownWithMarkers(ir, {
     styleMarkers: {
       bold: { open: "<b>", close: "</b>" },
@@ -43,11 +43,11 @@ function renderTelegramHtml(ir: MarkdownIR): string {
       code_block: { open: "<pre><code>", close: "</code></pre>" },
     },
     escapeText: escapeHtml,
-    buildLink: buildTelegramLink,
+    buildLink: buildSafewLink,
   });
 }
 
-export function markdownToTelegramHtml(
+export function markdownToSafewHtml(
   markdown: string,
   options: { tableMode?: MarkdownTableMode } = {},
 ): string {
@@ -57,23 +57,23 @@ export function markdownToTelegramHtml(
     blockquotePrefix: "",
     tableMode: options.tableMode,
   });
-  return renderTelegramHtml(ir);
+  return renderSafewHtml(ir);
 }
 
-export function renderTelegramHtmlText(
+export function renderSafewHtmlText(
   text: string,
   options: { textMode?: "markdown" | "html"; tableMode?: MarkdownTableMode } = {},
 ): string {
   const textMode = options.textMode ?? "markdown";
   if (textMode === "html") return text;
-  return markdownToTelegramHtml(text, { tableMode: options.tableMode });
+  return markdownToSafewHtml(text, { tableMode: options.tableMode });
 }
 
-export function markdownToTelegramChunks(
+export function markdownToSafewChunks(
   markdown: string,
   limit: number,
   options: { tableMode?: MarkdownTableMode } = {},
-): TelegramFormattedChunk[] {
+): SafewFormattedChunk[] {
   const ir = markdownToIR(markdown ?? "", {
     linkify: true,
     headingStyle: "none",
@@ -82,11 +82,11 @@ export function markdownToTelegramChunks(
   });
   const chunks = chunkMarkdownIR(ir, limit);
   return chunks.map((chunk) => ({
-    html: renderTelegramHtml(chunk),
+    html: renderSafewHtml(chunk),
     text: chunk.text,
   }));
 }
 
-export function markdownToTelegramHtmlChunks(markdown: string, limit: number): string[] {
-  return markdownToTelegramChunks(markdown, limit).map((chunk) => chunk.html);
+export function markdownToSafewHtmlChunks(markdown: string, limit: number): string[] {
+  return markdownToSafewChunks(markdown, limit).map((chunk) => chunk.html);
 }

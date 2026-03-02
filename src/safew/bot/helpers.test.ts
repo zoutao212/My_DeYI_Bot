@@ -1,21 +1,21 @@
-import { describe, expect, it } from "vitest";
+﻿import { describe, expect, it } from "vitest";
 import {
-  buildTelegramThreadParams,
+  buildSafewThreadParams,
   buildTypingThreadParams,
   normalizeForwardedContext,
 } from "./helpers.js";
 
-describe("buildTelegramThreadParams", () => {
+describe("buildSafewThreadParams", () => {
   it("omits General topic thread id for message sends", () => {
-    expect(buildTelegramThreadParams(1)).toBeUndefined();
+    expect(buildSafewThreadParams(1)).toBeUndefined();
   });
 
   it("includes non-General topic thread ids", () => {
-    expect(buildTelegramThreadParams(99)).toEqual({ message_thread_id: 99 });
+    expect(buildSafewThreadParams(99)).toEqual({ message_thread_id: 99 });
   });
 
   it("normalizes thread ids to integers", () => {
-    expect(buildTelegramThreadParams(42.9)).toEqual({ message_thread_id: 42 });
+    expect(buildSafewThreadParams(42.9)).toEqual({ message_thread_id: 42 });
   });
 });
 

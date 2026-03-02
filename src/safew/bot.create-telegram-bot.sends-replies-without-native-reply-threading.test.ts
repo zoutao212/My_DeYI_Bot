@@ -1,13 +1,13 @@
-import fs from "node:fs";
+﻿import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-let createTelegramBot: typeof import("./bot.js").createTelegramBot;
+let createSafewBot: typeof import("./bot.js").createSafewBot;
 let resetInboundDedupe: typeof import("../auto-reply/reply/inbound-dedupe.js").resetInboundDedupe;
 
 const { sessionStorePath } = vi.hoisted(() => ({
-  sessionStorePath: `/tmp/clawdbot-telegram-reply-threading-${Math.random()
+  sessionStorePath: `/tmp/clawdbot-safew-reply-threading-${Math.random()
     .toString(16)
     .slice(2)}.json`,
 }));
@@ -39,17 +39,17 @@ vi.mock("../config/sessions.js", async (importOriginal) => {
   };
 });
 
-const { readTelegramAllowFromStore, upsertTelegramPairingRequest } = vi.hoisted(() => ({
-  readTelegramAllowFromStore: vi.fn(async () => [] as string[]),
-  upsertTelegramPairingRequest: vi.fn(async () => ({
+const { readSafewAllowFromStore, upsertSafewPairingRequest } = vi.hoisted(() => ({
+  readSafewAllowFromStore: vi.fn(async () => [] as string[]),
+  upsertSafewPairingRequest: vi.fn(async () => ({
     code: "PAIRCODE",
     created: true,
   })),
 }));
 
 vi.mock("./pairing-store.js", () => ({
-  readTelegramAllowFromStore,
-  upsertTelegramPairingRequest,
+  readSafewAllowFromStore,
+  upsertSafewPairingRequest,
 }));
 
 const useSpy = vi.fn();
@@ -136,16 +136,16 @@ const getOnHandler = (event: string) => {
   return handler as (ctx: Record<string, unknown>) => Promise<void>;
 };
 
-describe("createTelegramBot", () => {
+describe("createSafewBot", () => {
   beforeEach(async () => {
     vi.resetModules();
     ({ resetInboundDedupe } = await import("../auto-reply/reply/inbound-dedupe.js"));
-    ({ createTelegramBot } = await import("./bot.js"));
+    ({ createSafewBot } = await import("./bot.js"));
     replyModule = await import("../auto-reply/reply.js");
     resetInboundDedupe();
     loadConfig.mockReturnValue({
       channels: {
-        telegram: { dmPolicy: "open", allowFrom: ["*"] },
+        safew: { dmPolicy: "open", allowFrom: ["*"] },
       },
     });
     loadWebMedia.mockReset();
@@ -169,7 +169,7 @@ describe("createTelegramBot", () => {
     replySpy.mockReset();
     replySpy.mockResolvedValue({ text: "a".repeat(4500) });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
     await handler({
       message: {
@@ -197,7 +197,7 @@ describe("createTelegramBot", () => {
       replyToId: "101",
     });
 
-    createTelegramBot({ token: "tok", replyToMode: "first" });
+    createSafewBot({ token: "tok", replyToMode: "first" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
     await handler({
       message: {
@@ -225,12 +225,12 @@ describe("createTelegramBot", () => {
     replySpy.mockResolvedValue({ text: "final reply" });
     loadConfig.mockReturnValue({
       channels: {
-        telegram: { dmPolicy: "open", allowFrom: ["*"] },
+        safew: { dmPolicy: "open", allowFrom: ["*"] },
       },
       messages: { responsePrefix: "PFX" },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
     await handler({
       message: {
@@ -255,7 +255,7 @@ describe("createTelegramBot", () => {
       replyToId: "101",
     });
 
-    createTelegramBot({ token: "tok", replyToMode: "all" });
+    createSafewBot({ token: "tok", replyToMode: "all" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
     await handler({
       message: {
@@ -273,13 +273,13 @@ describe("createTelegramBot", () => {
       expect(call[2]?.reply_to_message_id).toBe(101);
     }
   });
-  it("blocks group messages when telegram.groups is set without a wildcard", async () => {
+  it("blocks group messages when safew.groups is set without a wildcard", async () => {
     onSpy.mockReset();
     const replySpy = replyModule.__replySpy as unknown as ReturnType<typeof vi.fn>;
     replySpy.mockReset();
     loadConfig.mockReturnValue({
       channels: {
-        telegram: {
+        safew: {
           groups: {
             "123": { requireMention: false },
           },
@@ -287,7 +287,7 @@ describe("createTelegramBot", () => {
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -308,11 +308,11 @@ describe("createTelegramBot", () => {
     replySpy.mockReset();
     loadConfig.mockReturnValue({
       channels: {
-        telegram: { groups: { "*": { requireMention: true } } },
+        safew: { groups: { "*": { requireMention: true } } },
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -331,18 +331,18 @@ describe("createTelegramBot", () => {
     onSpy.mockReset();
     const replySpy = replyModule.__replySpy as unknown as ReturnType<typeof vi.fn>;
     replySpy.mockReset();
-    const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawdbot-telegram-"));
+    const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawdbot-safew-"));
     const storePath = path.join(storeDir, "sessions.json");
     fs.writeFileSync(
       storePath,
       JSON.stringify({
-        "agent:ops:telegram:group:123": { groupActivation: "always" },
+        "agent:ops:safew:group:123": { groupActivation: "always" },
       }),
       "utf-8",
     );
     loadConfig.mockReturnValue({
       channels: {
-        telegram: {
+        safew: {
           groupPolicy: "open",
           groups: { "*": { requireMention: true } },
         },
@@ -351,7 +351,7 @@ describe("createTelegramBot", () => {
         {
           agentId: "ops",
           match: {
-            channel: "telegram",
+            channel: "safew",
             peer: { kind: "group", id: "123" },
           },
         },
@@ -359,7 +359,7 @@ describe("createTelegramBot", () => {
       session: { store: storePath },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({

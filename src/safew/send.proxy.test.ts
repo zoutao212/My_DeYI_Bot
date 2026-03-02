@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { botApi, botCtorSpy } = vi.hoisted(() => ({
   botApi: {
@@ -17,8 +17,8 @@ const { makeProxyFetch } = vi.hoisted(() => ({
   makeProxyFetch: vi.fn(),
 }));
 
-const { resolveTelegramFetch } = vi.hoisted(() => ({
-  resolveTelegramFetch: vi.fn(),
+const { resolveSafewFetch } = vi.hoisted(() => ({
+  resolveSafewFetch: vi.fn(),
 }));
 
 vi.mock("../config/config.js", async (importOriginal) => {
@@ -34,7 +34,7 @@ vi.mock("./proxy.js", () => ({
 }));
 
 vi.mock("./fetch.js", () => ({
-  resolveTelegramFetch,
+  resolveSafewFetch,
 }));
 
 vi.mock("grammy", () => ({
@@ -50,9 +50,9 @@ vi.mock("grammy", () => ({
   InputFile: class {},
 }));
 
-import { deleteMessageTelegram, reactMessageTelegram, sendMessageTelegram } from "./send.js";
+import { deleteMessageSafew, reactMessageSafew, sendMessageSafew } from "./send.js";
 
-describe("telegram proxy client", () => {
+describe("safew proxy client", () => {
   const proxyUrl = "http://proxy.test:8080";
 
   beforeEach(() => {
@@ -61,22 +61,22 @@ describe("telegram proxy client", () => {
     botApi.deleteMessage.mockResolvedValue(true);
     botCtorSpy.mockReset();
     loadConfig.mockReturnValue({
-      channels: { telegram: { accounts: { foo: { proxy: proxyUrl } } } },
+      channels: { safew: { accounts: { foo: { proxy: proxyUrl } } } },
     });
     makeProxyFetch.mockReset();
-    resolveTelegramFetch.mockReset();
+    resolveSafewFetch.mockReset();
   });
 
   it("uses proxy fetch for sendMessage", async () => {
     const proxyFetch = vi.fn();
     const fetchImpl = vi.fn();
     makeProxyFetch.mockReturnValue(proxyFetch as unknown as typeof fetch);
-    resolveTelegramFetch.mockReturnValue(fetchImpl as unknown as typeof fetch);
+    resolveSafewFetch.mockReturnValue(fetchImpl as unknown as typeof fetch);
 
-    await sendMessageTelegram("123", "hi", { token: "tok", accountId: "foo" });
+    await sendMessageSafew("123", "hi", { token: "tok", accountId: "foo" });
 
     expect(makeProxyFetch).toHaveBeenCalledWith(proxyUrl);
-    expect(resolveTelegramFetch).toHaveBeenCalledWith(proxyFetch);
+    expect(resolveSafewFetch).toHaveBeenCalledWith(proxyFetch);
     expect(botCtorSpy).toHaveBeenCalledWith(
       "tok",
       expect.objectContaining({
@@ -89,12 +89,12 @@ describe("telegram proxy client", () => {
     const proxyFetch = vi.fn();
     const fetchImpl = vi.fn();
     makeProxyFetch.mockReturnValue(proxyFetch as unknown as typeof fetch);
-    resolveTelegramFetch.mockReturnValue(fetchImpl as unknown as typeof fetch);
+    resolveSafewFetch.mockReturnValue(fetchImpl as unknown as typeof fetch);
 
-    await reactMessageTelegram("123", "456", "✅", { token: "tok", accountId: "foo" });
+    await reactMessageSafew("123", "456", "✅", { token: "tok", accountId: "foo" });
 
     expect(makeProxyFetch).toHaveBeenCalledWith(proxyUrl);
-    expect(resolveTelegramFetch).toHaveBeenCalledWith(proxyFetch);
+    expect(resolveSafewFetch).toHaveBeenCalledWith(proxyFetch);
     expect(botCtorSpy).toHaveBeenCalledWith(
       "tok",
       expect.objectContaining({
@@ -107,12 +107,12 @@ describe("telegram proxy client", () => {
     const proxyFetch = vi.fn();
     const fetchImpl = vi.fn();
     makeProxyFetch.mockReturnValue(proxyFetch as unknown as typeof fetch);
-    resolveTelegramFetch.mockReturnValue(fetchImpl as unknown as typeof fetch);
+    resolveSafewFetch.mockReturnValue(fetchImpl as unknown as typeof fetch);
 
-    await deleteMessageTelegram("123", "456", { token: "tok", accountId: "foo" });
+    await deleteMessageSafew("123", "456", { token: "tok", accountId: "foo" });
 
     expect(makeProxyFetch).toHaveBeenCalledWith(proxyUrl);
-    expect(resolveTelegramFetch).toHaveBeenCalledWith(proxyFetch);
+    expect(resolveSafewFetch).toHaveBeenCalledWith(proxyFetch);
     expect(botCtorSpy).toHaveBeenCalledWith(
       "tok",
       expect.objectContaining({

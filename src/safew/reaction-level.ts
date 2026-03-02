@@ -1,10 +1,10 @@
-import type { ClawdbotConfig } from "../config/config.js";
-import { resolveTelegramAccount } from "./accounts.js";
+﻿import type { ClawdbotConfig } from "../config/config.js";
+import { resolveSafewAccount } from "./accounts.js";
 
-export type TelegramReactionLevel = "off" | "ack" | "minimal" | "extensive";
+export type SafewReactionLevel = "off" | "ack" | "minimal" | "extensive";
 
 export type ResolvedReactionLevel = {
-  level: TelegramReactionLevel;
+  level: SafewReactionLevel;
   /** Whether ACK reactions (e.g., 👀 when processing) are enabled. */
   ackEnabled: boolean;
   /** Whether agent-controlled reactions are enabled. */
@@ -16,15 +16,15 @@ export type ResolvedReactionLevel = {
 /**
  * Resolve the effective reaction level and its implications.
  */
-export function resolveTelegramReactionLevel(params: {
+export function resolveSafewReactionLevel(params: {
   cfg: ClawdbotConfig;
   accountId?: string;
 }): ResolvedReactionLevel {
-  const account = resolveTelegramAccount({
+  const account = resolveSafewAccount({
     cfg: params.cfg,
     accountId: params.accountId,
   });
-  const level = (account.config.reactionLevel ?? "minimal") as TelegramReactionLevel;
+  const level = (account.config.reactionLevel ?? "minimal") as SafewReactionLevel;
 
   switch (level) {
     case "off":

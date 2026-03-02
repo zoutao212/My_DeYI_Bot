@@ -1,10 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { beforeEach, describe, expect, it, vi } from "vitest";
 
-let createTelegramBot: typeof import("./bot.js").createTelegramBot;
+let createSafewBot: typeof import("./bot.js").createSafewBot;
 let resetInboundDedupe: typeof import("../auto-reply/reply/inbound-dedupe.js").resetInboundDedupe;
 
 const { sessionStorePath } = vi.hoisted(() => ({
-  sessionStorePath: `/tmp/clawdbot-telegram-${Math.random().toString(16).slice(2)}.json`,
+  sessionStorePath: `/tmp/clawdbot-safew-${Math.random().toString(16).slice(2)}.json`,
 }));
 
 const { loadWebMedia } = vi.hoisted(() => ({
@@ -34,17 +34,17 @@ vi.mock("../config/sessions.js", async (importOriginal) => {
   };
 });
 
-const { readTelegramAllowFromStore, upsertTelegramPairingRequest } = vi.hoisted(() => ({
-  readTelegramAllowFromStore: vi.fn(async () => [] as string[]),
-  upsertTelegramPairingRequest: vi.fn(async () => ({
+const { readSafewAllowFromStore, upsertSafewPairingRequest } = vi.hoisted(() => ({
+  readSafewAllowFromStore: vi.fn(async () => [] as string[]),
+  upsertSafewPairingRequest: vi.fn(async () => ({
     code: "PAIRCODE",
     created: true,
   })),
 }));
 
 vi.mock("./pairing-store.js", () => ({
-  readTelegramAllowFromStore,
-  upsertTelegramPairingRequest,
+  readSafewAllowFromStore,
+  upsertSafewPairingRequest,
 }));
 
 const useSpy = vi.fn();
@@ -131,16 +131,16 @@ const getOnHandler = (event: string) => {
   return handler as (ctx: Record<string, unknown>) => Promise<void>;
 };
 
-describe("createTelegramBot", () => {
+describe("createSafewBot", () => {
   beforeEach(async () => {
     vi.resetModules();
     ({ resetInboundDedupe } = await import("../auto-reply/reply/inbound-dedupe.js"));
-    ({ createTelegramBot } = await import("./bot.js"));
+    ({ createSafewBot } = await import("./bot.js"));
     replyModule = await import("../auto-reply/reply.js");
     resetInboundDedupe();
     loadConfig.mockReturnValue({
       channels: {
-        telegram: { dmPolicy: "open", allowFrom: ["*"] },
+        safew: { dmPolicy: "open", allowFrom: ["*"] },
       },
     });
     loadWebMedia.mockReset();
@@ -164,7 +164,7 @@ describe("createTelegramBot", () => {
 
     loadConfig.mockReturnValue({
       channels: {
-        telegram: {
+        safew: {
           groupPolicy: "open",
           groups: {
             "-1001234567890": {
@@ -183,7 +183,7 @@ describe("createTelegramBot", () => {
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -220,14 +220,14 @@ describe("createTelegramBot", () => {
 
     loadConfig.mockReturnValue({
       channels: {
-        telegram: {
+        safew: {
           groupPolicy: "open",
           groups: { "*": { requireMention: false } },
         },
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -265,7 +265,7 @@ describe("createTelegramBot", () => {
     loadConfig.mockReturnValue({
       commands: { native: true },
       channels: {
-        telegram: {
+        safew: {
           dmPolicy: "open",
           allowFrom: ["*"],
           groups: { "*": { requireMention: false } },
@@ -273,7 +273,7 @@ describe("createTelegramBot", () => {
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     expect(commandSpy).toHaveBeenCalled();
     const handler = commandSpy.mock.calls[0][1] as (ctx: Record<string, unknown>) => Promise<void>;
 
@@ -314,14 +314,14 @@ describe("createTelegramBot", () => {
     loadConfig.mockReturnValue({
       commands: { native: true },
       channels: {
-        telegram: {
+        safew: {
           dmPolicy: "open",
           allowFrom: ["*"],
         },
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const verboseHandler = commandSpy.mock.calls.find((call) => call[0] === "verbose")?.[1] as
       | ((ctx: Record<string, unknown>) => Promise<void>)
       | undefined;
@@ -348,11 +348,11 @@ describe("createTelegramBot", () => {
 
     loadConfig.mockReturnValue({
       channels: {
-        telegram: { dmPolicy: "open", allowFrom: ["*"] },
+        safew: { dmPolicy: "open", allowFrom: ["*"] },
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     const ctx = {

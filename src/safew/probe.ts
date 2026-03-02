@@ -1,8 +1,8 @@
-import { makeProxyFetch } from "./proxy.js";
+﻿import { makeProxyFetch } from "./proxy.js";
 
-const TELEGRAM_API_BASE = "https://api.telegram.org";
+const SAFEW_API_BASE = "https://api.safew.org";
 
-export type TelegramProbe = {
+export type SafewProbe = {
   ok: boolean;
   status?: number | null;
   error?: string | null;
@@ -61,16 +61,16 @@ async function fetchWithTimeout(
   throw lastError ?? new Error("Fetch failed after retries");
 }
 
-export async function probeTelegram(
+export async function probeSafew(
   token: string,
   timeoutMs: number,
   proxyUrl?: string,
-): Promise<TelegramProbe> {
+): Promise<SafewProbe> {
   const started = Date.now();
   const fetcher = proxyUrl ? makeProxyFetch(proxyUrl) : fetch;
-  const base = `${TELEGRAM_API_BASE}/bot${token}`;
+  const base = `${SAFEW_API_BASE}/bot${token}`;
 
-  const result: TelegramProbe = {
+  const result: SafewProbe = {
     ok: false,
     status: null,
     error: null,

@@ -1,15 +1,15 @@
-import type { Bot } from "grammy";
+﻿import type { Bot } from "grammy";
 
-const TELEGRAM_DRAFT_MAX_CHARS = 4096;
+const SAFEW_DRAFT_MAX_CHARS = 4096;
 const DEFAULT_THROTTLE_MS = 300;
 
-export type TelegramDraftStream = {
+export type SafewDraftStream = {
   update: (text: string) => void;
   flush: () => Promise<void>;
   stop: () => void;
 };
 
-export function createTelegramDraftStream(params: {
+export function createSafewDraftStream(params: {
   api: Bot["api"];
   chatId: number;
   draftId: number;
@@ -18,8 +18,8 @@ export function createTelegramDraftStream(params: {
   throttleMs?: number;
   log?: (message: string) => void;
   warn?: (message: string) => void;
-}): TelegramDraftStream {
-  const maxChars = Math.min(params.maxChars ?? TELEGRAM_DRAFT_MAX_CHARS, TELEGRAM_DRAFT_MAX_CHARS);
+}): SafewDraftStream {
+  const maxChars = Math.min(params.maxChars ?? SAFEW_DRAFT_MAX_CHARS, SAFEW_DRAFT_MAX_CHARS);
   const throttleMs = Math.max(50, params.throttleMs ?? DEFAULT_THROTTLE_MS);
   const rawDraftId = Number.isFinite(params.draftId) ? Math.trunc(params.draftId) : 1;
   const draftId = rawDraftId === 0 ? 1 : Math.abs(rawDraftId);
@@ -44,7 +44,7 @@ export function createTelegramDraftStream(params: {
       // Drafts are capped at 4096 chars. Stop streaming once we exceed the cap
       // so we don't keep sending failing updates or a truncated preview.
       stopped = true;
-      params.warn?.(`telegram draft stream stopped (draft length ${trimmed.length} > ${maxChars})`);
+      params.warn?.(`safew draft stream stopped (draft length ${trimmed.length} > ${maxChars})`);
       return;
     }
     if (trimmed === lastSentText) return;
@@ -55,7 +55,7 @@ export function createTelegramDraftStream(params: {
     } catch (err) {
       stopped = true;
       params.warn?.(
-        `telegram draft stream failed: ${err instanceof Error ? err.message : String(err)}`,
+        `safew draft stream failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   };
@@ -116,7 +116,7 @@ export function createTelegramDraftStream(params: {
   };
 
   params.log?.(
-    `telegram draft stream ready (draftId=${draftId}, maxChars=${maxChars}, throttleMs=${throttleMs})`,
+    `safew draft stream ready (draftId=${draftId}, maxChars=${maxChars}, throttleMs=${throttleMs})`,
   );
 
   return { update, flush, stop };

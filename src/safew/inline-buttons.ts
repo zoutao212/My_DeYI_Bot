@@ -1,11 +1,11 @@
-import type { ClawdbotConfig } from "../config/config.js";
-import type { TelegramInlineButtonsScope } from "../config/types.telegram.js";
-import { listTelegramAccountIds, resolveTelegramAccount } from "./accounts.js";
-import { parseTelegramTarget } from "./targets.js";
+﻿import type { ClawdbotConfig } from "../config/config.js";
+import type { SafewInlineButtonsScope } from "../config/types.safew.js";
+import { listSafewAccountIds, resolveSafewAccount } from "./accounts.js";
+import { parseSafewTarget } from "./targets.js";
 
-const DEFAULT_INLINE_BUTTONS_SCOPE: TelegramInlineButtonsScope = "allowlist";
+const DEFAULT_INLINE_BUTTONS_SCOPE: SafewInlineButtonsScope = "allowlist";
 
-function normalizeInlineButtonsScope(value: unknown): TelegramInlineButtonsScope | undefined {
+function normalizeInlineButtonsScope(value: unknown): SafewInlineButtonsScope | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim().toLowerCase();
   if (
@@ -15,14 +15,14 @@ function normalizeInlineButtonsScope(value: unknown): TelegramInlineButtonsScope
     trimmed === "all" ||
     trimmed === "allowlist"
   ) {
-    return trimmed as TelegramInlineButtonsScope;
+    return trimmed as SafewInlineButtonsScope;
   }
   return undefined;
 }
 
 function resolveInlineButtonsScopeFromCapabilities(
   capabilities: unknown,
-): TelegramInlineButtonsScope {
+): SafewInlineButtonsScope {
   if (!capabilities) return DEFAULT_INLINE_BUTTONS_SCOPE;
   if (Array.isArray(capabilities)) {
     const enabled = capabilities.some(
@@ -37,33 +37,33 @@ function resolveInlineButtonsScopeFromCapabilities(
   return DEFAULT_INLINE_BUTTONS_SCOPE;
 }
 
-export function resolveTelegramInlineButtonsScope(params: {
+export function resolveSafewInlineButtonsScope(params: {
   cfg: ClawdbotConfig;
   accountId?: string | null;
-}): TelegramInlineButtonsScope {
-  const account = resolveTelegramAccount({ cfg: params.cfg, accountId: params.accountId });
+}): SafewInlineButtonsScope {
+  const account = resolveSafewAccount({ cfg: params.cfg, accountId: params.accountId });
   return resolveInlineButtonsScopeFromCapabilities(account.config.capabilities);
 }
 
-export function isTelegramInlineButtonsEnabled(params: {
+export function isSafewInlineButtonsEnabled(params: {
   cfg: ClawdbotConfig;
   accountId?: string | null;
 }): boolean {
   if (params.accountId) {
-    return resolveTelegramInlineButtonsScope(params) !== "off";
+    return resolveSafewInlineButtonsScope(params) !== "off";
   }
-  const accountIds = listTelegramAccountIds(params.cfg);
+  const accountIds = listSafewAccountIds(params.cfg);
   if (accountIds.length === 0) {
-    return resolveTelegramInlineButtonsScope(params) !== "off";
+    return resolveSafewInlineButtonsScope(params) !== "off";
   }
   return accountIds.some(
-    (accountId) => resolveTelegramInlineButtonsScope({ cfg: params.cfg, accountId }) !== "off",
+    (accountId) => resolveSafewInlineButtonsScope({ cfg: params.cfg, accountId }) !== "off",
   );
 }
 
-export function resolveTelegramTargetChatType(target: string): "direct" | "group" | "unknown" {
+export function resolveSafewTargetChatType(target: string): "direct" | "group" | "unknown" {
   if (!target.trim()) return "unknown";
-  const parsed = parseTelegramTarget(target);
+  const parsed = parseSafewTarget(target);
   const chatId = parsed.chatId.trim();
   if (!chatId) return "unknown";
   if (/^-?\d+$/.test(chatId)) {

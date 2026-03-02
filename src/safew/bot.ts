@@ -1,4 +1,4 @@
-// @ts-nocheck
+﻿// @ts-nocheck
 import { sequentialize } from "@grammyjs/runner";
 import { apiThrottler } from "@grammyjs/transformer-throttler";
 import type { ApiClientOptions } from "grammy";
@@ -26,26 +26,26 @@ import { getChildLogger } from "../logging.js";
 import { resolveAgentRoute } from "../routing/resolve-route.js";
 import { resolveThreadSessionKeys } from "../routing/session-key.js";
 import type { RuntimeEnv } from "../runtime.js";
-import { resolveTelegramAccount } from "./accounts.js";
+import { resolveSafewAccount } from "./accounts.js";
 import {
-  buildTelegramGroupPeerId,
-  resolveTelegramForumThreadId,
-  resolveTelegramStreamMode,
+  buildSafewGroupPeerId,
+  resolveSafewForumThreadId,
+  resolveSafewStreamMode,
 } from "./bot/helpers.js";
-import type { TelegramContext, TelegramMessage } from "./bot/types.js";
-import { registerTelegramHandlers } from "./bot-handlers.js";
-import { createTelegramMessageProcessor } from "./bot-message.js";
-import { registerTelegramNativeCommands } from "./bot-native-commands.js";
+import type { SafewContext, SafewMessage } from "./bot/types.js";
+import { registerSafewHandlers } from "./bot-handlers.js";
+import { createSafewMessageProcessor } from "./bot-message.js";
+import { registerSafewNativeCommands } from "./bot-native-commands.js";
 import {
-  buildTelegramUpdateKey,
-  createTelegramUpdateDedupe,
-  resolveTelegramUpdateId,
-  type TelegramUpdateKeyContext,
+  buildSafewUpdateKey,
+  createSafewUpdateDedupe,
+  resolveSafewUpdateId,
+  type SafewUpdateKeyContext,
 } from "./bot-updates.js";
-import { resolveTelegramFetch } from "./fetch.js";
+import { resolveSafewFetch } from "./fetch.js";
 import { wasSentByBot } from "./sent-message-cache.js";
 
-export type TelegramBotOptions = {
+export type SafewBotOptions = {
   token: string;
   accountId?: string;
   runtime?: RuntimeEnv;
@@ -62,20 +62,20 @@ export type TelegramBotOptions = {
   };
 };
 
-export function getTelegramSequentialKey(ctx: {
+export function getSafewSequentialKey(ctx: {
   chat?: { id?: number };
-  message?: TelegramMessage;
+  message?: SafewMessage;
   update?: {
-    message?: TelegramMessage;
-    edited_message?: TelegramMessage;
-    callback_query?: { message?: TelegramMessage };
+    message?: SafewMessage;
+    edited_message?: SafewMessage;
+    callback_query?: { message?: SafewMessage };
     message_reaction?: { chat?: { id?: number } };
   };
 }): string {
   // Handle reaction updates
   const reaction = ctx.update?.message_reaction;
   if (reaction?.chat?.id) {
-    return `telegram:${reaction.chat.id}`;
+    return `safew:${reaction.chat.id}`;
   }
   const msg =
     ctx.message ??
@@ -89,21 +89,21 @@ export function getTelegramSequentialKey(ctx: {
     rawText &&
     isControlCommandMessage(rawText, undefined, botUsername ? { botUsername } : undefined)
   ) {
-    if (typeof chatId === "number") return `telegram:${chatId}:control`;
-    return "telegram:control";
+    if (typeof chatId === "number") return `safew:${chatId}:control`;
+    return "safew:control";
   }
   const isForum = (msg?.chat as { is_forum?: boolean } | undefined)?.is_forum;
-  const threadId = resolveTelegramForumThreadId({
+  const threadId = resolveSafewForumThreadId({
     isForum,
     messageThreadId: msg?.message_thread_id,
   });
   if (typeof chatId === "number") {
-    return threadId != null ? `telegram:${chatId}:topic:${threadId}` : `telegram:${chatId}`;
+    return threadId != null ? `safew:${chatId}:topic:${threadId}` : `safew:${chatId}`;
   }
-  return "telegram:unknown";
+  return "safew:unknown";
 }
 
-export function createTelegramBot(opts: TelegramBotOptions) {
+export function createSafewBot(opts: SafewBotOptions) {
   const runtime: RuntimeEnv = opts.runtime ?? {
     log: console.log,
     error: console.error,
@@ -112,58 +112,56 @@ export function createTelegramBot(opts: TelegramBotOptions) {
     },
   };
   const cfg = opts.config ?? loadConfig();
-  const account = resolveTelegramAccount({
+  const account = resolveSafewAccount({
     cfg,
     accountId: opts.accountId,
   });
-  const telegramCfg = account.config;
+  const safewCfg = account.config;
 
-  const fetchImpl = resolveTelegramFetch(opts.proxyFetch);
+  const fetchImpl = resolveSafewFetch(opts.proxyFetch);
   const shouldProvideFetch = Boolean(fetchImpl);
   const timeoutSeconds =
-    typeof telegramCfg?.timeoutSeconds === "number" && Number.isFinite(telegramCfg.timeoutSeconds)
-      ? Math.max(1, Math.floor(telegramCfg.timeoutSeconds))
+    typeof safewCfg?.timeoutSeconds === "number" && Number.isFinite(safewCfg.timeoutSeconds)
+      ? Math.max(1, Math.floor(safewCfg.timeoutSeconds))
       : undefined;
-  const client: ApiClientOptions | undefined =
-    shouldProvideFetch || timeoutSeconds
-      ? {
-          ...(shouldProvideFetch && fetchImpl
-            ? { fetch: fetchImpl as unknown as ApiClientOptions["fetch"] }
-            : {}),
-          ...(timeoutSeconds ? { timeoutSeconds } : {}),
-        }
-      : undefined;
+  const client: ApiClientOptions = {
+    baseFetchUrl: "https://api.safew.org",
+    ...(shouldProvideFetch && fetchImpl
+      ? { fetch: fetchImpl as unknown as ApiClientOptions["fetch"] }
+      : {}),
+    ...(timeoutSeconds ? { timeoutSeconds } : {}),
+  };
 
-  const bot = new Bot(opts.token, client ? { client } : undefined);
+  const bot = new Bot(opts.token, { client });
   bot.api.config.use(apiThrottler());
-  bot.use(sequentialize(getTelegramSequentialKey));
+  bot.use(sequentialize(getSafewSequentialKey));
 
-  const recentUpdates = createTelegramUpdateDedupe();
+  const recentUpdates = createSafewUpdateDedupe();
   let lastUpdateId =
     typeof opts.updateOffset?.lastUpdateId === "number" ? opts.updateOffset.lastUpdateId : null;
 
-  const recordUpdateId = (ctx: TelegramUpdateKeyContext) => {
-    const updateId = resolveTelegramUpdateId(ctx);
+  const recordUpdateId = (ctx: SafewUpdateKeyContext) => {
+    const updateId = resolveSafewUpdateId(ctx);
     if (typeof updateId !== "number") return;
     if (lastUpdateId !== null && updateId <= lastUpdateId) return;
     lastUpdateId = updateId;
     void opts.updateOffset?.onUpdateId?.(updateId);
   };
 
-  const shouldSkipUpdate = (ctx: TelegramUpdateKeyContext) => {
-    const updateId = resolveTelegramUpdateId(ctx);
+  const shouldSkipUpdate = (ctx: SafewUpdateKeyContext) => {
+    const updateId = resolveSafewUpdateId(ctx);
     if (typeof updateId === "number" && lastUpdateId !== null) {
       if (updateId <= lastUpdateId) return true;
     }
-    const key = buildTelegramUpdateKey(ctx);
+    const key = buildSafewUpdateKey(ctx);
     const skipped = recentUpdates.check(key);
     if (skipped && key && shouldLogVerbose()) {
-      logVerbose(`telegram dedupe: skipped ${key}`);
+      logVerbose(`safew dedupe: skipped ${key}`);
     }
     return skipped;
   };
 
-  const rawUpdateLogger = createSubsystemLogger("gateway/channels/telegram/raw-update");
+  const rawUpdateLogger = createSubsystemLogger("gateway/channels/safew/raw-update");
   const MAX_RAW_UPDATE_CHARS = 8000;
   const MAX_RAW_UPDATE_STRING = 500;
   const MAX_RAW_UPDATE_ARRAY = 20;
@@ -194,9 +192,9 @@ export function createTelegramBot(opts: TelegramBotOptions) {
         const raw = stringifyUpdate(ctx.update);
         const preview =
           raw.length > MAX_RAW_UPDATE_CHARS ? `${raw.slice(0, MAX_RAW_UPDATE_CHARS)}...` : raw;
-        rawUpdateLogger.debug(`telegram update: ${preview}`);
+        rawUpdateLogger.debug(`safew update: ${preview}`);
       } catch (err) {
-        rawUpdateLogger.debug(`telegram update log failed: ${String(err)}`);
+        rawUpdateLogger.debug(`safew update log failed: ${String(err)}`);
       }
     }
     await next();
@@ -205,43 +203,43 @@ export function createTelegramBot(opts: TelegramBotOptions) {
 
   const historyLimit = Math.max(
     0,
-    telegramCfg.historyLimit ??
+    safewCfg.historyLimit ??
       cfg.messages?.groupChat?.historyLimit ??
       DEFAULT_GROUP_HISTORY_LIMIT,
   );
   const groupHistories = new Map<string, HistoryEntry[]>();
-  const textLimit = resolveTextChunkLimit(cfg, "telegram", account.accountId);
-  const dmPolicy = telegramCfg.dmPolicy ?? "pairing";
-  const allowFrom = opts.allowFrom ?? telegramCfg.allowFrom;
+  const textLimit = resolveTextChunkLimit(cfg, "safew", account.accountId);
+  const dmPolicy = safewCfg.dmPolicy ?? "pairing";
+  const allowFrom = opts.allowFrom ?? safewCfg.allowFrom;
   const groupAllowFrom =
     opts.groupAllowFrom ??
-    telegramCfg.groupAllowFrom ??
-    (telegramCfg.allowFrom && telegramCfg.allowFrom.length > 0
-      ? telegramCfg.allowFrom
+    safewCfg.groupAllowFrom ??
+    (safewCfg.allowFrom && safewCfg.allowFrom.length > 0
+      ? safewCfg.allowFrom
       : undefined) ??
     (opts.allowFrom && opts.allowFrom.length > 0 ? opts.allowFrom : undefined);
-  const replyToMode = opts.replyToMode ?? telegramCfg.replyToMode ?? "first";
-  const streamMode = resolveTelegramStreamMode(telegramCfg);
+  const replyToMode = opts.replyToMode ?? safewCfg.replyToMode ?? "first";
+  const streamMode = resolveSafewStreamMode(safewCfg);
   const nativeEnabled = resolveNativeCommandsEnabled({
-    providerId: "telegram",
-    providerSetting: telegramCfg.commands?.native,
+    providerId: "safew",
+    providerSetting: safewCfg.commands?.native,
     globalSetting: cfg.commands?.native,
   });
   const nativeSkillsEnabled = resolveNativeSkillsEnabled({
-    providerId: "telegram",
-    providerSetting: telegramCfg.commands?.nativeSkills,
+    providerId: "safew",
+    providerSetting: safewCfg.commands?.nativeSkills,
     globalSetting: cfg.commands?.nativeSkills,
   });
   const nativeDisabledExplicit = isNativeCommandsExplicitlyDisabled({
-    providerSetting: telegramCfg.commands?.native,
+    providerSetting: safewCfg.commands?.native,
     globalSetting: cfg.commands?.native,
   });
   const useAccessGroups = cfg.commands?.useAccessGroups !== false;
   const ackReactionScope = cfg.messages?.ackReactionScope ?? "group-mentions";
-  const mediaMaxBytes = (opts.mediaMaxMb ?? telegramCfg.mediaMaxMb ?? 5) * 1024 * 1024;
-  const logger = getChildLogger({ module: "telegram-auto-reply" });
+  const mediaMaxBytes = (opts.mediaMaxMb ?? safewCfg.mediaMaxMb ?? 5) * 1024 * 1024;
+  const logger = getChildLogger({ module: "safew-auto-reply" });
   let botHasTopicsEnabled: boolean | undefined;
-  const resolveBotTopicsEnabled = async (ctx?: TelegramContext) => {
+  const resolveBotTopicsEnabled = async (ctx?: SafewContext) => {
     const fromCtx = ctx?.me as { has_topics_enabled?: boolean } | undefined;
     if (typeof fromCtx?.has_topics_enabled === "boolean") {
       botHasTopicsEnabled = fromCtx.has_topics_enabled;
@@ -252,7 +250,7 @@ export function createTelegramBot(opts: TelegramBotOptions) {
       const me = (await bot.api.getMe()) as { has_topics_enabled?: boolean };
       botHasTopicsEnabled = Boolean(me?.has_topics_enabled);
     } catch (err) {
-      logVerbose(`telegram getMe failed: ${String(err)}`);
+      logVerbose(`safew getMe failed: ${String(err)}`);
       botHasTopicsEnabled = false;
     }
     return botHasTopicsEnabled;
@@ -260,7 +258,7 @@ export function createTelegramBot(opts: TelegramBotOptions) {
   const resolveGroupPolicy = (chatId: string | number) =>
     resolveChannelGroupPolicy({
       cfg,
-      channel: "telegram",
+      channel: "safew",
       accountId: account.accountId,
       groupId: String(chatId),
     });
@@ -273,7 +271,7 @@ export function createTelegramBot(opts: TelegramBotOptions) {
     const agentId = params.agentId ?? resolveDefaultAgentId(cfg);
     const sessionKey =
       params.sessionKey ??
-      `agent:${agentId}:telegram:group:${buildTelegramGroupPeerId(params.chatId, params.messageThreadId)}`;
+      `agent:${agentId}:safew:group:${buildSafewGroupPeerId(params.chatId, params.messageThreadId)}`;
     const storePath = resolveStorePath(cfg.session?.store, { agentId });
     try {
       const store = loadSessionStore(storePath);
@@ -288,14 +286,14 @@ export function createTelegramBot(opts: TelegramBotOptions) {
   const resolveGroupRequireMention = (chatId: string | number) =>
     resolveChannelGroupRequireMention({
       cfg,
-      channel: "telegram",
+      channel: "safew",
       accountId: account.accountId,
       groupId: String(chatId),
       requireMentionOverride: opts.requireMention,
       overrideOrder: "after-config",
     });
-  const resolveTelegramGroupConfig = (chatId: string | number, messageThreadId?: number) => {
-    const groups = telegramCfg.groups;
+  const resolveSafewGroupConfig = (chatId: string | number, messageThreadId?: number) => {
+    const groups = safewCfg.groups;
     if (!groups) return { groupConfig: undefined, topicConfig: undefined };
     const groupKey = String(chatId);
     const groupConfig = groups[groupKey] ?? groups["*"];
@@ -304,11 +302,11 @@ export function createTelegramBot(opts: TelegramBotOptions) {
     return { groupConfig, topicConfig };
   };
 
-  const processMessage = createTelegramMessageProcessor({
+  const processMessage = createSafewMessageProcessor({
     bot,
     cfg,
     account,
-    telegramCfg,
+    safewCfg,
     historyLimit,
     groupHistories,
     dmPolicy,
@@ -318,7 +316,7 @@ export function createTelegramBot(opts: TelegramBotOptions) {
     logger,
     resolveGroupActivation,
     resolveGroupRequireMention,
-    resolveTelegramGroupConfig,
+    resolveSafewGroupConfig,
     runtime,
     replyToMode,
     streamMode,
@@ -327,12 +325,12 @@ export function createTelegramBot(opts: TelegramBotOptions) {
     resolveBotTopicsEnabled,
   });
 
-  registerTelegramNativeCommands({
+  registerSafewNativeCommands({
     bot,
     cfg,
     runtime,
     accountId: account.accountId,
-    telegramCfg,
+    safewCfg,
     allowFrom,
     groupAllowFrom,
     replyToMode,
@@ -342,7 +340,7 @@ export function createTelegramBot(opts: TelegramBotOptions) {
     nativeSkillsEnabled,
     nativeDisabledExplicit,
     resolveGroupPolicy,
-    resolveTelegramGroupConfig,
+    resolveSafewGroupConfig,
     shouldSkipUpdate,
     opts,
   });
@@ -359,7 +357,7 @@ export function createTelegramBot(opts: TelegramBotOptions) {
       const user = reaction.user;
 
       // Resolve reaction notification mode (default: "own")
-      const reactionMode = telegramCfg.reactionNotifications ?? "own";
+      const reactionMode = safewCfg.reactionNotifications ?? "own";
       if (reactionMode === "off") return;
       if (user?.is_bot) return;
       if (reactionMode === "own" && !wasSentByBot(chatId, messageId)) return;
@@ -395,17 +393,17 @@ export function createTelegramBot(opts: TelegramBotOptions) {
       // Extract forum thread info (similar to message processing)
       const messageThreadId = (reaction as any).message_thread_id;
       const isForum = (reaction.chat as any).is_forum === true;
-      const resolvedThreadId = resolveTelegramForumThreadId({
+      const resolvedThreadId = resolveSafewForumThreadId({
         isForum,
         messageThreadId,
       });
 
       // Resolve agent route for session
       const isGroup = reaction.chat.type === "group" || reaction.chat.type === "supergroup";
-      const peerId = isGroup ? buildTelegramGroupPeerId(chatId, resolvedThreadId) : String(chatId);
+      const peerId = isGroup ? buildSafewGroupPeerId(chatId, resolvedThreadId) : String(chatId);
       const route = resolveAgentRoute({
         cfg,
-        channel: "telegram",
+        channel: "safew",
         accountId: account.accountId,
         peer: { kind: isGroup ? "group" : "dm", id: peerId },
       });
@@ -420,29 +418,29 @@ export function createTelegramBot(opts: TelegramBotOptions) {
       // Enqueue system event for each added reaction
       for (const r of addedReactions) {
         const emoji = r.emoji;
-        const text = `Telegram reaction added: ${emoji} by ${senderLabel} on msg ${messageId}`;
+        const text = `Safew reaction added: ${emoji} by ${senderLabel} on msg ${messageId}`;
         enqueueSystemEvent(text, {
           sessionKey: sessionKey,
-          contextKey: `telegram:reaction:add:${chatId}:${messageId}:${user?.id ?? "anon"}:${emoji}`,
+          contextKey: `safew:reaction:add:${chatId}:${messageId}:${user?.id ?? "anon"}:${emoji}`,
         });
-        logVerbose(`telegram: reaction event enqueued: ${text}`);
+        logVerbose(`safew: reaction event enqueued: ${text}`);
       }
     } catch (err) {
-      runtime.error?.(danger(`telegram reaction handler failed: ${String(err)}`));
+      runtime.error?.(danger(`safew reaction handler failed: ${String(err)}`));
     }
   });
 
-  registerTelegramHandlers({
+  registerSafewHandlers({
     cfg,
     accountId: account.accountId,
     bot,
     opts,
     runtime,
     mediaMaxBytes,
-    telegramCfg,
+    safewCfg,
     groupAllowFrom,
     resolveGroupPolicy,
-    resolveTelegramGroupConfig,
+    resolveSafewGroupConfig,
     shouldSkipUpdate,
     processMessage,
     logger,
@@ -451,6 +449,6 @@ export function createTelegramBot(opts: TelegramBotOptions) {
   return bot;
 }
 
-export function createTelegramWebhookCallback(bot: Bot, path = "/telegram-webhook") {
+export function createSafewWebhookCallback(bot: Bot, path = "/safew-webhook") {
   return { path, handler: webhookCallback(bot, "http") };
 }

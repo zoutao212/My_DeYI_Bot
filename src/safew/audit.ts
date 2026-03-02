@@ -1,9 +1,9 @@
-import type { TelegramGroupConfig } from "../config/types.js";
+﻿import type { SafewGroupConfig } from "../config/types.js";
 import { makeProxyFetch } from "./proxy.js";
 
-const TELEGRAM_API_BASE = "https://api.telegram.org";
+const SAFEW_API_BASE = "https://api.safew.org";
 
-export type TelegramGroupMembershipAuditEntry = {
+export type SafewGroupMembershipAuditEntry = {
   chatId: string;
   ok: boolean;
   status?: string | null;
@@ -12,17 +12,17 @@ export type TelegramGroupMembershipAuditEntry = {
   matchSource?: "id";
 };
 
-export type TelegramGroupMembershipAudit = {
+export type SafewGroupMembershipAudit = {
   ok: boolean;
   checkedGroups: number;
   unresolvedGroups: number;
   hasWildcardUnmentionedGroups: boolean;
-  groups: TelegramGroupMembershipAuditEntry[];
+  groups: SafewGroupMembershipAuditEntry[];
   elapsedMs: number;
 };
 
-type TelegramApiOk<T> = { ok: true; result: T };
-type TelegramApiErr = { ok: false; description?: string };
+type SafewApiOk<T> = { ok: true; result: T };
+type SafewApiErr = { ok: false; description?: string };
 
 async function fetchWithTimeout(
   url: string,
@@ -42,8 +42,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-export function collectTelegramUnmentionedGroupIds(
-  groups: Record<string, TelegramGroupConfig> | undefined,
+export function collectSafewUnmentionedGroupIds(
+  groups: Record<string, SafewGroupConfig> | undefined,
 ) {
   if (!groups || typeof groups !== "object") {
     return {
@@ -59,8 +59,8 @@ export function collectTelegramUnmentionedGroupIds(
   for (const [key, value] of Object.entries(groups)) {
     if (key === "*") continue;
     if (!value || typeof value !== "object") continue;
-    if ((value as TelegramGroupConfig).enabled === false) continue;
-    if ((value as TelegramGroupConfig).requireMention !== false) continue;
+    if ((value as SafewGroupConfig).enabled === false) continue;
+    if ((value as SafewGroupConfig).requireMention !== false) continue;
     const id = String(key).trim();
     if (!id) continue;
     if (/^-?\d+$/.test(id)) {
@@ -73,13 +73,13 @@ export function collectTelegramUnmentionedGroupIds(
   return { groupIds, unresolvedGroups, hasWildcardUnmentionedGroups };
 }
 
-export async function auditTelegramGroupMembership(params: {
+export async function auditSafewGroupMembership(params: {
   token: string;
   botId: number;
   groupIds: string[];
   proxyUrl?: string;
   timeoutMs: number;
-}): Promise<TelegramGroupMembershipAudit> {
+}): Promise<SafewGroupMembershipAudit> {
   const started = Date.now();
   const token = params.token?.trim() ?? "";
   if (!token || params.groupIds.length === 0) {
@@ -94,14 +94,14 @@ export async function auditTelegramGroupMembership(params: {
   }
 
   const fetcher = params.proxyUrl ? makeProxyFetch(params.proxyUrl) : fetch;
-  const base = `${TELEGRAM_API_BASE}/bot${token}`;
-  const groups: TelegramGroupMembershipAuditEntry[] = [];
+  const base = `${SAFEW_API_BASE}/bot${token}`;
+  const groups: SafewGroupMembershipAuditEntry[] = [];
 
   for (const chatId of params.groupIds) {
     try {
       const url = `${base}/getChatMember?chat_id=${encodeURIComponent(chatId)}&user_id=${encodeURIComponent(String(params.botId))}`;
       const res = await fetchWithTimeout(url, params.timeoutMs, fetcher);
-      const json = (await res.json()) as TelegramApiOk<{ status?: string }> | TelegramApiErr;
+      const json = (await res.json()) as SafewApiOk<{ status?: string }> | SafewApiErr;
       if (!res.ok || !isRecord(json) || json.ok !== true) {
         const desc =
           isRecord(json) && json.ok === false && typeof json.description === "string"
@@ -117,8 +117,8 @@ export async function auditTelegramGroupMembership(params: {
         });
         continue;
       }
-      const status = isRecord((json as TelegramApiOk<unknown>).result)
-        ? ((json as TelegramApiOk<{ status?: string }>).result.status ?? null)
+      const status = isRecord((json as SafewApiOk<unknown>).result)
+        ? ((json as SafewApiOk<{ status?: string }>).result.status ?? null)
         : null;
       const ok = status === "creator" || status === "administrator" || status === "member";
       groups.push({

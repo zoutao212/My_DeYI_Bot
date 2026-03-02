@@ -1,29 +1,29 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+﻿import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { ClawdbotConfig } from "../config/config.js";
-import { resolveTelegramReactionLevel } from "./reaction-level.js";
+import { resolveSafewReactionLevel } from "./reaction-level.js";
 
-describe("resolveTelegramReactionLevel", () => {
-  const prevTelegramToken = process.env.TELEGRAM_BOT_TOKEN;
+describe("resolveSafewReactionLevel", () => {
+  const prevSafewToken = process.env.SAFEW_BOT_TOKEN;
 
   beforeAll(() => {
-    process.env.TELEGRAM_BOT_TOKEN = "test-token";
+    process.env.SAFEW_BOT_TOKEN = "test-token";
   });
 
   afterAll(() => {
-    if (prevTelegramToken === undefined) {
-      delete process.env.TELEGRAM_BOT_TOKEN;
+    if (prevSafewToken === undefined) {
+      delete process.env.SAFEW_BOT_TOKEN;
     } else {
-      process.env.TELEGRAM_BOT_TOKEN = prevTelegramToken;
+      process.env.SAFEW_BOT_TOKEN = prevSafewToken;
     }
   });
 
   it("defaults to minimal level when reactionLevel is not set", () => {
     const cfg: ClawdbotConfig = {
-      channels: { telegram: {} },
+      channels: { safew: {} },
     };
 
-    const result = resolveTelegramReactionLevel({ cfg });
+    const result = resolveSafewReactionLevel({ cfg });
     expect(result.level).toBe("minimal");
     expect(result.ackEnabled).toBe(false);
     expect(result.agentReactionsEnabled).toBe(true);
@@ -32,10 +32,10 @@ describe("resolveTelegramReactionLevel", () => {
 
   it("returns off level with no reactions enabled", () => {
     const cfg: ClawdbotConfig = {
-      channels: { telegram: { reactionLevel: "off" } },
+      channels: { safew: { reactionLevel: "off" } },
     };
 
-    const result = resolveTelegramReactionLevel({ cfg });
+    const result = resolveSafewReactionLevel({ cfg });
     expect(result.level).toBe("off");
     expect(result.ackEnabled).toBe(false);
     expect(result.agentReactionsEnabled).toBe(false);
@@ -44,10 +44,10 @@ describe("resolveTelegramReactionLevel", () => {
 
   it("returns ack level with only ackEnabled", () => {
     const cfg: ClawdbotConfig = {
-      channels: { telegram: { reactionLevel: "ack" } },
+      channels: { safew: { reactionLevel: "ack" } },
     };
 
-    const result = resolveTelegramReactionLevel({ cfg });
+    const result = resolveSafewReactionLevel({ cfg });
     expect(result.level).toBe("ack");
     expect(result.ackEnabled).toBe(true);
     expect(result.agentReactionsEnabled).toBe(false);
@@ -56,10 +56,10 @@ describe("resolveTelegramReactionLevel", () => {
 
   it("returns minimal level with agent reactions enabled and minimal guidance", () => {
     const cfg: ClawdbotConfig = {
-      channels: { telegram: { reactionLevel: "minimal" } },
+      channels: { safew: { reactionLevel: "minimal" } },
     };
 
-    const result = resolveTelegramReactionLevel({ cfg });
+    const result = resolveSafewReactionLevel({ cfg });
     expect(result.level).toBe("minimal");
     expect(result.ackEnabled).toBe(false);
     expect(result.agentReactionsEnabled).toBe(true);
@@ -68,10 +68,10 @@ describe("resolveTelegramReactionLevel", () => {
 
   it("returns extensive level with agent reactions enabled and extensive guidance", () => {
     const cfg: ClawdbotConfig = {
-      channels: { telegram: { reactionLevel: "extensive" } },
+      channels: { safew: { reactionLevel: "extensive" } },
     };
 
-    const result = resolveTelegramReactionLevel({ cfg });
+    const result = resolveSafewReactionLevel({ cfg });
     expect(result.level).toBe("extensive");
     expect(result.ackEnabled).toBe(false);
     expect(result.agentReactionsEnabled).toBe(true);
@@ -81,7 +81,7 @@ describe("resolveTelegramReactionLevel", () => {
   it("resolves reaction level from a specific account", () => {
     const cfg: ClawdbotConfig = {
       channels: {
-        telegram: {
+        safew: {
           reactionLevel: "ack",
           accounts: {
             work: { botToken: "tok-work", reactionLevel: "extensive" },
@@ -90,7 +90,7 @@ describe("resolveTelegramReactionLevel", () => {
       },
     };
 
-    const result = resolveTelegramReactionLevel({ cfg, accountId: "work" });
+    const result = resolveSafewReactionLevel({ cfg, accountId: "work" });
     expect(result.level).toBe("extensive");
     expect(result.ackEnabled).toBe(false);
     expect(result.agentReactionsEnabled).toBe(true);
@@ -100,7 +100,7 @@ describe("resolveTelegramReactionLevel", () => {
   it("falls back to global level when account has no reactionLevel", () => {
     const cfg: ClawdbotConfig = {
       channels: {
-        telegram: {
+        safew: {
           reactionLevel: "minimal",
           accounts: {
             work: { botToken: "tok-work" },
@@ -109,7 +109,7 @@ describe("resolveTelegramReactionLevel", () => {
       },
     };
 
-    const result = resolveTelegramReactionLevel({ cfg, accountId: "work" });
+    const result = resolveSafewReactionLevel({ cfg, accountId: "work" });
     expect(result.level).toBe("minimal");
     expect(result.agentReactionsEnabled).toBe(true);
     expect(result.agentReactionGuidance).toBe("minimal");

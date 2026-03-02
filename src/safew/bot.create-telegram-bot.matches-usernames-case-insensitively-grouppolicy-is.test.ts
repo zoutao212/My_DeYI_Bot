@@ -1,10 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { beforeEach, describe, expect, it, vi } from "vitest";
 
-let createTelegramBot: typeof import("./bot.js").createTelegramBot;
+let createSafewBot: typeof import("./bot.js").createSafewBot;
 let resetInboundDedupe: typeof import("../auto-reply/reply/inbound-dedupe.js").resetInboundDedupe;
 
 const { sessionStorePath } = vi.hoisted(() => ({
-  sessionStorePath: `/tmp/clawdbot-telegram-${Math.random().toString(16).slice(2)}.json`,
+  sessionStorePath: `/tmp/clawdbot-safew-${Math.random().toString(16).slice(2)}.json`,
 }));
 
 const { loadWebMedia } = vi.hoisted(() => ({
@@ -34,17 +34,17 @@ vi.mock("../config/sessions.js", async (importOriginal) => {
   };
 });
 
-const { readTelegramAllowFromStore, upsertTelegramPairingRequest } = vi.hoisted(() => ({
-  readTelegramAllowFromStore: vi.fn(async () => [] as string[]),
-  upsertTelegramPairingRequest: vi.fn(async () => ({
+const { readSafewAllowFromStore, upsertSafewPairingRequest } = vi.hoisted(() => ({
+  readSafewAllowFromStore: vi.fn(async () => [] as string[]),
+  upsertSafewPairingRequest: vi.fn(async () => ({
     code: "PAIRCODE",
     created: true,
   })),
 }));
 
 vi.mock("./pairing-store.js", () => ({
-  readTelegramAllowFromStore,
-  upsertTelegramPairingRequest,
+  readSafewAllowFromStore,
+  upsertSafewPairingRequest,
 }));
 
 const useSpy = vi.fn();
@@ -131,16 +131,16 @@ const getOnHandler = (event: string) => {
   return handler as (ctx: Record<string, unknown>) => Promise<void>;
 };
 
-describe("createTelegramBot", () => {
+describe("createSafewBot", () => {
   beforeEach(async () => {
     vi.resetModules();
     ({ resetInboundDedupe } = await import("../auto-reply/reply/inbound-dedupe.js"));
-    ({ createTelegramBot } = await import("./bot.js"));
+    ({ createSafewBot } = await import("./bot.js"));
     replyModule = await import("../auto-reply/reply.js");
     resetInboundDedupe();
     loadConfig.mockReturnValue({
       channels: {
-        telegram: { dmPolicy: "open", allowFrom: ["*"] },
+        safew: { dmPolicy: "open", allowFrom: ["*"] },
       },
     });
     loadWebMedia.mockReset();
@@ -163,7 +163,7 @@ describe("createTelegramBot", () => {
     replySpy.mockReset();
     loadConfig.mockReturnValue({
       channels: {
-        telegram: {
+        safew: {
           groupPolicy: "allowlist",
           allowFrom: ["@TestUser"], // Uppercase in config
           groups: { "*": { requireMention: false } },
@@ -171,7 +171,7 @@ describe("createTelegramBot", () => {
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -193,14 +193,14 @@ describe("createTelegramBot", () => {
     replySpy.mockReset();
     loadConfig.mockReturnValue({
       channels: {
-        telegram: {
+        safew: {
           groupPolicy: "disabled", // Even with disabled, DMs should work
           allowFrom: ["123456789"],
         },
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -216,19 +216,19 @@ describe("createTelegramBot", () => {
 
     expect(replySpy).toHaveBeenCalledTimes(1);
   });
-  it("allows direct messages with tg/Telegram-prefixed allowFrom entries", async () => {
+  it("allows direct messages with tg/Safew-prefixed allowFrom entries", async () => {
     onSpy.mockReset();
     const replySpy = replyModule.__replySpy as unknown as ReturnType<typeof vi.fn>;
     replySpy.mockReset();
     loadConfig.mockReturnValue({
       channels: {
-        telegram: {
+        safew: {
           allowFrom: ["  TG:123456789  "],
         },
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -244,19 +244,19 @@ describe("createTelegramBot", () => {
 
     expect(replySpy).toHaveBeenCalledTimes(1);
   });
-  it("allows direct messages with telegram:-prefixed allowFrom entries", async () => {
+  it("allows direct messages with safew:-prefixed allowFrom entries", async () => {
     onSpy.mockReset();
     const replySpy = replyModule.__replySpy as unknown as ReturnType<typeof vi.fn>;
     replySpy.mockReset();
     loadConfig.mockReturnValue({
       channels: {
-        telegram: {
-          allowFrom: ["telegram:123456789"],
+        safew: {
+          allowFrom: ["safew:123456789"],
         },
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -278,7 +278,7 @@ describe("createTelegramBot", () => {
     replySpy.mockReset();
     loadConfig.mockReturnValue({
       channels: {
-        telegram: {
+        safew: {
           groupPolicy: "allowlist",
           allowFrom: ["*"], // Wildcard allows everyone
           groups: { "*": { requireMention: false } },
@@ -286,7 +286,7 @@ describe("createTelegramBot", () => {
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -308,14 +308,14 @@ describe("createTelegramBot", () => {
     replySpy.mockReset();
     loadConfig.mockReturnValue({
       channels: {
-        telegram: {
+        safew: {
           groupPolicy: "allowlist",
           allowFrom: ["123456789"],
         },
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -331,21 +331,21 @@ describe("createTelegramBot", () => {
 
     expect(replySpy).not.toHaveBeenCalled();
   });
-  it("matches telegram:-prefixed allowFrom entries in group allowlist", async () => {
+  it("matches safew:-prefixed allowFrom entries in group allowlist", async () => {
     onSpy.mockReset();
     const replySpy = replyModule.__replySpy as unknown as ReturnType<typeof vi.fn>;
     replySpy.mockReset();
     loadConfig.mockReturnValue({
       channels: {
-        telegram: {
+        safew: {
           groupPolicy: "allowlist",
-          allowFrom: ["telegram:123456789"], // Prefixed format
+          allowFrom: ["safew:123456789"], // Prefixed format
           groups: { "*": { requireMention: false } },
         },
       },
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -359,7 +359,7 @@ describe("createTelegramBot", () => {
       getFile: async () => ({ download: async () => new Uint8Array() }),
     });
 
-    // Should call reply because sender ID matches after stripping telegram: prefix
+    // Should call reply because sender ID matches after stripping safew: prefix
     expect(replySpy).toHaveBeenCalled();
   });
 });

@@ -1,37 +1,37 @@
-import { detectMime } from "../media/mime.js";
+﻿import { detectMime } from "../media/mime.js";
 import { type SavedMedia, saveMediaBuffer } from "../media/store.js";
 
-export type TelegramFileInfo = {
+export type SafewFileInfo = {
   file_id: string;
   file_unique_id?: string;
   file_size?: number;
   file_path?: string;
 };
 
-export async function getTelegramFile(token: string, fileId: string): Promise<TelegramFileInfo> {
+export async function getSafewFile(token: string, fileId: string): Promise<SafewFileInfo> {
   const res = await fetch(
-    `https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`,
+    `https://api.safew.org/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`,
   );
   if (!res.ok) {
     throw new Error(`getFile failed: ${res.status} ${res.statusText}`);
   }
-  const json = (await res.json()) as { ok: boolean; result?: TelegramFileInfo };
+  const json = (await res.json()) as { ok: boolean; result?: SafewFileInfo };
   if (!json.ok || !json.result?.file_path) {
     throw new Error("getFile returned no file_path");
   }
   return json.result;
 }
 
-export async function downloadTelegramFile(
+export async function downloadSafewFile(
   token: string,
-  info: TelegramFileInfo,
+  info: SafewFileInfo,
   maxBytes?: number,
 ): Promise<SavedMedia> {
   if (!info.file_path) throw new Error("file_path missing");
-  const url = `https://api.telegram.org/file/bot${token}/${info.file_path}`;
+  const url = `https://api.safew.org/file/bot${token}/${info.file_path}`;
   const res = await fetch(url);
   if (!res.ok || !res.body) {
-    throw new Error(`Failed to download telegram file: HTTP ${res.status}`);
+    throw new Error(`Failed to download safew file: HTTP ${res.status}`);
   }
   const array = Buffer.from(await res.arrayBuffer());
   const mime = await detectMime({

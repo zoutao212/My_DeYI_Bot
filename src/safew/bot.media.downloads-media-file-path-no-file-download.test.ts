@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetInboundDedupe } from "../auto-reply/reply/inbound-dedupe.js";
 import { MEDIA_GROUP_TIMEOUT_MS } from "./bot-updates.js";
 
@@ -53,7 +53,7 @@ vi.mock("../media/store.js", async (importOriginal) => {
     ...actual,
     saveMediaBuffer: vi.fn(async (buffer: Buffer, contentType?: string) => ({
       id: "media",
-      path: "/tmp/telegram-media",
+      path: "/tmp/safew-media",
       size: buffer.byteLength,
       contentType: contentType ?? "application/octet-stream",
     })),
@@ -65,7 +65,7 @@ vi.mock("../config/config.js", async (importOriginal) => {
   return {
     ...actual,
     loadConfig: () => ({
-      channels: { telegram: { dmPolicy: "open", allowFrom: ["*"] } },
+      channels: { safew: { dmPolicy: "open", allowFrom: ["*"] } },
     }),
   };
 });
@@ -79,8 +79,8 @@ vi.mock("../config/sessions.js", async (importOriginal) => {
 });
 
 vi.mock("./pairing-store.js", () => ({
-  readTelegramAllowFromStore: vi.fn(async () => [] as string[]),
-  upsertTelegramPairingRequest: vi.fn(async () => ({
+  readSafewAllowFromStore: vi.fn(async () => [] as string[]),
+  upsertSafewPairingRequest: vi.fn(async () => ({
     code: "PAIRCODE",
     created: true,
   })),
@@ -94,13 +94,13 @@ vi.mock("../auto-reply/reply.js", () => {
   return { getReplyFromConfig: replySpy, __replySpy: replySpy };
 });
 
-describe("telegram inbound media", () => {
+describe("safew inbound media", () => {
   const INBOUND_MEDIA_TEST_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 20_000;
 
   it(
     "downloads media via file_path (no file.download)",
     async () => {
-      const { createTelegramBot } = await import("./bot.js");
+      const { createSafewBot } = await import("./bot.js");
       const replyModule = await import("../auto-reply/reply.js");
       const replySpy = replyModule.__replySpy as unknown as ReturnType<typeof vi.fn>;
 
@@ -110,7 +110,7 @@ describe("telegram inbound media", () => {
 
       const runtimeLog = vi.fn();
       const runtimeError = vi.fn();
-      createTelegramBot({
+      createSafewBot({
         token: "tok",
         runtime: {
           log: runtimeLog,
@@ -145,7 +145,7 @@ describe("telegram inbound media", () => {
       });
 
       expect(runtimeError).not.toHaveBeenCalled();
-      expect(fetchSpy).toHaveBeenCalledWith("https://api.telegram.org/file/bottok/photos/1.jpg");
+      expect(fetchSpy).toHaveBeenCalledWith("https://api.safew.org/file/bottok/photos/1.jpg");
       expect(replySpy).toHaveBeenCalledTimes(1);
       const payload = replySpy.mock.calls[0][0];
       expect(payload.Body).toContain("<media:image>");
@@ -156,7 +156,7 @@ describe("telegram inbound media", () => {
   );
 
   it("prefers proxyFetch over global fetch", async () => {
-    const { createTelegramBot } = await import("./bot.js");
+    const { createSafewBot } = await import("./bot.js");
 
     onSpy.mockReset();
 
@@ -173,7 +173,7 @@ describe("telegram inbound media", () => {
       arrayBuffer: async () => new Uint8Array([0xff, 0xd8, 0xff]).buffer,
     } as Response);
 
-    createTelegramBot({
+    createSafewBot({
       token: "tok",
       proxyFetch: proxyFetch as unknown as typeof fetch,
       runtime: {
@@ -200,13 +200,13 @@ describe("telegram inbound media", () => {
     });
 
     expect(runtimeError).not.toHaveBeenCalled();
-    expect(proxyFetch).toHaveBeenCalledWith("https://api.telegram.org/file/bottok/photos/2.jpg");
+    expect(proxyFetch).toHaveBeenCalledWith("https://api.safew.org/file/bottok/photos/2.jpg");
 
     globalFetchSpy.mockRestore();
   });
 
   it("logs a handler error when getFile returns no file_path", async () => {
-    const { createTelegramBot } = await import("./bot.js");
+    const { createSafewBot } = await import("./bot.js");
     const replyModule = await import("../auto-reply/reply.js");
     const replySpy = replyModule.__replySpy as unknown as ReturnType<typeof vi.fn>;
 
@@ -217,7 +217,7 @@ describe("telegram inbound media", () => {
     const runtimeError = vi.fn();
     const fetchSpy = vi.spyOn(globalThis, "fetch" as never);
 
-    createTelegramBot({
+    createSafewBot({
       token: "tok",
       runtime: {
         log: runtimeLog,
@@ -253,7 +253,7 @@ describe("telegram inbound media", () => {
   });
 });
 
-describe("telegram media groups", () => {
+describe("safew media groups", () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -268,7 +268,7 @@ describe("telegram media groups", () => {
   it(
     "buffers messages with same media_group_id and processes them together",
     async () => {
-      const { createTelegramBot } = await import("./bot.js");
+      const { createSafewBot } = await import("./bot.js");
       const replyModule = await import("../auto-reply/reply.js");
       const replySpy = replyModule.__replySpy as unknown as ReturnType<typeof vi.fn>;
 
@@ -284,7 +284,7 @@ describe("telegram media groups", () => {
         arrayBuffer: async () => new Uint8Array([0x89, 0x50, 0x4e, 0x47]).buffer,
       } as Response);
 
-      createTelegramBot({
+      createSafewBot({
         token: "tok",
         runtime: {
           log: vi.fn(),
@@ -344,7 +344,7 @@ describe("telegram media groups", () => {
   it(
     "processes separate media groups independently",
     async () => {
-      const { createTelegramBot } = await import("./bot.js");
+      const { createSafewBot } = await import("./bot.js");
       const replyModule = await import("../auto-reply/reply.js");
       const replySpy = replyModule.__replySpy as unknown as ReturnType<typeof vi.fn>;
 
@@ -359,7 +359,7 @@ describe("telegram media groups", () => {
         arrayBuffer: async () => new Uint8Array([0x89, 0x50, 0x4e, 0x47]).buffer,
       } as Response);
 
-      createTelegramBot({ token: "tok" });
+      createSafewBot({ token: "tok" });
       const handler = onSpy.mock.calls.find((call) => call[0] === "message")?.[1] as (
         ctx: Record<string, unknown>,
       ) => Promise<void>;
@@ -404,7 +404,7 @@ describe("telegram media groups", () => {
   );
 });
 
-describe("telegram text fragments", () => {
+describe("safew text fragments", () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -419,14 +419,14 @@ describe("telegram text fragments", () => {
   it(
     "buffers near-limit text and processes sequential parts as one message",
     async () => {
-      const { createTelegramBot } = await import("./bot.js");
+      const { createSafewBot } = await import("./bot.js");
       const replyModule = await import("../auto-reply/reply.js");
       const replySpy = replyModule.__replySpy as unknown as ReturnType<typeof vi.fn>;
 
       onSpy.mockReset();
       replySpy.mockReset();
 
-      createTelegramBot({ token: "tok" });
+      createSafewBot({ token: "tok" });
       const handler = onSpy.mock.calls.find((call) => call[0] === "message")?.[1] as (
         ctx: Record<string, unknown>,
       ) => Promise<void>;

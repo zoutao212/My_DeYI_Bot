@@ -1,13 +1,13 @@
-// @ts-nocheck
-import { buildTelegramMessageContext } from "./bot-message-context.js";
-import { dispatchTelegramMessage } from "./bot-message-dispatch.js";
+﻿// @ts-nocheck
+import { buildSafewMessageContext } from "./bot-message-context.js";
+import { dispatchSafewMessage } from "./bot-message-dispatch.js";
 
-export const createTelegramMessageProcessor = (deps) => {
+export const createSafewMessageProcessor = (deps) => {
   const {
     bot,
     cfg,
     account,
-    telegramCfg,
+    safewCfg,
     historyLimit,
     groupHistories,
     dmPolicy,
@@ -17,7 +17,7 @@ export const createTelegramMessageProcessor = (deps) => {
     logger,
     resolveGroupActivation,
     resolveGroupRequireMention,
-    resolveTelegramGroupConfig,
+    resolveSafewGroupConfig,
     runtime,
     replyToMode,
     streamMode,
@@ -27,7 +27,7 @@ export const createTelegramMessageProcessor = (deps) => {
   } = deps;
 
   return async (primaryCtx, allMedia, storeAllowFrom, options) => {
-    const context = await buildTelegramMessageContext({
+    const context = await buildSafewMessageContext({
       primaryCtx,
       allMedia,
       storeAllowFrom,
@@ -44,10 +44,10 @@ export const createTelegramMessageProcessor = (deps) => {
       logger,
       resolveGroupActivation,
       resolveGroupRequireMention,
-      resolveTelegramGroupConfig,
+      resolveSafewGroupConfig,
     });
     if (!context) return;
-    await dispatchTelegramMessage({
+    await dispatchSafewMessage({
       context,
       bot,
       cfg,
@@ -55,7 +55,7 @@ export const createTelegramMessageProcessor = (deps) => {
       replyToMode,
       streamMode,
       textLimit,
-      telegramCfg,
+      safewCfg,
       opts,
       resolveBotTopicsEnabled,
     });

@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+﻿import { describe, expect, it, vi } from "vitest";
 
-import { startTelegramWebhook } from "./webhook.js";
+import { startSafewWebhook } from "./webhook.js";
 
 const handlerSpy = vi.fn(
   (_req: unknown, res: { writeHead: (status: number) => void; end: (body?: string) => void }) => {
@@ -11,7 +11,7 @@ const handlerSpy = vi.fn(
 const setWebhookSpy = vi.fn();
 const stopSpy = vi.fn();
 
-const createTelegramBotSpy = vi.fn(() => ({
+const createSafewBotSpy = vi.fn(() => ({
   api: { setWebhook: setWebhookSpy },
   stop: stopSpy,
 }));
@@ -22,22 +22,22 @@ vi.mock("grammy", async (importOriginal) => {
 });
 
 vi.mock("./bot.js", () => ({
-  createTelegramBot: (...args: unknown[]) => createTelegramBotSpy(...args),
+  createSafewBot: (...args: unknown[]) => createSafewBotSpy(...args),
 }));
 
-describe("startTelegramWebhook", () => {
+describe("startSafewWebhook", () => {
   it("starts server, registers webhook, and serves health", async () => {
-    createTelegramBotSpy.mockClear();
+    createSafewBotSpy.mockClear();
     const abort = new AbortController();
     const cfg = { bindings: [] };
-    const { server } = await startTelegramWebhook({
+    const { server } = await startSafewWebhook({
       token: "tok",
       accountId: "opie",
       config: cfg,
       port: 0, // random free port
       abortSignal: abort.signal,
     });
-    expect(createTelegramBotSpy).toHaveBeenCalledWith(
+    expect(createSafewBotSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         accountId: "opie",
         config: expect.objectContaining({ bindings: [] }),
@@ -56,10 +56,10 @@ describe("startTelegramWebhook", () => {
 
   it("invokes webhook handler on matching path", async () => {
     handlerSpy.mockClear();
-    createTelegramBotSpy.mockClear();
+    createSafewBotSpy.mockClear();
     const abort = new AbortController();
     const cfg = { bindings: [] };
-    const { server } = await startTelegramWebhook({
+    const { server } = await startSafewWebhook({
       token: "tok",
       accountId: "opie",
       config: cfg,
@@ -67,7 +67,7 @@ describe("startTelegramWebhook", () => {
       abortSignal: abort.signal,
       path: "/hook",
     });
-    expect(createTelegramBotSpy).toHaveBeenCalledWith(
+    expect(createSafewBotSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         accountId: "opie",
         config: expect.objectContaining({ bindings: [] }),

@@ -1,4 +1,4 @@
-// @ts-nocheck
+﻿// @ts-nocheck
 import { hasControlCommand } from "../auto-reply/command-detection.js";
 import {
   createInboundDebouncer,
@@ -8,57 +8,57 @@ import { loadConfig } from "../config/config.js";
 import { writeConfigFile } from "../config/io.js";
 import { danger, logVerbose, warn } from "../globals.js";
 import { resolveMedia } from "./bot/delivery.js";
-import { resolveTelegramForumThreadId } from "./bot/helpers.js";
-import type { TelegramMessage } from "./bot/types.js";
+import { resolveSafewForumThreadId } from "./bot/helpers.js";
+import type { SafewMessage } from "./bot/types.js";
 import { firstDefined, isSenderAllowed, normalizeAllowFromWithStore } from "./bot-access.js";
 import { MEDIA_GROUP_TIMEOUT_MS, type MediaGroupEntry } from "./bot-updates.js";
-import { migrateTelegramGroupConfig } from "./group-migration.js";
-import { resolveTelegramInlineButtonsScope } from "./inline-buttons.js";
-import { readTelegramAllowFromStore } from "./pairing-store.js";
+import { migrateSafewGroupConfig } from "./group-migration.js";
+import { resolveSafewInlineButtonsScope } from "./inline-buttons.js";
+import { readSafewAllowFromStore } from "./pairing-store.js";
 import { resolveChannelConfigWrites } from "../channels/plugins/config-writes.js";
 
-export const registerTelegramHandlers = ({
+export const registerSafewHandlers = ({
   cfg,
   accountId,
   bot,
   opts,
   runtime,
   mediaMaxBytes,
-  telegramCfg,
+  safewCfg,
   groupAllowFrom,
   resolveGroupPolicy,
-  resolveTelegramGroupConfig,
+  resolveSafewGroupConfig,
   shouldSkipUpdate,
   processMessage,
   logger,
 }) => {
-  const TELEGRAM_TEXT_FRAGMENT_START_THRESHOLD_CHARS = 4000;
-  const TELEGRAM_TEXT_FRAGMENT_MAX_GAP_MS = 1500;
-  const TELEGRAM_TEXT_FRAGMENT_MAX_ID_GAP = 1;
-  const TELEGRAM_TEXT_FRAGMENT_MAX_PARTS = 12;
-  const TELEGRAM_TEXT_FRAGMENT_MAX_TOTAL_CHARS = 50_000;
+  const SAFEW_TEXT_FRAGMENT_START_THRESHOLD_CHARS = 4000;
+  const SAFEW_TEXT_FRAGMENT_MAX_GAP_MS = 1500;
+  const SAFEW_TEXT_FRAGMENT_MAX_ID_GAP = 1;
+  const SAFEW_TEXT_FRAGMENT_MAX_PARTS = 12;
+  const SAFEW_TEXT_FRAGMENT_MAX_TOTAL_CHARS = 50_000;
 
   const mediaGroupBuffer = new Map<string, MediaGroupEntry>();
   let mediaGroupProcessing: Promise<void> = Promise.resolve();
 
   type TextFragmentEntry = {
     key: string;
-    messages: Array<{ msg: TelegramMessage; ctx: unknown; receivedAtMs: number }>;
+    messages: Array<{ msg: SafewMessage; ctx: unknown; receivedAtMs: number }>;
     timer: ReturnType<typeof setTimeout>;
   };
   const textFragmentBuffer = new Map<string, TextFragmentEntry>();
   let textFragmentProcessing: Promise<void> = Promise.resolve();
 
-  const debounceMs = resolveInboundDebounceMs({ cfg, channel: "telegram" });
-  type TelegramDebounceEntry = {
+  const debounceMs = resolveInboundDebounceMs({ cfg, channel: "safew" });
+  type SafewDebounceEntry = {
     ctx: unknown;
-    msg: TelegramMessage;
+    msg: SafewMessage;
     allMedia: Array<{ path: string; contentType?: string }>;
     storeAllowFrom: string[];
     debounceKey: string | null;
     botUsername?: string;
   };
-  const inboundDebouncer = createInboundDebouncer<TelegramDebounceEntry>({
+  const inboundDebouncer = createInboundDebouncer<SafewDebounceEntry>({
     debounceMs,
     buildKey: (entry) => entry.debounceKey,
     shouldDebounce: (entry) => {
@@ -83,7 +83,7 @@ export const registerTelegramHandlers = ({
       const baseCtx = first.ctx as { me?: unknown; getFile?: unknown } & Record<string, unknown>;
       const getFile =
         typeof baseCtx.getFile === "function" ? baseCtx.getFile.bind(baseCtx) : async () => ({});
-      const syntheticMessage: TelegramMessage = {
+      const syntheticMessage: SafewMessage = {
         ...first.msg,
         text: combinedText,
         caption: undefined,
@@ -100,7 +100,7 @@ export const registerTelegramHandlers = ({
       );
     },
     onError: (err) => {
-      runtime.error?.(danger(`telegram debounce flush failed: ${String(err)}`));
+      runtime.error?.(danger(`safew debounce flush failed: ${String(err)}`));
     },
   });
 
@@ -119,7 +119,7 @@ export const registerTelegramHandlers = ({
         }
       }
 
-      const storeAllowFrom = await readTelegramAllowFromStore().catch(() => []);
+      const storeAllowFrom = await readSafewAllowFromStore().catch(() => []);
       await processMessage(primaryEntry.ctx, allMedia, storeAllowFrom);
     } catch (err) {
       runtime.error?.(danger(`media group handler failed: ${String(err)}`));
@@ -137,7 +137,7 @@ export const registerTelegramHandlers = ({
       const combinedText = entry.messages.map((m) => m.msg.text ?? "").join("");
       if (!combinedText.trim()) return;
 
-      const syntheticMessage: TelegramMessage = {
+      const syntheticMessage: SafewMessage = {
         ...first.msg,
         text: combinedText,
         caption: undefined,
@@ -146,7 +146,7 @@ export const registerTelegramHandlers = ({
         date: last.msg.date ?? first.msg.date,
       };
 
-      const storeAllowFrom = await readTelegramAllowFromStore().catch(() => []);
+      const storeAllowFrom = await readSafewAllowFromStore().catch(() => []);
       const baseCtx = first.ctx as { me?: unknown; getFile?: unknown } & Record<string, unknown>;
       const getFile =
         typeof baseCtx.getFile === "function" ? baseCtx.getFile.bind(baseCtx) : async () => ({});
@@ -172,21 +172,21 @@ export const registerTelegramHandlers = ({
         })
         .catch(() => undefined);
       await textFragmentProcessing;
-    }, TELEGRAM_TEXT_FRAGMENT_MAX_GAP_MS);
+    }, SAFEW_TEXT_FRAGMENT_MAX_GAP_MS);
   };
 
   bot.on("callback_query", async (ctx) => {
     const callback = ctx.callbackQuery;
     if (!callback) return;
     if (shouldSkipUpdate(ctx)) return;
-    // Answer immediately to prevent Telegram from retrying while we process
+    // Answer immediately to prevent Safew from retrying while we process
     await bot.api.answerCallbackQuery(callback.id).catch(() => {});
     try {
       const data = (callback.data ?? "").trim();
       const callbackMessage = callback.message;
       if (!data || !callbackMessage) return;
 
-      const inlineButtonsScope = resolveTelegramInlineButtonsScope({
+      const inlineButtonsScope = resolveSafewInlineButtonsScope({
         cfg,
         accountId,
       });
@@ -200,33 +200,33 @@ export const registerTelegramHandlers = ({
 
       const messageThreadId = (callbackMessage as { message_thread_id?: number }).message_thread_id;
       const isForum = (callbackMessage.chat as { is_forum?: boolean }).is_forum === true;
-      const resolvedThreadId = resolveTelegramForumThreadId({
+      const resolvedThreadId = resolveSafewForumThreadId({
         isForum,
         messageThreadId,
       });
-      const { groupConfig, topicConfig } = resolveTelegramGroupConfig(chatId, resolvedThreadId);
-      const storeAllowFrom = await readTelegramAllowFromStore().catch(() => []);
+      const { groupConfig, topicConfig } = resolveSafewGroupConfig(chatId, resolvedThreadId);
+      const storeAllowFrom = await readSafewAllowFromStore().catch(() => []);
       const groupAllowOverride = firstDefined(topicConfig?.allowFrom, groupConfig?.allowFrom);
       const effectiveGroupAllow = normalizeAllowFromWithStore({
         allowFrom: groupAllowOverride ?? groupAllowFrom,
         storeAllowFrom,
       });
       const effectiveDmAllow = normalizeAllowFromWithStore({
-        allowFrom: telegramCfg.allowFrom,
+        allowFrom: safewCfg.allowFrom,
         storeAllowFrom,
       });
-      const dmPolicy = telegramCfg.dmPolicy ?? "pairing";
+      const dmPolicy = safewCfg.dmPolicy ?? "pairing";
       const senderId = callback.from?.id ? String(callback.from.id) : "";
       const senderUsername = callback.from?.username ?? "";
 
       if (isGroup) {
         if (groupConfig?.enabled === false) {
-          logVerbose(`Blocked telegram group ${chatId} (group disabled)`);
+          logVerbose(`Blocked safew group ${chatId} (group disabled)`);
           return;
         }
         if (topicConfig?.enabled === false) {
           logVerbose(
-            `Blocked telegram topic ${chatId} (${resolvedThreadId ?? "unknown"}) (topic disabled)`,
+            `Blocked safew topic ${chatId} (${resolvedThreadId ?? "unknown"}) (topic disabled)`,
           );
           return;
         }
@@ -240,25 +240,25 @@ export const registerTelegramHandlers = ({
             });
           if (!allowed) {
             logVerbose(
-              `Blocked telegram group sender ${senderId || "unknown"} (group allowFrom override)`,
+              `Blocked safew group sender ${senderId || "unknown"} (group allowFrom override)`,
             );
             return;
           }
         }
         const defaultGroupPolicy = cfg.channels?.defaults?.groupPolicy;
-        const groupPolicy = telegramCfg.groupPolicy ?? defaultGroupPolicy ?? "open";
+        const groupPolicy = safewCfg.groupPolicy ?? defaultGroupPolicy ?? "open";
         if (groupPolicy === "disabled") {
-          logVerbose(`Blocked telegram group message (groupPolicy: disabled)`);
+          logVerbose(`Blocked safew group message (groupPolicy: disabled)`);
           return;
         }
         if (groupPolicy === "allowlist") {
           if (!senderId) {
-            logVerbose(`Blocked telegram group message (no sender ID, groupPolicy: allowlist)`);
+            logVerbose(`Blocked safew group message (no sender ID, groupPolicy: allowlist)`);
             return;
           }
           if (!effectiveGroupAllow.hasEntries) {
             logVerbose(
-              "Blocked telegram group message (groupPolicy: allowlist, no group allowlist entries)",
+              "Blocked safew group message (groupPolicy: allowlist, no group allowlist entries)",
             );
             return;
           }
@@ -269,7 +269,7 @@ export const registerTelegramHandlers = ({
               senderUsername,
             })
           ) {
-            logVerbose(`Blocked telegram group message from ${senderId} (groupPolicy: allowlist)`);
+            logVerbose(`Blocked safew group message from ${senderId} (groupPolicy: allowlist)`);
             return;
           }
         }
@@ -310,7 +310,7 @@ export const registerTelegramHandlers = ({
         }
       }
 
-      const syntheticMessage: TelegramMessage = {
+      const syntheticMessage: SafewMessage = {
         ...callbackMessage,
         from: callback.from,
         text: data,
@@ -339,16 +339,16 @@ export const registerTelegramHandlers = ({
       const newChatId = String(msg.migrate_to_chat_id);
       const chatTitle = (msg.chat as { title?: string }).title ?? "Unknown";
 
-      runtime.log?.(warn(`[telegram] Group migrated: "${chatTitle}" ${oldChatId} → ${newChatId}`));
+      runtime.log?.(warn(`[safew] Group migrated: "${chatTitle}" ${oldChatId} → ${newChatId}`));
 
-      if (!resolveChannelConfigWrites({ cfg, channelId: "telegram", accountId })) {
-        runtime.log?.(warn("[telegram] Config writes disabled; skipping group config migration."));
+      if (!resolveChannelConfigWrites({ cfg, channelId: "safew", accountId })) {
+        runtime.log?.(warn("[safew] Config writes disabled; skipping group config migration."));
         return;
       }
 
       // Check if old chat ID has config and migrate it
       const currentConfig = loadConfig();
-      const migration = migrateTelegramGroupConfig({
+      const migration = migrateSafewGroupConfig({
         cfg: currentConfig,
         accountId,
         oldChatId,
@@ -356,23 +356,23 @@ export const registerTelegramHandlers = ({
       });
 
       if (migration.migrated) {
-        runtime.log?.(warn(`[telegram] Migrating group config from ${oldChatId} to ${newChatId}`));
-        migrateTelegramGroupConfig({ cfg, accountId, oldChatId, newChatId });
+        runtime.log?.(warn(`[safew] Migrating group config from ${oldChatId} to ${newChatId}`));
+        migrateSafewGroupConfig({ cfg, accountId, oldChatId, newChatId });
         await writeConfigFile(currentConfig);
-        runtime.log?.(warn(`[telegram] Group config migrated and saved successfully`));
+        runtime.log?.(warn(`[safew] Group config migrated and saved successfully`));
       } else if (migration.skippedExisting) {
         runtime.log?.(
           warn(
-            `[telegram] Group config already exists for ${newChatId}; leaving ${oldChatId} unchanged`,
+            `[safew] Group config already exists for ${newChatId}; leaving ${oldChatId} unchanged`,
           ),
         );
       } else {
         runtime.log?.(
-          warn(`[telegram] No config found for old group ID ${oldChatId}, migration logged only`),
+          warn(`[safew] No config found for old group ID ${oldChatId}, migration logged only`),
         );
       }
     } catch (err) {
-      runtime.error?.(danger(`[telegram] Group migration handler failed: ${String(err)}`));
+      runtime.error?.(danger(`[safew] Group migration handler failed: ${String(err)}`));
     }
   });
 
@@ -386,12 +386,12 @@ export const registerTelegramHandlers = ({
       const isGroup = msg.chat.type === "group" || msg.chat.type === "supergroup";
       const messageThreadId = (msg as { message_thread_id?: number }).message_thread_id;
       const isForum = (msg.chat as { is_forum?: boolean }).is_forum === true;
-      const resolvedThreadId = resolveTelegramForumThreadId({
+      const resolvedThreadId = resolveSafewForumThreadId({
         isForum,
         messageThreadId,
       });
-      const storeAllowFrom = await readTelegramAllowFromStore().catch(() => []);
-      const { groupConfig, topicConfig } = resolveTelegramGroupConfig(chatId, resolvedThreadId);
+      const storeAllowFrom = await readSafewAllowFromStore().catch(() => []);
+      const { groupConfig, topicConfig } = resolveSafewGroupConfig(chatId, resolvedThreadId);
       const groupAllowOverride = firstDefined(topicConfig?.allowFrom, groupConfig?.allowFrom);
       const effectiveGroupAllow = normalizeAllowFromWithStore({
         allowFrom: groupAllowOverride ?? groupAllowFrom,
@@ -401,12 +401,12 @@ export const registerTelegramHandlers = ({
 
       if (isGroup) {
         if (groupConfig?.enabled === false) {
-          logVerbose(`Blocked telegram group ${chatId} (group disabled)`);
+          logVerbose(`Blocked safew group ${chatId} (group disabled)`);
           return;
         }
         if (topicConfig?.enabled === false) {
           logVerbose(
-            `Blocked telegram topic ${chatId} (${resolvedThreadId ?? "unknown"}) (topic disabled)`,
+            `Blocked safew topic ${chatId} (${resolvedThreadId ?? "unknown"}) (topic disabled)`,
           );
           return;
         }
@@ -422,7 +422,7 @@ export const registerTelegramHandlers = ({
             });
           if (!allowed) {
             logVerbose(
-              `Blocked telegram group sender ${senderId ?? "unknown"} (group allowFrom override)`,
+              `Blocked safew group sender ${senderId ?? "unknown"} (group allowFrom override)`,
             );
             return;
           }
@@ -432,21 +432,21 @@ export const registerTelegramHandlers = ({
         // - "disabled": block all group messages entirely
         // - "allowlist": only allow group messages from senders in groupAllowFrom/allowFrom
         const defaultGroupPolicy = cfg.channels?.defaults?.groupPolicy;
-        const groupPolicy = telegramCfg.groupPolicy ?? defaultGroupPolicy ?? "open";
+        const groupPolicy = safewCfg.groupPolicy ?? defaultGroupPolicy ?? "open";
         if (groupPolicy === "disabled") {
-          logVerbose(`Blocked telegram group message (groupPolicy: disabled)`);
+          logVerbose(`Blocked safew group message (groupPolicy: disabled)`);
           return;
         }
         if (groupPolicy === "allowlist") {
           // For allowlist mode, the sender (msg.from.id) must be in allowFrom
           const senderId = msg.from?.id;
           if (senderId == null) {
-            logVerbose(`Blocked telegram group message (no sender ID, groupPolicy: allowlist)`);
+            logVerbose(`Blocked safew group message (no sender ID, groupPolicy: allowlist)`);
             return;
           }
           if (!effectiveGroupAllow.hasEntries) {
             logVerbose(
-              "Blocked telegram group message (groupPolicy: allowlist, no group allowlist entries)",
+              "Blocked safew group message (groupPolicy: allowlist, no group allowlist entries)",
             );
             return;
           }
@@ -458,7 +458,7 @@ export const registerTelegramHandlers = ({
               senderUsername,
             })
           ) {
-            logVerbose(`Blocked telegram group message from ${senderId} (groupPolicy: allowlist)`);
+            logVerbose(`Blocked safew group message from ${senderId} (groupPolicy: allowlist)`);
             return;
           }
         }
@@ -474,7 +474,7 @@ export const registerTelegramHandlers = ({
         }
       }
 
-      // Text fragment handling - Telegram splits long pastes into multiple inbound messages (~4096 chars).
+      // Text fragment handling - Safew splits long pastes into multiple inbound messages (~4096 chars).
       // We buffer “near-limit” messages and append immediately-following parts.
       const text = typeof msg.text === "string" ? msg.text : undefined;
       const isCommandLike = (text ?? "").trim().startsWith("/");
@@ -492,9 +492,9 @@ export const registerTelegramHandlers = ({
           const timeGapMs = nowMs - lastReceivedAtMs;
           const canAppend =
             idGap > 0 &&
-            idGap <= TELEGRAM_TEXT_FRAGMENT_MAX_ID_GAP &&
+            idGap <= SAFEW_TEXT_FRAGMENT_MAX_ID_GAP &&
             timeGapMs >= 0 &&
-            timeGapMs <= TELEGRAM_TEXT_FRAGMENT_MAX_GAP_MS;
+            timeGapMs <= SAFEW_TEXT_FRAGMENT_MAX_GAP_MS;
 
           if (canAppend) {
             const currentTotalChars = existing.messages.reduce(
@@ -503,8 +503,8 @@ export const registerTelegramHandlers = ({
             );
             const nextTotalChars = currentTotalChars + text.length;
             if (
-              existing.messages.length + 1 <= TELEGRAM_TEXT_FRAGMENT_MAX_PARTS &&
-              nextTotalChars <= TELEGRAM_TEXT_FRAGMENT_MAX_TOTAL_CHARS
+              existing.messages.length + 1 <= SAFEW_TEXT_FRAGMENT_MAX_PARTS &&
+              nextTotalChars <= SAFEW_TEXT_FRAGMENT_MAX_TOTAL_CHARS
             ) {
               existing.messages.push({ msg, ctx, receivedAtMs: nowMs });
               scheduleTextFragmentFlush(existing);
@@ -523,12 +523,12 @@ export const registerTelegramHandlers = ({
           await textFragmentProcessing;
         }
 
-        const shouldStart = text.length >= TELEGRAM_TEXT_FRAGMENT_START_THRESHOLD_CHARS;
+        const shouldStart = text.length >= SAFEW_TEXT_FRAGMENT_START_THRESHOLD_CHARS;
         if (shouldStart) {
           const entry: TextFragmentEntry = {
             key,
             messages: [{ msg, ctx, receivedAtMs: nowMs }],
-            timer: setTimeout(() => {}, TELEGRAM_TEXT_FRAGMENT_MAX_GAP_MS),
+            timer: setTimeout(() => {}, SAFEW_TEXT_FRAGMENT_MAX_GAP_MS),
           };
           textFragmentBuffer.set(key, entry);
           scheduleTextFragmentFlush(entry);
@@ -592,7 +592,7 @@ export const registerTelegramHandlers = ({
       const conversationKey =
         resolvedThreadId != null ? `${chatId}:topic:${resolvedThreadId}` : String(chatId);
       const debounceKey = senderId
-        ? `telegram:${accountId ?? "default"}:${conversationKey}:${senderId}`
+        ? `safew:${accountId ?? "default"}:${conversationKey}:${senderId}`
         : null;
       await inboundDebouncer.enqueue({
         ctx,

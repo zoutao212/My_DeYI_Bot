@@ -1,4 +1,4 @@
-import type {
+﻿import type {
   InlineKeyboardButton,
   InlineKeyboardMarkup,
   ReactionType,
@@ -11,24 +11,24 @@ import { recordChannelActivity } from "../infra/channel-activity.js";
 import { formatErrorMessage, formatUncaughtError } from "../infra/errors.js";
 import { isDiagnosticFlagEnabled } from "../infra/diagnostic-flags.js";
 import type { RetryConfig } from "../infra/retry.js";
-import { createTelegramRetryRunner } from "../infra/retry-policy.js";
+import { createSafewRetryRunner } from "../infra/retry-policy.js";
 import { redactSensitiveText } from "../logging/redact.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { mediaKindFromMime } from "../media/constants.js";
 import { isGifMedia } from "../media/mime.js";
 import { loadWebMedia } from "../web/media.js";
-import { type ResolvedTelegramAccount, resolveTelegramAccount } from "./accounts.js";
-import { resolveTelegramFetch } from "./fetch.js";
+import { type ResolvedSafewAccount, resolveSafewAccount } from "./accounts.js";
+import { resolveSafewFetch } from "./fetch.js";
 import { makeProxyFetch } from "./proxy.js";
-import { renderTelegramHtmlText } from "./format.js";
+import { renderSafewHtmlText } from "./format.js";
 import { resolveMarkdownTableMode } from "../config/markdown-tables.js";
-import { splitTelegramCaption } from "./caption.js";
+import { splitSafewCaption } from "./caption.js";
 import { recordSentMessage } from "./sent-message-cache.js";
-import { parseTelegramTarget, stripTelegramInternalPrefixes } from "./targets.js";
-import { resolveTelegramVoiceSend } from "./voice.js";
-import { buildTelegramThreadParams } from "./bot/helpers.js";
+import { parseSafewTarget, stripSafewInternalPrefixes } from "./targets.js";
+import { resolveSafewVoiceSend } from "./voice.js";
+import { buildSafewThreadParams } from "./bot/helpers.js";
 
-type TelegramSendOpts = {
+type SafewSendOpts = {
   token?: string;
   accountId?: string;
   verbose?: boolean;
@@ -48,12 +48,12 @@ type TelegramSendOpts = {
   buttons?: Array<Array<{ text: string; callback_data: string }>>;
 };
 
-type TelegramSendResult = {
+type SafewSendResult = {
   messageId: string;
   chatId: string;
 };
 
-type TelegramReactionOpts = {
+type SafewReactionOpts = {
   token?: string;
   accountId?: string;
   api?: Bot["api"];
@@ -63,26 +63,26 @@ type TelegramReactionOpts = {
 };
 
 const PARSE_ERR_RE = /can't parse entities|parse entities|find end of the entity/i;
-const diagLogger = createSubsystemLogger("telegram/diagnostic");
+const diagLogger = createSubsystemLogger("safew/diagnostic");
 
-function createTelegramHttpLogger(cfg: ReturnType<typeof loadConfig>) {
-  const enabled = isDiagnosticFlagEnabled("telegram.http", cfg);
+function createSafewHttpLogger(cfg: ReturnType<typeof loadConfig>) {
+  const enabled = isDiagnosticFlagEnabled("safew.http", cfg);
   if (!enabled) {
     return () => {};
   }
   return (label: string, err: unknown) => {
     if (!(err instanceof HttpError)) return;
     const detail = redactSensitiveText(formatUncaughtError(err.error ?? err));
-    diagLogger.warn(`telegram http error (${label}): ${detail}`);
+    diagLogger.warn(`safew http error (${label}): ${detail}`);
   };
 }
 
-function resolveTelegramClientOptions(
-  account: ResolvedTelegramAccount,
+function resolveSafewClientOptions(
+  account: ResolvedSafewAccount,
 ): ApiClientOptions | undefined {
   const proxyUrl = account.config.proxy?.trim();
   const proxyFetch = proxyUrl ? makeProxyFetch(proxyUrl) : undefined;
-  const fetchImpl = resolveTelegramFetch(proxyFetch);
+  const fetchImpl = resolveSafewFetch(proxyFetch);
   const timeoutSeconds =
     typeof account.config.timeoutSeconds === "number" &&
     Number.isFinite(account.config.timeoutSeconds)
@@ -100,7 +100,7 @@ function resolveToken(explicit: string | undefined, params: { accountId: string;
   if (explicit?.trim()) return explicit.trim();
   if (!params.token) {
     throw new Error(
-      `Telegram bot token missing for account "${params.accountId}" (set channels.telegram.accounts.${params.accountId}.botToken/tokenFile or TELEGRAM_BOT_TOKEN for default).`,
+      `Safew bot token missing for account "${params.accountId}" (set channels.safew.accounts.${params.accountId}.botToken/tokenFile or SAFEW_BOT_TOKEN for default).`,
     );
   }
   return params.token.trim();
@@ -108,12 +108,12 @@ function resolveToken(explicit: string | undefined, params: { accountId: string;
 
 function normalizeChatId(to: string): string {
   const trimmed = to.trim();
-  if (!trimmed) throw new Error("Recipient is required for Telegram sends");
+  if (!trimmed) throw new Error("Recipient is required for Safew sends");
 
   // Common internal prefixes that sometimes leak into outbound sends.
-  // - ctx.To uses `telegram:<id>`
-  // - group sessions often use `telegram:group:<id>`
-  let normalized = stripTelegramInternalPrefixes(trimmed);
+  // - ctx.To uses `safew:<id>`
+  // - group sessions often use `safew:group:<id>`
+  let normalized = stripSafewInternalPrefixes(trimmed);
 
   // Accept t.me links for public chats/channels.
   // (Invite links like `t.me/+...` are not resolvable via Bot API.)
@@ -122,7 +122,7 @@ function normalizeChatId(to: string): string {
     /^t\.me\/([A-Za-z0-9_]+)$/i.exec(normalized);
   if (m?.[1]) normalized = `@${m[1]}`;
 
-  if (!normalized) throw new Error("Recipient is required for Telegram sends");
+  if (!normalized) throw new Error("Recipient is required for Safew sends");
   if (normalized.startsWith("@")) return normalized;
   if (/^-?\d+$/.test(normalized)) return normalized;
 
@@ -139,16 +139,16 @@ function normalizeMessageId(raw: string | number): number {
   if (typeof raw === "string") {
     const value = raw.trim();
     if (!value) {
-      throw new Error("Message id is required for Telegram actions");
+      throw new Error("Message id is required for Safew actions");
     }
     const parsed = Number.parseInt(value, 10);
     if (Number.isFinite(parsed)) return parsed;
   }
-  throw new Error("Message id is required for Telegram actions");
+  throw new Error("Message id is required for Safew actions");
 }
 
 export function buildInlineKeyboard(
-  buttons?: TelegramSendOpts["buttons"],
+  buttons?: SafewSendOpts["buttons"],
 ): InlineKeyboardMarkup | undefined {
   if (!buttons?.length) return undefined;
   const rows = buttons
@@ -167,22 +167,22 @@ export function buildInlineKeyboard(
   return { inline_keyboard: rows };
 }
 
-export async function sendMessageTelegram(
+export async function sendMessageSafew(
   to: string,
   text: string,
-  opts: TelegramSendOpts = {},
-): Promise<TelegramSendResult> {
+  opts: SafewSendOpts = {},
+): Promise<SafewSendResult> {
   const cfg = loadConfig();
-  const account = resolveTelegramAccount({
+  const account = resolveSafewAccount({
     cfg,
     accountId: opts.accountId,
   });
   const token = resolveToken(opts.token, account);
-  const target = parseTelegramTarget(to);
+  const target = parseSafewTarget(to);
   const chatId = normalizeChatId(target.chatId);
   // Use provided api or create a new Bot instance. The nullish coalescing
   // operator ensures api is always defined (Bot.api is always non-null).
-  const client = resolveTelegramClientOptions(account);
+  const client = resolveSafewClientOptions(account);
   const api = opts.api ?? new Bot(token, client ? { client } : undefined).api;
   const mediaUrl = opts.mediaUrl?.trim();
   const replyMarkup = buildInlineKeyboard(opts.buttons);
@@ -191,18 +191,18 @@ export async function sendMessageTelegram(
   // Only include these if actually provided to keep API calls clean.
   const messageThreadId =
     opts.messageThreadId != null ? opts.messageThreadId : target.messageThreadId;
-  const threadIdParams = buildTelegramThreadParams(messageThreadId);
+  const threadIdParams = buildSafewThreadParams(messageThreadId);
   const threadParams: Record<string, number> = threadIdParams ? { ...threadIdParams } : {};
   if (opts.replyToMessageId != null) {
     threadParams.reply_to_message_id = Math.trunc(opts.replyToMessageId);
   }
   const hasThreadParams = Object.keys(threadParams).length > 0;
-  const request = createTelegramRetryRunner({
+  const request = createSafewRetryRunner({
     retry: opts.retry,
     configRetry: account.config.retry,
     verbose: opts.verbose,
   });
-  const logHttpError = createTelegramHttpLogger(cfg);
+  const logHttpError = createSafewHttpLogger(cfg);
   const requestWithDiag = <T>(fn: () => Promise<T>, label?: string) =>
     request(fn, label).catch((err) => {
       logHttpError(label ?? "request", err);
@@ -212,7 +212,7 @@ export async function sendMessageTelegram(
     if (!/400: Bad Request: chat not found/i.test(formatErrorMessage(err))) return err;
     return new Error(
       [
-        `Telegram send failed: chat not found (chat_id=${chatId}).`,
+        `Safew send failed: chat not found (chat_id=${chatId}).`,
         "Likely: bot not started in DM, bot removed from group/channel, group migrated (new -100… id), or wrong bot token.",
         `Input was: ${JSON.stringify(to)}.`,
       ].join(" "),
@@ -222,16 +222,16 @@ export async function sendMessageTelegram(
   const textMode = opts.textMode ?? "markdown";
   const tableMode = resolveMarkdownTableMode({
     cfg,
-    channel: "telegram",
+    channel: "safew",
     accountId: account.accountId,
   });
-  const renderHtmlText = (value: string) => renderTelegramHtmlText(value, { textMode, tableMode });
+  const renderHtmlText = (value: string) => renderSafewHtmlText(value, { textMode, tableMode });
 
   // Resolve link preview setting from config (default: enabled).
   const linkPreviewEnabled = account.config.linkPreview ?? true;
   const linkPreviewOptions = linkPreviewEnabled ? undefined : { is_disabled: true };
 
-  const sendTelegramText = async (
+  const sendSafewText = async (
     rawText: string,
     params?: Record<string, unknown>,
     fallbackText?: string,
@@ -250,12 +250,12 @@ export async function sendMessageTelegram(
       () => api.sendMessage(chatId, htmlText, sendParams),
       "message",
     ).catch(async (err) => {
-      // Telegram rejects malformed HTML (e.g., unsupported tags or entities).
+      // Safew rejects malformed HTML (e.g., unsupported tags or entities).
       // When that happens, fall back to plain text so the message still delivers.
       const errText = formatErrorMessage(err);
       if (PARSE_ERR_RE.test(errText)) {
         if (opts.verbose) {
-          console.warn(`telegram HTML parse failed, retrying as plain text: ${errText}`);
+          console.warn(`safew HTML parse failed, retrying as plain text: ${errText}`);
         }
         const fallback = fallbackText ?? rawText;
         const plainParams = hasBaseParams ? baseParams : undefined;
@@ -283,9 +283,9 @@ export async function sendMessageTelegram(
     });
     const fileName = media.fileName ?? (isGif ? "animation.gif" : inferFilename(kind)) ?? "file";
     const file = new InputFile(media.buffer, fileName);
-    const { caption, followUpText } = splitTelegramCaption(text);
+    const { caption, followUpText } = splitSafewCaption(text);
     const htmlCaption = caption ? renderHtmlText(caption) : undefined;
-    // If text exceeds Telegram's caption limit, send media without caption
+    // If text exceeds Safew's caption limit, send media without caption
     // then send text as a separate follow-up message.
     const needsSeparateText = Boolean(followUpText);
     // When splitting, put reply_markup only on the follow-up text (the "main" content),
@@ -326,7 +326,7 @@ export async function sendMessageTelegram(
         },
       );
     } else if (kind === "audio") {
-      const { useVoice } = resolveTelegramVoiceSend({
+      const { useVoice } = resolveSafewVoiceSend({
         wantsVoice: opts.asVoice === true, // default false (backward compatible)
         contentType: media.contentType,
         fileName,
@@ -361,7 +361,7 @@ export async function sendMessageTelegram(
       recordSentMessage(chatId, result.message_id);
     }
     recordChannelActivity({
-      channel: "telegram",
+      channel: "safew",
       accountId: account.accountId,
       direction: "outbound",
     });
@@ -376,7 +376,7 @@ export async function sendMessageTelegram(
               ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
             }
           : undefined;
-      const textRes = await sendTelegramText(followUpText, textParams);
+      const textRes = await sendSafewText(followUpText, textParams);
       // Return the text message ID as the "main" message (it's the actual content).
       return {
         messageId: String(textRes?.message_id ?? mediaMessageId),
@@ -388,7 +388,7 @@ export async function sendMessageTelegram(
   }
 
   if (!text || !text.trim()) {
-    throw new Error("Message must be non-empty for Telegram sends");
+    throw new Error("Message must be non-empty for Safew sends");
   }
   const textParams =
     hasThreadParams || replyMarkup
@@ -397,41 +397,41 @@ export async function sendMessageTelegram(
           ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
         }
       : undefined;
-  const res = await sendTelegramText(text, textParams, opts.plainText);
+  const res = await sendSafewText(text, textParams, opts.plainText);
   const messageId = String(res?.message_id ?? "unknown");
   if (res?.message_id) {
     recordSentMessage(chatId, res.message_id);
   }
   recordChannelActivity({
-    channel: "telegram",
+    channel: "safew",
     accountId: account.accountId,
     direction: "outbound",
   });
   return { messageId, chatId: String(res?.chat?.id ?? chatId) };
 }
 
-export async function reactMessageTelegram(
+export async function reactMessageSafew(
   chatIdInput: string | number,
   messageIdInput: string | number,
   emoji: string,
-  opts: TelegramReactionOpts = {},
+  opts: SafewReactionOpts = {},
 ): Promise<{ ok: true }> {
   const cfg = loadConfig();
-  const account = resolveTelegramAccount({
+  const account = resolveSafewAccount({
     cfg,
     accountId: opts.accountId,
   });
   const token = resolveToken(opts.token, account);
   const chatId = normalizeChatId(String(chatIdInput));
   const messageId = normalizeMessageId(messageIdInput);
-  const client = resolveTelegramClientOptions(account);
+  const client = resolveSafewClientOptions(account);
   const api = opts.api ?? new Bot(token, client ? { client } : undefined).api;
-  const request = createTelegramRetryRunner({
+  const request = createSafewRetryRunner({
     retry: opts.retry,
     configRetry: account.config.retry,
     verbose: opts.verbose,
   });
-  const logHttpError = createTelegramHttpLogger(cfg);
+  const logHttpError = createSafewHttpLogger(cfg);
   const requestWithDiag = <T>(fn: () => Promise<T>, label?: string) =>
     request(fn, label).catch((err) => {
       logHttpError(label ?? "request", err);
@@ -440,19 +440,19 @@ export async function reactMessageTelegram(
   const remove = opts.remove === true;
   const trimmedEmoji = emoji.trim();
   // Build the reaction array. We cast emoji to the grammY union type since
-  // Telegram validates emoji server-side; invalid emojis fail gracefully.
+  // Safew validates emoji server-side; invalid emojis fail gracefully.
   const reactions: ReactionType[] =
     remove || !trimmedEmoji
       ? []
       : [{ type: "emoji", emoji: trimmedEmoji as ReactionTypeEmoji["emoji"] }];
   if (typeof api.setMessageReaction !== "function") {
-    throw new Error("Telegram reactions are unavailable in this bot API.");
+    throw new Error("Safew reactions are unavailable in this bot API.");
   }
   await requestWithDiag(() => api.setMessageReaction(chatId, messageId, reactions), "reaction");
   return { ok: true };
 }
 
-type TelegramDeleteOpts = {
+type SafewDeleteOpts = {
   token?: string;
   accountId?: string;
   verbose?: boolean;
@@ -460,34 +460,34 @@ type TelegramDeleteOpts = {
   retry?: RetryConfig;
 };
 
-export async function deleteMessageTelegram(
+export async function deleteMessageSafew(
   chatIdInput: string | number,
   messageIdInput: string | number,
-  opts: TelegramDeleteOpts = {},
+  opts: SafewDeleteOpts = {},
 ): Promise<{ ok: true }> {
   const cfg = loadConfig();
-  const account = resolveTelegramAccount({
+  const account = resolveSafewAccount({
     cfg,
     accountId: opts.accountId,
   });
   const token = resolveToken(opts.token, account);
   const chatId = normalizeChatId(String(chatIdInput));
   const messageId = normalizeMessageId(messageIdInput);
-  const client = resolveTelegramClientOptions(account);
+  const client = resolveSafewClientOptions(account);
   const api = opts.api ?? new Bot(token, client ? { client } : undefined).api;
-  const request = createTelegramRetryRunner({
+  const request = createSafewRetryRunner({
     retry: opts.retry,
     configRetry: account.config.retry,
     verbose: opts.verbose,
   });
-  const logHttpError = createTelegramHttpLogger(cfg);
+  const logHttpError = createSafewHttpLogger(cfg);
   const requestWithDiag = <T>(fn: () => Promise<T>, label?: string) =>
     request(fn, label).catch((err) => {
       logHttpError(label ?? "request", err);
       throw err;
     });
   await requestWithDiag(() => api.deleteMessage(chatId, messageId), "deleteMessage");
-  logVerbose(`[telegram] Deleted message ${messageId} from chat ${chatId}`);
+  logVerbose(`[safew] Deleted message ${messageId} from chat ${chatId}`);
   return { ok: true };
 }
 

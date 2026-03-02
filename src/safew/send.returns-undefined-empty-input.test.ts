@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { botApi, botCtorSpy } = vi.hoisted(() => ({
   botApi: {
@@ -42,7 +42,7 @@ vi.mock("../config/config.js", async (importOriginal) => {
   };
 });
 
-import { buildInlineKeyboard, sendMessageTelegram } from "./send.js";
+import { buildInlineKeyboard, sendMessageSafew } from "./send.js";
 
 describe("buildInlineKeyboard", () => {
   it("returns undefined for empty input", () => {
@@ -84,7 +84,7 @@ describe("buildInlineKeyboard", () => {
   });
 });
 
-describe("sendMessageTelegram", () => {
+describe("sendMessageSafew", () => {
   beforeEach(() => {
     loadConfig.mockReturnValue({});
     loadWebMedia.mockReset();
@@ -94,9 +94,9 @@ describe("sendMessageTelegram", () => {
 
   it("passes timeoutSeconds to grammY client when configured", async () => {
     loadConfig.mockReturnValue({
-      channels: { telegram: { timeoutSeconds: 60 } },
+      channels: { safew: { timeoutSeconds: 60 } },
     });
-    await sendMessageTelegram("123", "hi", { token: "tok" });
+    await sendMessageSafew("123", "hi", { token: "tok" });
     expect(botCtorSpy).toHaveBeenCalledWith(
       "tok",
       expect.objectContaining({
@@ -107,13 +107,13 @@ describe("sendMessageTelegram", () => {
   it("prefers per-account timeoutSeconds overrides", async () => {
     loadConfig.mockReturnValue({
       channels: {
-        telegram: {
+        safew: {
           timeoutSeconds: 60,
           accounts: { foo: { timeoutSeconds: 61 } },
         },
       },
     });
-    await sendMessageTelegram("123", "hi", { token: "tok", accountId: "foo" });
+    await sendMessageSafew("123", "hi", { token: "tok", accountId: "foo" });
     expect(botCtorSpy).toHaveBeenCalledWith(
       "tok",
       expect.objectContaining({
@@ -122,7 +122,7 @@ describe("sendMessageTelegram", () => {
     );
   });
 
-  it("falls back to plain text when Telegram rejects HTML", async () => {
+  it("falls back to plain text when Safew rejects HTML", async () => {
     const chatId = "123";
     const parseErr = new Error(
       "400: Bad Request: can't parse entities: Can't find end of the entity starting at byte offset 9",
@@ -138,7 +138,7 @@ describe("sendMessageTelegram", () => {
       sendMessage: typeof sendMessage;
     };
 
-    const res = await sendMessageTelegram(chatId, "_oops_", {
+    const res = await sendMessageSafew(chatId, "_oops_", {
       token: "tok",
       api,
       verbose: true,
@@ -163,10 +163,10 @@ describe("sendMessageTelegram", () => {
     };
 
     loadConfig.mockReturnValue({
-      channels: { telegram: { linkPreview: false } },
+      channels: { safew: { linkPreview: false } },
     });
 
-    await sendMessageTelegram(chatId, "hi", { token: "tok", api });
+    await sendMessageSafew(chatId, "hi", { token: "tok", api });
 
     expect(sendMessage).toHaveBeenCalledWith(chatId, "hi", {
       parse_mode: "HTML",
@@ -191,10 +191,10 @@ describe("sendMessageTelegram", () => {
     };
 
     loadConfig.mockReturnValue({
-      channels: { telegram: { linkPreview: false } },
+      channels: { safew: { linkPreview: false } },
     });
 
-    await sendMessageTelegram(chatId, "_oops_", {
+    await sendMessageSafew(chatId, "_oops_", {
       token: "tok",
       api,
     });
@@ -219,7 +219,7 @@ describe("sendMessageTelegram", () => {
       chat: { id: "123" },
     });
     try {
-      await sendMessageTelegram("123", "hi", { token: "tok" });
+      await sendMessageSafew("123", "hi", { token: "tok" });
       const clientFetch = (botCtorSpy.mock.calls[0]?.[1] as { client?: { fetch?: unknown } })
         ?.client?.fetch;
       expect(clientFetch).toBeTypeOf("function");
@@ -243,7 +243,7 @@ describe("sendMessageTelegram", () => {
       sendMessage: typeof sendMessage;
     };
 
-    await sendMessageTelegram("telegram:123", "hi", {
+    await sendMessageSafew("safew:123", "hi", {
       token: "tok",
       api,
     });
@@ -261,10 +261,10 @@ describe("sendMessageTelegram", () => {
       sendMessage: typeof sendMessage;
     };
 
-    await expect(sendMessageTelegram(chatId, "hi", { token: "tok", api })).rejects.toThrow(
+    await expect(sendMessageSafew(chatId, "hi", { token: "tok", api })).rejects.toThrow(
       /chat not found/i,
     );
-    await expect(sendMessageTelegram(chatId, "hi", { token: "tok", api })).rejects.toThrow(
+    await expect(sendMessageSafew(chatId, "hi", { token: "tok", api })).rejects.toThrow(
       /chat_id=123/,
     );
   });
@@ -287,7 +287,7 @@ describe("sendMessageTelegram", () => {
     };
     const setTimeoutSpy = vi.spyOn(global, "setTimeout");
 
-    const promise = sendMessageTelegram(chatId, "hi", {
+    const promise = sendMessageSafew(chatId, "hi", {
       token: "tok",
       api,
       retry: { attempts: 2, minDelayMs: 0, maxDelayMs: 1000, jitter: 0 },
@@ -308,7 +308,7 @@ describe("sendMessageTelegram", () => {
     };
 
     await expect(
-      sendMessageTelegram(chatId, "hi", {
+      sendMessageSafew(chatId, "hi", {
         token: "tok",
         api,
         retry: { attempts: 3, minDelayMs: 0, maxDelayMs: 0, jitter: 0 },
@@ -332,7 +332,7 @@ describe("sendMessageTelegram", () => {
       fileName: "fun.gif",
     });
 
-    const res = await sendMessageTelegram(chatId, "caption", {
+    const res = await sendMessageSafew(chatId, "caption", {
       token: "tok",
       api,
       mediaUrl: "https://example.com/fun",
@@ -367,7 +367,7 @@ describe("sendMessageTelegram", () => {
       fileName: "clip.mp3",
     });
 
-    await sendMessageTelegram(chatId, "caption", {
+    await sendMessageSafew(chatId, "caption", {
       token: "tok",
       api,
       mediaUrl: "https://example.com/clip.mp3",
@@ -401,7 +401,7 @@ describe("sendMessageTelegram", () => {
       fileName: "note.ogg",
     });
 
-    await sendMessageTelegram(chatId, "voice note", {
+    await sendMessageSafew(chatId, "voice note", {
       token: "tok",
       api,
       mediaUrl: "https://example.com/note.ogg",
@@ -440,7 +440,7 @@ describe("sendMessageTelegram", () => {
       fileName: "clip.mp3",
     });
 
-    await sendMessageTelegram(chatId, "caption", {
+    await sendMessageSafew(chatId, "caption", {
       token: "tok",
       api,
       mediaUrl: "https://example.com/clip.mp3",
@@ -464,7 +464,7 @@ describe("sendMessageTelegram", () => {
       sendMessage: typeof sendMessage;
     };
 
-    await sendMessageTelegram(chatId, "hello forum", {
+    await sendMessageSafew(chatId, "hello forum", {
       token: "tok",
       api,
       messageThreadId: 271,
@@ -476,7 +476,7 @@ describe("sendMessageTelegram", () => {
     });
   });
 
-  it("parses message_thread_id from recipient string (telegram:group:...:topic:...)", async () => {
+  it("parses message_thread_id from recipient string (safew:group:...:topic:...)", async () => {
     const chatId = "-1001234567890";
     const sendMessage = vi.fn().mockResolvedValue({
       message_id: 55,
@@ -486,7 +486,7 @@ describe("sendMessageTelegram", () => {
       sendMessage: typeof sendMessage;
     };
 
-    await sendMessageTelegram(`telegram:group:${chatId}:topic:271`, "hello forum", {
+    await sendMessageSafew(`safew:group:${chatId}:topic:271`, "hello forum", {
       token: "tok",
       api,
     });
@@ -507,7 +507,7 @@ describe("sendMessageTelegram", () => {
       sendMessage: typeof sendMessage;
     };
 
-    await sendMessageTelegram(chatId, "reply text", {
+    await sendMessageSafew(chatId, "reply text", {
       token: "tok",
       api,
       replyToMessageId: 100,
@@ -529,7 +529,7 @@ describe("sendMessageTelegram", () => {
       sendMessage: typeof sendMessage;
     };
 
-    await sendMessageTelegram(chatId, "forum reply", {
+    await sendMessageSafew(chatId, "forum reply", {
       token: "tok",
       api,
       messageThreadId: 271,

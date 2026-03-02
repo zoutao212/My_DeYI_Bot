@@ -1,11 +1,11 @@
-import { describe, expect, it } from "vitest";
+﻿import { describe, expect, it } from "vitest";
 
 import type { ClawdbotConfig } from "../../config/config.js";
-import { resolveTelegramDraftStreamingChunking } from "./draft-chunking.js";
+import { resolveSafewDraftStreamingChunking } from "./draft-chunking.js";
 
-describe("resolveTelegramDraftStreamingChunking", () => {
+describe("resolveSafewDraftStreamingChunking", () => {
   it("uses smaller defaults than block streaming", () => {
-    const chunking = resolveTelegramDraftStreamingChunking(undefined, "default");
+    const chunking = resolveSafewDraftStreamingChunking(undefined, "default");
     expect(chunking).toEqual({
       minChars: 200,
       maxChars: 800,
@@ -13,11 +13,11 @@ describe("resolveTelegramDraftStreamingChunking", () => {
     });
   });
 
-  it("clamps to telegram.textChunkLimit", () => {
+  it("clamps to safew.textChunkLimit", () => {
     const cfg: ClawdbotConfig = {
-      channels: { telegram: { allowFrom: ["*"], textChunkLimit: 150 } },
+      channels: { safew: { allowFrom: ["*"], textChunkLimit: 150 } },
     };
-    const chunking = resolveTelegramDraftStreamingChunking(cfg, "default");
+    const chunking = resolveSafewDraftStreamingChunking(cfg, "default");
     expect(chunking).toEqual({
       minChars: 150,
       maxChars: 150,
@@ -28,7 +28,7 @@ describe("resolveTelegramDraftStreamingChunking", () => {
   it("supports per-account overrides", () => {
     const cfg: ClawdbotConfig = {
       channels: {
-        telegram: {
+        safew: {
           allowFrom: ["*"],
           accounts: {
             default: {
@@ -43,7 +43,7 @@ describe("resolveTelegramDraftStreamingChunking", () => {
         },
       },
     };
-    const chunking = resolveTelegramDraftStreamingChunking(cfg, "default");
+    const chunking = resolveSafewDraftStreamingChunking(cfg, "default");
     expect(chunking).toEqual({
       minChars: 10,
       maxChars: 20,

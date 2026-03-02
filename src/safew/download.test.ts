@@ -1,8 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+﻿import { describe, expect, it, vi } from "vitest";
 
-import { downloadTelegramFile, getTelegramFile, type TelegramFileInfo } from "./download.js";
+import { downloadSafewFile, getSafewFile, type SafewFileInfo } from "./download.js";
 
-describe("telegram download", () => {
+describe("safew download", () => {
   it("fetches file info", async () => {
     const json = vi.fn().mockResolvedValue({ ok: true, result: { file_path: "photos/1.jpg" } });
     vi.spyOn(global, "fetch" as never).mockResolvedValueOnce({
@@ -11,12 +11,12 @@ describe("telegram download", () => {
       statusText: "OK",
       json,
     } as Response);
-    const info = await getTelegramFile("tok", "fid");
+    const info = await getSafewFile("tok", "fid");
     expect(info.file_path).toBe("photos/1.jpg");
   });
 
   it("downloads and saves", async () => {
-    const info: TelegramFileInfo = {
+    const info: SafewFileInfo = {
       file_id: "fid",
       file_path: "photos/1.jpg",
     };
@@ -29,7 +29,7 @@ describe("telegram download", () => {
       arrayBuffer,
       headers: { get: () => "image/jpeg" },
     } as Response);
-    const saved = await downloadTelegramFile("tok", info, 1024 * 1024);
+    const saved = await downloadSafewFile("tok", info, 1024 * 1024);
     expect(saved.path).toBeTruthy();
     expect(saved.contentType).toBe("image/jpeg");
   });

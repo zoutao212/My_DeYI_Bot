@@ -1,11 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
+﻿import { describe, expect, it, vi } from "vitest";
 
-import { resolveTelegramVoiceSend } from "./voice.js";
+import { resolveSafewVoiceSend } from "./voice.js";
 
-describe("resolveTelegramVoiceSend", () => {
+describe("resolveSafewVoiceSend", () => {
   it("skips voice when wantsVoice is false", () => {
     const logFallback = vi.fn();
-    const result = resolveTelegramVoiceSend({
+    const result = resolveSafewVoiceSend({
       wantsVoice: false,
       contentType: "audio/ogg",
       fileName: "voice.ogg",
@@ -17,7 +17,7 @@ describe("resolveTelegramVoiceSend", () => {
 
   it("logs fallback for incompatible media", () => {
     const logFallback = vi.fn();
-    const result = resolveTelegramVoiceSend({
+    const result = resolveSafewVoiceSend({
       wantsVoice: true,
       contentType: "audio/mpeg",
       fileName: "track.mp3",
@@ -25,13 +25,13 @@ describe("resolveTelegramVoiceSend", () => {
     });
     expect(result.useVoice).toBe(false);
     expect(logFallback).toHaveBeenCalledWith(
-      "Telegram voice requested but media is audio/mpeg (track.mp3); sending as audio file instead.",
+      "Safew voice requested but media is audio/mpeg (track.mp3); sending as audio file instead.",
     );
   });
 
   it("keeps voice when compatible", () => {
     const logFallback = vi.fn();
-    const result = resolveTelegramVoiceSend({
+    const result = resolveSafewVoiceSend({
       wantsVoice: true,
       contentType: "audio/ogg",
       fileName: "voice.ogg",

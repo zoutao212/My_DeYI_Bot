@@ -1,4 +1,4 @@
-// @ts-nocheck
+﻿// @ts-nocheck
 import { EmbeddedBlockChunker } from "../agents/pi-embedded-block-chunker.js";
 import { resolveChunkMode } from "../auto-reply/chunk.js";
 import { clearHistoryEntriesIfEnabled } from "../auto-reply/reply/history.js";
@@ -10,10 +10,10 @@ import { createTypingCallbacks } from "../channels/typing.js";
 import { danger, logVerbose } from "../globals.js";
 import { resolveMarkdownTableMode } from "../config/markdown-tables.js";
 import { deliverReplies } from "./bot/delivery.js";
-import { resolveTelegramDraftStreamingChunking } from "./draft-chunking.js";
-import { createTelegramDraftStream } from "./draft-stream.js";
+import { resolveSafewDraftStreamingChunking } from "./draft-chunking.js";
+import { createSafewDraftStream } from "./draft-stream.js";
 
-export const dispatchTelegramMessage = async ({
+export const dispatchSafewMessage = async ({
   context,
   bot,
   cfg,
@@ -21,7 +21,7 @@ export const dispatchTelegramMessage = async ({
   replyToMode,
   streamMode,
   textLimit,
-  telegramCfg,
+  safewCfg,
   opts,
   resolveBotTopicsEnabled,
 }) => {
@@ -52,7 +52,7 @@ export const dispatchTelegramMessage = async ({
     typeof resolvedThreadId === "number" &&
     (await resolveBotTopicsEnabled(primaryCtx));
   const draftStream = canStreamDraft
-    ? createTelegramDraftStream({
+    ? createSafewDraftStream({
         api: bot.api,
         chatId,
         draftId: msg.message_id || Date.now(),
@@ -64,7 +64,7 @@ export const dispatchTelegramMessage = async ({
     : undefined;
   const draftChunking =
     draftStream && streamMode === "block"
-      ? resolveTelegramDraftStreamingChunking(cfg, route.accountId)
+      ? resolveSafewDraftStreamingChunking(cfg, route.accountId)
       : undefined;
   const draftChunker = draftChunking ? new EmbeddedBlockChunker(draftChunking) : undefined;
   let lastPartialText = "";
@@ -118,15 +118,15 @@ export const dispatchTelegramMessage = async ({
 
   const disableBlockStreaming =
     Boolean(draftStream) ||
-    (typeof telegramCfg.blockStreaming === "boolean" ? !telegramCfg.blockStreaming : undefined);
+    (typeof safewCfg.blockStreaming === "boolean" ? !safewCfg.blockStreaming : undefined);
 
   const prefixContext = createReplyPrefixContext({ cfg, agentId: route.agentId });
   const tableMode = resolveMarkdownTableMode({
     cfg,
-    channel: "telegram",
+    channel: "safew",
     accountId: route.accountId,
   });
-  const chunkMode = resolveChunkMode(cfg, "telegram", route.accountId);
+  const chunkMode = resolveChunkMode(cfg, "safew", route.accountId);
 
   const { queuedFinal } = await dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
@@ -151,18 +151,18 @@ export const dispatchTelegramMessage = async ({
           tableMode,
           chunkMode,
           onVoiceRecording: sendRecordVoice,
-          linkPreview: telegramCfg.linkPreview,
+          linkPreview: safewCfg.linkPreview,
         });
       },
       onError: (err, info) => {
-        runtime.error?.(danger(`telegram ${info.kind} reply failed: ${String(err)}`));
+        runtime.error?.(danger(`safew ${info.kind} reply failed: ${String(err)}`));
       },
       onReplyStart: createTypingCallbacks({
         start: sendTyping,
         onStartError: (err) => {
           logTypingFailure({
             log: logVerbose,
-            channel: "telegram",
+            channel: "safew",
             target: String(chatId),
             error: err,
           });
@@ -199,7 +199,7 @@ export const dispatchTelegramMessage = async ({
       if (!msg.message_id) return;
       logAckFailure({
         log: logVerbose,
-        channel: "telegram",
+        channel: "safew",
         target: `${chatId}/${msg.message_id}`,
         error: err,
       });

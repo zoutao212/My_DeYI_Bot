@@ -1,14 +1,14 @@
-import fs from "node:fs/promises";
+﻿import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import {
-  approveTelegramPairingCode,
-  listTelegramPairingRequests,
-  readTelegramAllowFromStore,
-  upsertTelegramPairingRequest,
+  approveSafewPairingCode,
+  listSafewPairingRequests,
+  readSafewAllowFromStore,
+  upsertSafewPairingRequest,
 } from "./pairing-store.js";
 
 async function withTempStateDir<T>(fn: (stateDir: string) => Promise<T>) {
@@ -24,27 +24,27 @@ async function withTempStateDir<T>(fn: (stateDir: string) => Promise<T>) {
   }
 }
 
-describe("telegram pairing store", () => {
+describe("safew pairing store", () => {
   it("creates pairing request and approves it into allow store", async () => {
     await withTempStateDir(async () => {
-      const created = await upsertTelegramPairingRequest({
+      const created = await upsertSafewPairingRequest({
         chatId: "123456789",
         username: "ada",
       });
       expect(created.code).toBeTruthy();
 
-      const list = await listTelegramPairingRequests();
+      const list = await listSafewPairingRequests();
       expect(list).toHaveLength(1);
       expect(list[0]?.chatId).toBe("123456789");
       expect(list[0]?.code).toBe(created.code);
 
-      const approved = await approveTelegramPairingCode({ code: created.code });
+      const approved = await approveSafewPairingCode({ code: created.code });
       expect(approved?.chatId).toBe("123456789");
 
-      const listAfter = await listTelegramPairingRequests();
+      const listAfter = await listSafewPairingRequests();
       expect(listAfter).toHaveLength(0);
 
-      const allow = await readTelegramAllowFromStore();
+      const allow = await readSafewAllowFromStore();
       expect(allow).toContain("123456789");
     });
   });

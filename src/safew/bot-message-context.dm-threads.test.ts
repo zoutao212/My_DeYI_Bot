@@ -1,16 +1,16 @@
-import { describe, expect, it, vi } from "vitest";
+﻿import { describe, expect, it, vi } from "vitest";
 
-import { buildTelegramMessageContext } from "./bot-message-context.js";
+import { buildSafewMessageContext } from "./bot-message-context.js";
 
-describe("buildTelegramMessageContext dm thread sessions", () => {
+describe("buildSafewMessageContext dm thread sessions", () => {
   const baseConfig = {
     agents: { defaults: { model: "anthropic/claude-opus-4-5", workspace: "/tmp/clawd" } },
-    channels: { telegram: {} },
+    channels: { safew: {} },
     messages: { groupChat: { mentionPatterns: [] } },
   } as never;
 
   const buildContext = async (message: Record<string, unknown>) =>
-    await buildTelegramMessageContext({
+    await buildSafewMessageContext({
       primaryCtx: {
         message,
         me: { id: 7, username: "bot" },
@@ -35,7 +35,7 @@ describe("buildTelegramMessageContext dm thread sessions", () => {
       logger: { info: vi.fn() },
       resolveGroupActivation: () => undefined,
       resolveGroupRequireMention: () => false,
-      resolveTelegramGroupConfig: () => ({
+      resolveSafewGroupConfig: () => ({
         groupConfig: { requireMention: false },
         topicConfig: undefined,
       }),

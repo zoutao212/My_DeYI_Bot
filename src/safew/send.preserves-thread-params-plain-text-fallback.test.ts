@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+﻿import { describe, expect, it, vi } from "vitest";
 
 const { botApi, botCtorSpy } = vi.hoisted(() => ({
   botApi: {
@@ -29,7 +29,7 @@ vi.mock("grammy", () => ({
   InputFile: class {},
 }));
 
-import { reactMessageTelegram, sendMessageTelegram } from "./send.js";
+import { reactMessageSafew, sendMessageSafew } from "./send.js";
 
 describe("buildInlineKeyboard", () => {
   it("preserves thread params in plain text fallback", async () => {
@@ -48,7 +48,7 @@ describe("buildInlineKeyboard", () => {
       sendMessage: typeof sendMessage;
     };
 
-    const res = await sendMessageTelegram(chatId, "_bad markdown_", {
+    const res = await sendMessageSafew(chatId, "_bad markdown_", {
       token: "tok",
       api,
       messageThreadId: 271,
@@ -85,7 +85,7 @@ describe("buildInlineKeyboard", () => {
       fileName: "photo.jpg",
     });
 
-    await sendMessageTelegram(chatId, "photo in topic", {
+    await sendMessageSafew(chatId, "photo in topic", {
       token: "tok",
       api,
       mediaUrl: "https://example.com/photo.jpg",
@@ -100,14 +100,14 @@ describe("buildInlineKeyboard", () => {
   });
 });
 
-describe("reactMessageTelegram", () => {
+describe("reactMessageSafew", () => {
   it("sends emoji reactions", async () => {
     const setMessageReaction = vi.fn().mockResolvedValue(undefined);
     const api = { setMessageReaction } as unknown as {
       setMessageReaction: typeof setMessageReaction;
     };
 
-    await reactMessageTelegram("telegram:123", "456", "✅", {
+    await reactMessageSafew("safew:123", "456", "✅", {
       token: "tok",
       api,
     });
@@ -121,7 +121,7 @@ describe("reactMessageTelegram", () => {
       setMessageReaction: typeof setMessageReaction;
     };
 
-    await reactMessageTelegram("123", 456, "", {
+    await reactMessageSafew("123", 456, "", {
       token: "tok",
       api,
     });
@@ -135,7 +135,7 @@ describe("reactMessageTelegram", () => {
       setMessageReaction: typeof setMessageReaction;
     };
 
-    await reactMessageTelegram("123", 456, "✅", {
+    await reactMessageSafew("123", 456, "✅", {
       token: "tok",
       api,
       remove: true,

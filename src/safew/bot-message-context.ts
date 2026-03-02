@@ -1,4 +1,4 @@
-import type { Bot } from "grammy";
+﻿import type { Bot } from "grammy";
 
 import { resolveAckReaction } from "../agents/identity.js";
 import { hasControlCommand } from "../auto-reply/command-detection.js";
@@ -16,7 +16,7 @@ import { recordInboundSession } from "../channels/session.js";
 import { formatCliCommand } from "../cli/command-format.js";
 import { readSessionUpdatedAt, resolveStorePath } from "../config/sessions.js";
 import type { ClawdbotConfig } from "../config/config.js";
-import type { DmPolicy, TelegramGroupConfig, TelegramTopicConfig } from "../config/types.js";
+import type { DmPolicy, SafewGroupConfig, SafewTopicConfig } from "../config/types.js";
 import { logVerbose, shouldLogVerbose } from "../globals.js";
 import { recordChannelActivity } from "../infra/channel-activity.js";
 import { resolveAgentRoute } from "../routing/resolve-route.js";
@@ -29,15 +29,15 @@ import {
   buildGroupLabel,
   buildSenderLabel,
   buildSenderName,
-  buildTelegramGroupFrom,
-  buildTelegramGroupPeerId,
+  buildSafewGroupFrom,
+  buildSafewGroupPeerId,
   buildTypingThreadParams,
   expandTextLinks,
   normalizeForwardedContext,
   describeReplyTarget,
-  extractTelegramLocation,
+  extractSafewLocation,
   hasBotMention,
-  resolveTelegramForumThreadId,
+  resolveSafewForumThreadId,
 } from "./bot/helpers.js";
 import {
   firstDefined,
@@ -45,24 +45,24 @@ import {
   normalizeAllowFromWithStore,
   resolveSenderAllowMatch,
 } from "./bot-access.js";
-import { upsertTelegramPairingRequest } from "./pairing-store.js";
-import type { TelegramContext } from "./bot/types.js";
+import { upsertSafewPairingRequest } from "./pairing-store.js";
+import type { SafewContext } from "./bot/types.js";
 
-type TelegramMediaRef = { path: string; contentType?: string };
+type SafewMediaRef = { path: string; contentType?: string };
 
-type TelegramMessageContextOptions = {
+type SafewMessageContextOptions = {
   forceWasMentioned?: boolean;
   messageIdOverride?: string;
 };
 
-type TelegramLogger = {
+type SafewLogger = {
   info: (obj: Record<string, unknown>, msg: string) => void;
 };
 
-type ResolveTelegramGroupConfig = (
+type ResolveSafewGroupConfig = (
   chatId: string | number,
   messageThreadId?: number,
-) => { groupConfig?: TelegramGroupConfig; topicConfig?: TelegramTopicConfig };
+) => { groupConfig?: SafewGroupConfig; topicConfig?: SafewTopicConfig };
 
 type ResolveGroupActivation = (params: {
   chatId: string | number;
@@ -73,11 +73,11 @@ type ResolveGroupActivation = (params: {
 
 type ResolveGroupRequireMention = (chatId: string | number) => boolean;
 
-type BuildTelegramMessageContextParams = {
-  primaryCtx: TelegramContext;
-  allMedia: TelegramMediaRef[];
+type BuildSafewMessageContextParams = {
+  primaryCtx: SafewContext;
+  allMedia: SafewMediaRef[];
   storeAllowFrom: string[];
-  options?: TelegramMessageContextOptions;
+  options?: SafewMessageContextOptions;
   bot: Bot;
   cfg: ClawdbotConfig;
   account: { accountId: string };
@@ -87,13 +87,13 @@ type BuildTelegramMessageContextParams = {
   allowFrom?: Array<string | number>;
   groupAllowFrom?: Array<string | number>;
   ackReactionScope: "off" | "group-mentions" | "group-all" | "direct" | "all";
-  logger: TelegramLogger;
+  logger: SafewLogger;
   resolveGroupActivation: ResolveGroupActivation;
   resolveGroupRequireMention: ResolveGroupRequireMention;
-  resolveTelegramGroupConfig: ResolveTelegramGroupConfig;
+  resolveSafewGroupConfig: ResolveSafewGroupConfig;
 };
 
-export const buildTelegramMessageContext = async ({
+export const buildSafewMessageContext = async ({
   primaryCtx,
   allMedia,
   storeAllowFrom,
@@ -110,11 +110,11 @@ export const buildTelegramMessageContext = async ({
   logger,
   resolveGroupActivation,
   resolveGroupRequireMention,
-  resolveTelegramGroupConfig,
-}: BuildTelegramMessageContextParams) => {
+  resolveSafewGroupConfig,
+}: BuildSafewMessageContextParams) => {
   const msg = primaryCtx.message;
   recordChannelActivity({
-    channel: "telegram",
+    channel: "safew",
     accountId: account.accountId,
     direction: "inbound",
   });
@@ -122,15 +122,15 @@ export const buildTelegramMessageContext = async ({
   const isGroup = msg.chat.type === "group" || msg.chat.type === "supergroup";
   const messageThreadId = (msg as { message_thread_id?: number }).message_thread_id;
   const isForum = (msg.chat as { is_forum?: boolean }).is_forum === true;
-  const resolvedThreadId = resolveTelegramForumThreadId({
+  const resolvedThreadId = resolveSafewForumThreadId({
     isForum,
     messageThreadId,
   });
-  const { groupConfig, topicConfig } = resolveTelegramGroupConfig(chatId, resolvedThreadId);
-  const peerId = isGroup ? buildTelegramGroupPeerId(chatId, resolvedThreadId) : String(chatId);
+  const { groupConfig, topicConfig } = resolveSafewGroupConfig(chatId, resolvedThreadId);
+  const peerId = isGroup ? buildSafewGroupPeerId(chatId, resolvedThreadId) : String(chatId);
   const route = resolveAgentRoute({
     cfg,
-    channel: "telegram",
+    channel: "safew",
     accountId: account.accountId,
     peer: {
       kind: isGroup ? "group" : "dm",
@@ -154,12 +154,12 @@ export const buildTelegramMessageContext = async ({
   const hasGroupAllowOverride = typeof groupAllowOverride !== "undefined";
 
   if (isGroup && groupConfig?.enabled === false) {
-    logVerbose(`Blocked telegram group ${chatId} (group disabled)`);
+    logVerbose(`Blocked safew group ${chatId} (group disabled)`);
     return null;
   }
   if (isGroup && topicConfig?.enabled === false) {
     logVerbose(
-      `Blocked telegram topic ${chatId} (${resolvedThreadId ?? "unknown"}) (topic disabled)`,
+      `Blocked safew topic ${chatId} (${resolvedThreadId ?? "unknown"}) (topic disabled)`,
     );
     return null;
   }
@@ -176,7 +176,7 @@ export const buildTelegramMessageContext = async ({
         buildTypingThreadParams(resolvedThreadId),
       );
     } catch (err) {
-      logVerbose(`telegram record_voice cue failed for chat ${chatId}: ${String(err)}`);
+      logVerbose(`safew record_voice cue failed for chat ${chatId}: ${String(err)}`);
     }
   };
 
@@ -208,8 +208,8 @@ export const buildTelegramMessageContext = async ({
                   id?: number;
                 }
               | undefined;
-            const telegramUserId = from?.id ? String(from.id) : candidate;
-            const { code, created } = await upsertTelegramPairingRequest({
+            const safewUserId = from?.id ? String(from.id) : candidate;
+            const { code, created } = await upsertSafewPairingRequest({
               chatId: candidate,
               username: from?.username,
               firstName: from?.first_name,
@@ -225,28 +225,28 @@ export const buildTelegramMessageContext = async ({
                   matchKey: allowMatch.matchKey ?? "none",
                   matchSource: allowMatch.matchSource ?? "none",
                 },
-                "telegram pairing request",
+                "safew pairing request",
               );
               await bot.api.sendMessage(
                 chatId,
                 [
                   "Clawdbot: access not configured.",
                   "",
-                  `Your Telegram user id: ${telegramUserId}`,
+                  `Your Safew user id: ${safewUserId}`,
                   "",
                   `Pairing code: ${code}`,
                   "",
                   "Ask the bot owner to approve with:",
-                  formatCliCommand("clawdbot pairing approve telegram <code>"),
+                  formatCliCommand("clawdbot pairing approve safew <code>"),
                 ].join("\n"),
               );
             }
           } catch (err) {
-            logVerbose(`telegram pairing reply failed for chat ${chatId}: ${String(err)}`);
+            logVerbose(`safew pairing reply failed for chat ${chatId}: ${String(err)}`);
           }
         } else {
           logVerbose(
-            `Blocked unauthorized telegram sender ${candidate} (dmPolicy=${dmPolicy}, ${allowMatchMeta})`,
+            `Blocked unauthorized safew sender ${candidate} (dmPolicy=${dmPolicy}, ${allowMatchMeta})`,
           );
         }
         return null;
@@ -265,7 +265,7 @@ export const buildTelegramMessageContext = async ({
     });
     if (!allowed) {
       logVerbose(
-        `Blocked telegram group sender ${senderId || "unknown"} (group allowFrom override)`,
+        `Blocked safew group sender ${senderId || "unknown"} (group allowFrom override)`,
       );
       return null;
     }
@@ -287,7 +287,7 @@ export const buildTelegramMessageContext = async ({
     hasControlCommand: hasControlCommandInMessage,
   });
   const commandAuthorized = commandGate.commandAuthorized;
-  const historyKey = isGroup ? buildTelegramGroupPeerId(chatId, resolvedThreadId) : undefined;
+  const historyKey = isGroup ? buildSafewGroupPeerId(chatId, resolvedThreadId) : undefined;
 
   let placeholder = "";
   if (msg.photo) placeholder = "<media:image>";
@@ -295,7 +295,7 @@ export const buildTelegramMessageContext = async ({
   else if (msg.audio || msg.voice) placeholder = "<media:audio>";
   else if (msg.document) placeholder = "<media:document>";
 
-  const locationData = extractTelegramLocation(msg);
+  const locationData = extractSafewLocation(msg);
   const locationText = locationData ? formatLocationText(locationData) : undefined;
   const rawTextSource = msg.text ?? msg.caption ?? "";
   const rawText = expandTextLinks(rawTextSource, msg.entities ?? msg.caption_entities).trim();
@@ -324,7 +324,7 @@ export const buildTelegramMessageContext = async ({
   if (isGroup && commandGate.shouldBlock) {
     logInboundDrop({
       log: logVerbose,
-      channel: "telegram",
+      channel: "safew",
       reason: "control command (unauthorized)",
       target: senderId ?? "unknown",
     });
@@ -411,7 +411,7 @@ export const buildTelegramMessageContext = async ({
       ? reactionApi(chatId, msg.message_id, [{ type: "emoji", emoji: ackReaction }]).then(
           () => true,
           (err) => {
-            logVerbose(`telegram react failed for chat ${chatId}: ${String(err)}`);
+            logVerbose(`safew react failed for chat ${chatId}: ${String(err)}`);
             return false;
           },
         )
@@ -443,7 +443,7 @@ export const buildTelegramMessageContext = async ({
     sessionKey: sessionKey,
   });
   const body = formatInboundEnvelope({
-    channel: "Telegram",
+    channel: "Safew",
     from: conversationLabel,
     timestamp: msg.date ? msg.date * 1000 : undefined,
     body: `${forwardPrefix}${bodyText}${replySuffix}`,
@@ -465,7 +465,7 @@ export const buildTelegramMessageContext = async ({
       currentMessage: combinedBody,
       formatEntry: (entry) =>
         formatInboundEnvelope({
-          channel: "Telegram",
+          channel: "Safew",
           from: groupLabel ?? `group:${chatId}`,
           timestamp: entry.timestamp,
           body: `${entry.body} [id:${entry.messageId ?? "unknown"} chat:${chatId}]`,
@@ -488,8 +488,8 @@ export const buildTelegramMessageContext = async ({
     Body: combinedBody,
     RawBody: rawBody,
     CommandBody: commandBody,
-    From: isGroup ? buildTelegramGroupFrom(chatId, resolvedThreadId) : `telegram:${chatId}`,
-    To: `telegram:${chatId}`,
+    From: isGroup ? buildSafewGroupFrom(chatId, resolvedThreadId) : `safew:${chatId}`,
+    To: `safew:${chatId}`,
     SessionKey: sessionKey,
     AccountId: route.accountId,
     ChatType: isGroup ? "group" : "direct",
@@ -499,8 +499,8 @@ export const buildTelegramMessageContext = async ({
     SenderName: senderName,
     SenderId: senderId || undefined,
     SenderUsername: senderUsername || undefined,
-    Provider: "telegram",
-    Surface: "telegram",
+    Provider: "safew",
+    Surface: "safew",
     MessageSid: options?.messageIdOverride ?? String(msg.message_id),
     ReplyToId: replyTarget?.id,
     ReplyToBody: replyTarget?.body,
@@ -528,8 +528,8 @@ export const buildTelegramMessageContext = async ({
     MessageThreadId: resolvedThreadId,
     IsForum: isForum,
     // Originating channel for reply routing.
-    OriginatingChannel: "telegram" as const,
-    OriginatingTo: `telegram:${chatId}`,
+    OriginatingChannel: "safew" as const,
+    OriginatingTo: `safew:${chatId}`,
   });
 
   await recordInboundSession({
@@ -539,26 +539,26 @@ export const buildTelegramMessageContext = async ({
     updateLastRoute: !isGroup
       ? {
           sessionKey: route.mainSessionKey,
-          channel: "telegram",
+          channel: "safew",
           to: String(chatId),
           accountId: route.accountId,
         }
       : undefined,
     onRecordError: (err) => {
-      logVerbose(`telegram: failed updating session meta: ${String(err)}`);
+      logVerbose(`safew: failed updating session meta: ${String(err)}`);
     },
   });
 
   if (replyTarget && shouldLogVerbose()) {
     const preview = replyTarget.body.replace(/\s+/g, " ").slice(0, 120);
     logVerbose(
-      `telegram reply-context: replyToId=${replyTarget.id} replyToSender=${replyTarget.sender} replyToBody="${preview}"`,
+      `safew reply-context: replyToId=${replyTarget.id} replyToSender=${replyTarget.sender} replyToBody="${preview}"`,
     );
   }
 
   if (forwardOrigin && shouldLogVerbose()) {
     logVerbose(
-      `telegram forward-context: forwardedFrom="${forwardOrigin.from}" type=${forwardOrigin.fromType}`,
+      `safew forward-context: forwardedFrom="${forwardOrigin.from}" type=${forwardOrigin.fromType}`,
     );
   }
 
@@ -567,7 +567,7 @@ export const buildTelegramMessageContext = async ({
     const mediaInfo = allMedia.length > 1 ? ` mediaCount=${allMedia.length}` : "";
     const topicInfo = resolvedThreadId != null ? ` topic=${resolvedThreadId}` : "";
     logVerbose(
-      `telegram inbound: chatId=${chatId} from=${ctxPayload.From} len=${body.length}${mediaInfo}${topicInfo} preview="${preview}"`,
+      `safew inbound: chatId=${chatId} from=${ctxPayload.From} len=${body.length}${mediaInfo}${topicInfo} preview="${preview}"`,
     );
   }
 

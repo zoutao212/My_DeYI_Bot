@@ -1,10 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+﻿import { describe, expect, it, vi } from "vitest";
 
-import { buildTelegramMessageContext } from "./bot-message-context.js";
+import { buildSafewMessageContext } from "./bot-message-context.js";
 
-describe("buildTelegramMessageContext sender prefix", () => {
+describe("buildSafewMessageContext sender prefix", () => {
   it("prefixes group bodies with sender label", async () => {
-    const ctx = await buildTelegramMessageContext({
+    const ctx = await buildSafewMessageContext({
       primaryCtx: {
         message: {
           message_id: 1,
@@ -26,7 +26,7 @@ describe("buildTelegramMessageContext sender prefix", () => {
       } as never,
       cfg: {
         agents: { defaults: { model: "anthropic/claude-opus-4-5", workspace: "/tmp/clawd" } },
-        channels: { telegram: {} },
+        channels: { safew: {} },
         messages: { groupChat: { mentionPatterns: [] } },
       } as never,
       account: { accountId: "default" } as never,
@@ -39,7 +39,7 @@ describe("buildTelegramMessageContext sender prefix", () => {
       logger: { info: vi.fn() },
       resolveGroupActivation: () => undefined,
       resolveGroupRequireMention: () => false,
-      resolveTelegramGroupConfig: () => ({
+      resolveSafewGroupConfig: () => ({
         groupConfig: { requireMention: false },
         topicConfig: undefined,
       }),
@@ -51,7 +51,7 @@ describe("buildTelegramMessageContext sender prefix", () => {
   });
 
   it("sets MessageSid from message_id", async () => {
-    const ctx = await buildTelegramMessageContext({
+    const ctx = await buildSafewMessageContext({
       primaryCtx: {
         message: {
           message_id: 12345,
@@ -73,7 +73,7 @@ describe("buildTelegramMessageContext sender prefix", () => {
       } as never,
       cfg: {
         agents: { defaults: { model: "anthropic/claude-opus-4-5", workspace: "/tmp/clawd" } },
-        channels: { telegram: {} },
+        channels: { safew: {} },
         messages: { groupChat: { mentionPatterns: [] } },
       } as never,
       account: { accountId: "default" } as never,
@@ -86,7 +86,7 @@ describe("buildTelegramMessageContext sender prefix", () => {
       logger: { info: vi.fn() },
       resolveGroupActivation: () => undefined,
       resolveGroupRequireMention: () => false,
-      resolveTelegramGroupConfig: () => ({
+      resolveSafewGroupConfig: () => ({
         groupConfig: { requireMention: false },
         topicConfig: undefined,
       }),
@@ -97,7 +97,7 @@ describe("buildTelegramMessageContext sender prefix", () => {
   });
 
   it("respects messageIdOverride option", async () => {
-    const ctx = await buildTelegramMessageContext({
+    const ctx = await buildSafewMessageContext({
       primaryCtx: {
         message: {
           message_id: 12345,
@@ -119,7 +119,7 @@ describe("buildTelegramMessageContext sender prefix", () => {
       } as never,
       cfg: {
         agents: { defaults: { model: "anthropic/claude-opus-4-5", workspace: "/tmp/clawd" } },
-        channels: { telegram: {} },
+        channels: { safew: {} },
         messages: { groupChat: { mentionPatterns: [] } },
       } as never,
       account: { accountId: "default" } as never,
@@ -132,7 +132,7 @@ describe("buildTelegramMessageContext sender prefix", () => {
       logger: { info: vi.fn() },
       resolveGroupActivation: () => undefined,
       resolveGroupRequireMention: () => false,
-      resolveTelegramGroupConfig: () => ({
+      resolveSafewGroupConfig: () => ({
         groupConfig: { requireMention: false },
         topicConfig: undefined,
       }),

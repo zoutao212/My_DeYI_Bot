@@ -1,13 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { escapeRegExp, formatEnvelopeTimestamp } from "../../test/helpers/envelope-timestamp.js";
-import { resolveTelegramFetch } from "./fetch.js";
+import { resolveSafewFetch } from "./fetch.js";
 
-let createTelegramBot: typeof import("./bot.js").createTelegramBot;
-let getTelegramSequentialKey: typeof import("./bot.js").getTelegramSequentialKey;
+let createSafewBot: typeof import("./bot.js").createSafewBot;
+let getSafewSequentialKey: typeof import("./bot.js").getSafewSequentialKey;
 let resetInboundDedupe: typeof import("../auto-reply/reply/inbound-dedupe.js").resetInboundDedupe;
 
 const { sessionStorePath } = vi.hoisted(() => ({
-  sessionStorePath: `/tmp/clawdbot-telegram-throttler-${Math.random().toString(16).slice(2)}.json`,
+  sessionStorePath: `/tmp/clawdbot-safew-throttler-${Math.random().toString(16).slice(2)}.json`,
 }));
 const { loadWebMedia } = vi.hoisted(() => ({
   loadWebMedia: vi.fn(),
@@ -36,17 +36,17 @@ vi.mock("../config/sessions.js", async (importOriginal) => {
   };
 });
 
-const { readTelegramAllowFromStore, upsertTelegramPairingRequest } = vi.hoisted(() => ({
-  readTelegramAllowFromStore: vi.fn(async () => [] as string[]),
-  upsertTelegramPairingRequest: vi.fn(async () => ({
+const { readSafewAllowFromStore, upsertSafewPairingRequest } = vi.hoisted(() => ({
+  readSafewAllowFromStore: vi.fn(async () => [] as string[]),
+  upsertSafewPairingRequest: vi.fn(async () => ({
     code: "PAIRCODE",
     created: true,
   })),
 }));
 
 vi.mock("./pairing-store.js", () => ({
-  readTelegramAllowFromStore,
-  upsertTelegramPairingRequest,
+  readSafewAllowFromStore,
+  upsertSafewPairingRequest,
 }));
 
 const useSpy = vi.fn();
@@ -137,11 +137,11 @@ const getOnHandler = (event: string) => {
 
 const ORIGINAL_TZ = process.env.TZ;
 
-describe("createTelegramBot", () => {
+describe("createSafewBot", () => {
   beforeEach(async () => {
     vi.resetModules();
     ({ resetInboundDedupe } = await import("../auto-reply/reply/inbound-dedupe.js"));
-    ({ createTelegramBot, getTelegramSequentialKey } = await import("./bot.js"));
+    ({ createSafewBot, getSafewSequentialKey } = await import("./bot.js"));
     replyModule = await import("../auto-reply/reply.js");
     process.env.TZ = "UTC";
     resetInboundDedupe();
@@ -152,7 +152,7 @@ describe("createTelegramBot", () => {
         },
       },
       channels: {
-        telegram: { dmPolicy: "open", allowFrom: ["*"] },
+        safew: { dmPolicy: "open", allowFrom: ["*"] },
       },
     });
     loadWebMedia.mockReset();
@@ -173,7 +173,7 @@ describe("createTelegramBot", () => {
   // groupPolicy tests
 
   it("installs grammY throttler", () => {
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     expect(throttlerSpy).toHaveBeenCalledTimes(1);
     expect(useSpy).toHaveBeenCalledWith("throttler");
   });
@@ -182,8 +182,8 @@ describe("createTelegramBot", () => {
     const fetchSpy = vi.fn() as unknown as typeof fetch;
     globalThis.fetch = fetchSpy;
     try {
-      createTelegramBot({ token: "tok" });
-      const fetchImpl = resolveTelegramFetch();
+      createSafewBot({ token: "tok" });
+      const fetchImpl = resolveSafewFetch();
       expect(fetchImpl).toBeTypeOf("function");
       expect(fetchImpl).not.toBe(fetchSpy);
       const clientFetch = (botCtorSpy.mock.calls[0]?.[1] as { client?: { fetch?: unknown } })
@@ -197,10 +197,10 @@ describe("createTelegramBot", () => {
   it("passes timeoutSeconds even without a custom fetch", () => {
     loadConfig.mockReturnValue({
       channels: {
-        telegram: { dmPolicy: "open", allowFrom: ["*"], timeoutSeconds: 60 },
+        safew: { dmPolicy: "open", allowFrom: ["*"], timeoutSeconds: 60 },
       },
     });
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     expect(botCtorSpy).toHaveBeenCalledWith(
       "tok",
       expect.objectContaining({
@@ -211,7 +211,7 @@ describe("createTelegramBot", () => {
   it("prefers per-account timeoutSeconds overrides", () => {
     loadConfig.mockReturnValue({
       channels: {
-        telegram: {
+        safew: {
           dmPolicy: "open",
           allowFrom: ["*"],
           timeoutSeconds: 60,
@@ -221,7 +221,7 @@ describe("createTelegramBot", () => {
         },
       },
     });
-    createTelegramBot({ token: "tok", accountId: "foo" });
+    createSafewBot({ token: "tok", accountId: "foo" });
     expect(botCtorSpy).toHaveBeenCalledWith(
       "tok",
       expect.objectContaining({
@@ -230,48 +230,48 @@ describe("createTelegramBot", () => {
     );
   });
   it("sequentializes updates by chat and thread", () => {
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     expect(sequentializeSpy).toHaveBeenCalledTimes(1);
     expect(middlewareUseSpy).toHaveBeenCalledWith(sequentializeSpy.mock.results[0]?.value);
-    expect(sequentializeKey).toBe(getTelegramSequentialKey);
-    expect(getTelegramSequentialKey({ message: { chat: { id: 123 } } })).toBe("telegram:123");
+    expect(sequentializeKey).toBe(getSafewSequentialKey);
+    expect(getSafewSequentialKey({ message: { chat: { id: 123 } } })).toBe("safew:123");
     expect(
-      getTelegramSequentialKey({
+      getSafewSequentialKey({
         message: { chat: { id: 123 }, message_thread_id: 9 },
       }),
-    ).toBe("telegram:123:topic:9");
+    ).toBe("safew:123:topic:9");
     expect(
-      getTelegramSequentialKey({
+      getSafewSequentialKey({
         message: { chat: { id: 123, is_forum: true } },
       }),
-    ).toBe("telegram:123:topic:1");
+    ).toBe("safew:123:topic:1");
     expect(
-      getTelegramSequentialKey({
+      getSafewSequentialKey({
         update: { message: { chat: { id: 555 } } },
       }),
-    ).toBe("telegram:555");
+    ).toBe("safew:555");
     expect(
-      getTelegramSequentialKey({
+      getSafewSequentialKey({
         message: { chat: { id: 123 }, text: "/stop" },
       }),
-    ).toBe("telegram:123:control");
+    ).toBe("safew:123:control");
     expect(
-      getTelegramSequentialKey({
+      getSafewSequentialKey({
         message: { chat: { id: 123 }, text: "/status" },
       }),
-    ).toBe("telegram:123:control");
+    ).toBe("safew:123:control");
     expect(
-      getTelegramSequentialKey({
+      getSafewSequentialKey({
         message: { chat: { id: 123 }, text: "stop" },
       }),
-    ).toBe("telegram:123:control");
+    ).toBe("safew:123:control");
   });
   it("routes callback_query payloads as messages and answers callbacks", async () => {
     onSpy.mockReset();
     const replySpy = replyModule.__replySpy as unknown as ReturnType<typeof vi.fn>;
     replySpy.mockReset();
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const callbackHandler = onSpy.mock.calls.find((call) => call[0] === "callback_query")?.[1] as (
       ctx: Record<string, unknown>,
     ) => Promise<void>;
@@ -297,7 +297,7 @@ describe("createTelegramBot", () => {
     expect(payload.Body).toContain("cmd:option_a");
     expect(answerCallbackQuerySpy).toHaveBeenCalledWith("cbq-1");
   });
-  it("wraps inbound message with Telegram envelope", async () => {
+  it("wraps inbound message with Safew envelope", async () => {
     const originalTz = process.env.TZ;
     process.env.TZ = "Europe/Vienna";
 
@@ -306,7 +306,7 @@ describe("createTelegramBot", () => {
       const replySpy = replyModule.__replySpy as unknown as ReturnType<typeof vi.fn>;
       replySpy.mockReset();
 
-      createTelegramBot({ token: "tok" });
+      createSafewBot({ token: "tok" });
       expect(onSpy).toHaveBeenCalledWith("message", expect.any(Function));
       const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
@@ -332,7 +332,7 @@ describe("createTelegramBot", () => {
       const timestampPattern = escapeRegExp(expectedTimestamp);
       expect(payload.Body).toMatch(
         new RegExp(
-          `^\\[Telegram Ada Lovelace \\(@ada_bot\\) id:1234 (\\+\\d+[smhd] )?${timestampPattern}\\]`,
+          `^\\[Safew Ada Lovelace \\(@ada_bot\\) id:1234 (\\+\\d+[smhd] )?${timestampPattern}\\]`,
         ),
       );
       expect(payload.Body).toContain("hello world");
@@ -347,15 +347,15 @@ describe("createTelegramBot", () => {
     replySpy.mockReset();
 
     loadConfig.mockReturnValue({
-      channels: { telegram: { dmPolicy: "pairing" } },
+      channels: { safew: { dmPolicy: "pairing" } },
     });
-    readTelegramAllowFromStore.mockResolvedValue([]);
-    upsertTelegramPairingRequest.mockResolvedValue({
+    readSafewAllowFromStore.mockResolvedValue([]);
+    upsertSafewPairingRequest.mockResolvedValue({
       code: "PAIRME12",
       created: true,
     });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     await handler({
@@ -372,7 +372,7 @@ describe("createTelegramBot", () => {
     expect(replySpy).not.toHaveBeenCalled();
     expect(sendMessageSpy).toHaveBeenCalledTimes(1);
     expect(sendMessageSpy.mock.calls[0]?.[0]).toBe(1234);
-    expect(String(sendMessageSpy.mock.calls[0]?.[1])).toContain("Your Telegram user id: 999");
+    expect(String(sendMessageSpy.mock.calls[0]?.[1])).toContain("Your Safew user id: 999");
     expect(String(sendMessageSpy.mock.calls[0]?.[1])).toContain("Pairing code:");
     expect(String(sendMessageSpy.mock.calls[0]?.[1])).toContain("PAIRME12");
   });
@@ -383,14 +383,14 @@ describe("createTelegramBot", () => {
     replySpy.mockReset();
 
     loadConfig.mockReturnValue({
-      channels: { telegram: { dmPolicy: "pairing" } },
+      channels: { safew: { dmPolicy: "pairing" } },
     });
-    readTelegramAllowFromStore.mockResolvedValue([]);
-    upsertTelegramPairingRequest
+    readSafewAllowFromStore.mockResolvedValue([]);
+    upsertSafewPairingRequest
       .mockResolvedValueOnce({ code: "PAIRME12", created: true })
       .mockResolvedValueOnce({ code: "PAIRME12", created: false });
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
     const message = {
@@ -418,7 +418,7 @@ describe("createTelegramBot", () => {
     onSpy.mockReset();
     sendChatActionSpy.mockReset();
 
-    createTelegramBot({ token: "tok" });
+    createSafewBot({ token: "tok" });
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
     await handler({
       message: { chat: { id: 42, type: "private" }, text: "hi" },

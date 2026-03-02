@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { botApi, botCtorSpy } = vi.hoisted(() => ({
   botApi: {
@@ -42,9 +42,9 @@ vi.mock("../config/config.js", async (importOriginal) => {
   };
 });
 
-import { sendMessageTelegram } from "./send.js";
+import { sendMessageSafew } from "./send.js";
 
-describe("sendMessageTelegram caption splitting", () => {
+describe("sendMessageSafew caption splitting", () => {
   beforeEach(() => {
     loadConfig.mockReturnValue({});
     loadWebMedia.mockReset();
@@ -77,7 +77,7 @@ describe("sendMessageTelegram caption splitting", () => {
       fileName: "photo.jpg",
     });
 
-    const res = await sendMessageTelegram(chatId, longText, {
+    const res = await sendMessageSafew(chatId, longText, {
       token: "tok",
       api,
       mediaUrl: "https://example.com/photo.jpg",
@@ -116,7 +116,7 @@ describe("sendMessageTelegram caption splitting", () => {
       fileName: "photo.jpg",
     });
 
-    const res = await sendMessageTelegram(chatId, shortText, {
+    const res = await sendMessageSafew(chatId, shortText, {
       token: "tok",
       api,
       mediaUrl: "https://example.com/photo.jpg",
@@ -150,7 +150,7 @@ describe("sendMessageTelegram caption splitting", () => {
       fileName: "photo.jpg",
     });
 
-    await sendMessageTelegram(chatId, caption, {
+    await sendMessageSafew(chatId, caption, {
       token: "tok",
       api,
       mediaUrl: "https://example.com/photo.jpg",
@@ -185,7 +185,7 @@ describe("sendMessageTelegram caption splitting", () => {
       fileName: "photo.jpg",
     });
 
-    await sendMessageTelegram(chatId, longText, {
+    await sendMessageSafew(chatId, longText, {
       token: "tok",
       api,
       mediaUrl: "https://example.com/photo.jpg",
@@ -230,7 +230,7 @@ describe("sendMessageTelegram caption splitting", () => {
       fileName: "photo.jpg",
     });
 
-    await sendMessageTelegram(chatId, longText, {
+    await sendMessageSafew(chatId, longText, {
       token: "tok",
       api,
       mediaUrl: "https://example.com/photo.jpg",
@@ -273,7 +273,7 @@ describe("sendMessageTelegram caption splitting", () => {
       fileName: "photo.jpg",
     });
 
-    await sendMessageTelegram(chatId, longText, {
+    await sendMessageSafew(chatId, longText, {
       token: "tok",
       api,
       mediaUrl: "https://example.com/photo.jpg",
@@ -318,12 +318,12 @@ describe("sendMessageTelegram caption splitting", () => {
     });
 
     await expect(
-      sendMessageTelegram(chatId, longText, {
+      sendMessageSafew(chatId, longText, {
         token: "tok",
         api,
         mediaUrl: "https://example.com/photo.jpg",
       }),
-    ).rejects.toThrow(/Telegram send failed: chat not found \(chat_id=123\)\./);
+    ).rejects.toThrow(/Safew send failed: chat not found \(chat_id=123\)\./);
   });
 
   it("does not send follow-up text when caption is empty", async () => {
@@ -346,7 +346,7 @@ describe("sendMessageTelegram caption splitting", () => {
       fileName: "photo.jpg",
     });
 
-    const res = await sendMessageTelegram(chatId, emptyText, {
+    const res = await sendMessageSafew(chatId, emptyText, {
       token: "tok",
       api,
       mediaUrl: "https://example.com/photo.jpg",
@@ -379,7 +379,7 @@ describe("sendMessageTelegram caption splitting", () => {
       fileName: "photo.jpg",
     });
 
-    await sendMessageTelegram(chatId, shortText, {
+    await sendMessageSafew(chatId, shortText, {
       token: "tok",
       api,
       mediaUrl: "https://example.com/photo.jpg",

@@ -1,5 +1,5 @@
-/**
- * 长文本自动转 .txt 文件发送（Telegram 专用）
+﻿/**
+ * 长文本自动转 .txt 文件发送（Safew 专用）
  *
  * 当纯文本回复超过阈值时，写入临时 .txt 文件通过 sendDocument 发送，
  * 而非分 chunk 发多条消息。供 deliverReplies 和 deliverOutboundPayloads 共用。
@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { Bot, InputFile } from "grammy";
 import { logVerbose } from "../globals.js";
 import { loadConfig } from "../config/config.js";
-import { resolveTelegramAccount } from "./accounts.js";
+import { resolveSafewAccount } from "./accounts.js";
 
 /** 超过此字符数的纯文本回复自动作为 .txt 文件发送 */
 export const LONG_TEXT_FILE_THRESHOLD = 2000;
@@ -19,11 +19,11 @@ export const LONG_TEXT_FILE_THRESHOLD = 2000;
 export type SendLongTextFileParams = {
   /** 要发送的完整文本 */
   text: string;
-  /** Telegram chat ID（纯数字或 telegram:xxx 格式均可） */
+  /** Safew chat ID（纯数字或 safew:xxx 格式均可） */
   chatId: string;
   /** 可选：已有的 Bot 实例（deliverReplies 路径已有 bot） */
   bot?: Bot;
-  /** 可选：Telegram bot token（与 bot 二选一） */
+  /** 可选：Safew bot token（与 bot 二选一） */
   token?: string;
   /** 可选：account ID（用于从配置中解析 token） */
   accountId?: string;
@@ -39,10 +39,10 @@ export type SendLongTextFileResult = {
 };
 
 /**
- * 将长文本写入临时 .txt 文件并通过 Telegram sendDocument 发送。
+ * 将长文本写入临时 .txt 文件并通过 Safew sendDocument 发送。
  * 截取前 200 字符作为 caption 摘要。
  */
-export async function sendTelegramLongTextFile(
+export async function sendSafewLongTextFile(
   params: SendLongTextFileParams,
 ): Promise<SendLongTextFileResult> {
   const { text, chatId, replyToMessageId, messageThreadId } = params;
@@ -53,11 +53,11 @@ export async function sendTelegramLongTextFile(
     let token = params.token;
     if (!token) {
       const cfg = loadConfig();
-      const account = resolveTelegramAccount({ cfg, accountId: params.accountId });
+      const account = resolveSafewAccount({ cfg, accountId: params.accountId });
       token = account.token;
     }
     if (!token) {
-      return { ok: false, error: "Telegram token 未配置" };
+      return { ok: false, error: "Safew token 未配置" };
     }
     bot = new Bot(token);
   }
@@ -82,7 +82,7 @@ export async function sendTelegramLongTextFile(
 
     await bot.api.sendDocument(chatId, file, docParams);
     logVerbose(
-      `telegram: sent long reply as .txt file (${text.length} chars > threshold ${LONG_TEXT_FILE_THRESHOLD})`,
+      `safew: sent long reply as .txt file (${text.length} chars > threshold ${LONG_TEXT_FILE_THRESHOLD})`,
     );
     return { ok: true };
   } catch (err) {

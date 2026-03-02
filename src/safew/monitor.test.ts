@@ -1,6 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { monitorTelegramProvider } from "./monitor.js";
+import { monitorSafewProvider } from "./monitor.js";
 
 type MockCtx = {
   message: {
@@ -31,7 +31,7 @@ const { initSpy, runSpy, loadConfig } = vi.hoisted(() => ({
   })),
   loadConfig: vi.fn(() => ({
     agents: { defaults: { maxConcurrent: 2 } },
-    channels: { telegram: {} },
+    channels: { safew: {} },
   })),
 }));
 
@@ -44,7 +44,7 @@ vi.mock("../config/config.js", async (importOriginal) => {
 });
 
 vi.mock("./bot.js", () => ({
-  createTelegramBot: () => {
+  createSafewBot: () => {
     handlers.message = async (ctx: MockCtx) => {
       const chatId = ctx.message.chat.id;
       const isGroup = ctx.message.chat.type !== "private";
@@ -62,7 +62,7 @@ vi.mock("./bot.js", () => ({
       start: vi.fn(),
     };
   },
-  createTelegramWebhookCallback: vi.fn(),
+  createSafewWebhookCallback: vi.fn(),
 }));
 
 // Mock the grammyjs/runner to resolve immediately
@@ -76,11 +76,11 @@ vi.mock("../auto-reply/reply.js", () => ({
   }),
 }));
 
-describe("monitorTelegramProvider (grammY)", () => {
+describe("monitorSafewProvider (grammY)", () => {
   beforeEach(() => {
     loadConfig.mockReturnValue({
       agents: { defaults: { maxConcurrent: 2 } },
-      channels: { telegram: {} },
+      channels: { safew: {} },
     });
     initSpy.mockClear();
     runSpy.mockClear();
@@ -90,7 +90,7 @@ describe("monitorTelegramProvider (grammY)", () => {
     Object.values(api).forEach((fn) => {
       fn?.mockReset?.();
     });
-    await monitorTelegramProvider({ token: "tok" });
+    await monitorSafewProvider({ token: "tok" });
     expect(handlers.message).toBeDefined();
     await handlers.message?.({
       message: {
@@ -110,10 +110,10 @@ describe("monitorTelegramProvider (grammY)", () => {
     runSpy.mockClear();
     loadConfig.mockReturnValue({
       agents: { defaults: { maxConcurrent: 3 } },
-      channels: { telegram: {} },
+      channels: { safew: {} },
     });
 
-    await monitorTelegramProvider({ token: "tok" });
+    await monitorSafewProvider({ token: "tok" });
 
     expect(runSpy).toHaveBeenCalledWith(
       expect.anything(),
@@ -128,7 +128,7 @@ describe("monitorTelegramProvider (grammY)", () => {
     Object.values(api).forEach((fn) => {
       fn?.mockReset?.();
     });
-    await monitorTelegramProvider({ token: "tok" });
+    await monitorSafewProvider({ token: "tok" });
     await handlers.message?.({
       message: {
         message_id: 2,
