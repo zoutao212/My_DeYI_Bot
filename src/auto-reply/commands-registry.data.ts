@@ -291,7 +291,7 @@ function buildChatCommands(): ChatCommandDefinition[] {
       nativeName: "stop",
       description: "Stop the current run.",
       textAlias: "/stop",
-      textAliases: ["/stop", "停止工作", "停止回复"],
+      textAliases: ["/stop", "/停止工作", "/停止回复"],
     }),
     defineChatCommand({
       key: "restart",
@@ -334,7 +334,7 @@ function buildChatCommands(): ChatCommandDefinition[] {
       nativeName: "reset",
       description: "Reset the current session.",
       textAlias: "/reset",
-      textAliases: ["/reset", "重新开始", "清除上下文"],
+      textAliases: ["/reset", "/重新开始", "/清除上下文"],
       acceptsArgs: true,
     }),
     defineChatCommand({
@@ -342,7 +342,7 @@ function buildChatCommands(): ChatCommandDefinition[] {
       nativeName: "new",
       description: "Start a new session.",
       textAlias: "/new",
-      textAliases: ["/new", "新建对话", "新对话", "重新开始对话"],
+      textAliases: ["/new", "/新建对话", "/新对话", "/重新开始对话"],
       acceptsArgs: true,
     }),
     defineChatCommand({

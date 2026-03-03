@@ -659,6 +659,7 @@ export async function runEmbeddedPiAgent(
                   ]
                 : undefined,
             },
+            attemptOutcome: attempt.attemptOutcome,
             didSendViaMessagingTool: attempt.didSendViaMessagingTool,
             messagingToolSentTexts: attempt.messagingToolSentTexts,
             messagingToolSentTargets: attempt.messagingToolSentTargets,

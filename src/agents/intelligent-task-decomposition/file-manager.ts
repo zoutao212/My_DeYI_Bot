@@ -169,6 +169,7 @@ export class FileManager {
       "metadata",
       "checkpoints",
       "logs",
+      "logs/phases",
       "sources",
       "sources/documents",
       "sources/data",
@@ -465,6 +466,89 @@ export class FileManager {
     });
 
     await fs.writeFile(timelinePath, JSON.stringify(timeline, null, 2), "utf-8");
+
+    // 🆕 a4: 阶段归档（Phase Checkpoint）— 最小可用实现
+    // 仅对 completed/failed 写入，以控制噪音与磁盘占用。
+    if (type === "task_completed" || type === "task_failed") {
+      try {
+        const phaseDir = path.join(this.taskTreePath, "logs", "phases");
+        await fs.mkdir(phaseDir, { recursive: true });
+        const ts = Date.now();
+        const safeTaskId = String(taskId).replace(/[^a-zA-Z0-9_-]/g, "_");
+        const filename = `phase_${ts}_${type}_${safeTaskId}.md`;
+        const filePath = path.join(phaseDir, filename);
+
+        const subTask = await this.loadSubTask(taskId);
+        const produced = subTask?.metadata?.producedFilePaths ?? [];
+        const attempt = subTask?.metadata?.lastAttemptOutcome;
+        const shrink = subTask?.metadata?.contextShrinkLevel ?? 0;
+        const lines: string[] = [];
+        lines.push(`# Phase Checkpoint`);
+        lines.push("");
+        lines.push(`- type: ${type}`);
+        lines.push(`- taskId: ${taskId}`);
+        lines.push(`- timestamp: ${ts}`);
+        lines.push("");
+        lines.push(`## Description`);
+        lines.push(description);
+        lines.push("");
+
+        if (subTask) {
+          lines.push(`## SubTask Snapshot`);
+          lines.push("");
+          lines.push(`- summary: ${subTask.summary ?? ""}`);
+          lines.push(`- status: ${subTask.status}`);
+          lines.push(`- retryCount: ${subTask.retryCount ?? 0}`);
+          lines.push(`- error: ${subTask.error ?? ""}`);
+          lines.push(`- contextShrinkLevel: ${shrink}`);
+          lines.push("");
+
+          if (produced.length > 0) {
+            lines.push(`## Produced Files`);
+            lines.push("");
+            for (const p of produced) lines.push(`- ${p}`);
+            lines.push("");
+          }
+
+          if (attempt) {
+            lines.push(`## AttemptOutcome`);
+            lines.push("");
+            lines.push("```json");
+            lines.push(JSON.stringify(attempt, null, 2));
+            lines.push("```");
+            lines.push("");
+          }
+        }
+
+        await fs.writeFile(filePath, lines.join("\n"), "utf-8");
+      } catch {
+        // 归档失败不阻塞主流程
+      }
+    }
+  }
+
+  private async loadSubTask(subTaskId: string): Promise<SubTask | null> {
+    try {
+      const taskDir = path.join(this.taskTreePath, "tasks", subTaskId);
+      const metadataPath = path.join(taskDir, "metadata.json");
+      const raw = await fs.readFile(metadataPath, "utf-8");
+      const parsed = JSON.parse(raw) as any;
+      if (!parsed || typeof parsed !== "object") return null;
+      // metadata.json 是子集，这里只取我们关心的字段；其余字段缺失不影响。
+      return {
+        id: subTaskId,
+        prompt: parsed.prompt ?? "",
+        summary: parsed.summary,
+        status: parsed.status ?? "pending",
+        createdAt: parsed.createdAt ?? 0,
+        completedAt: parsed.completedAt,
+        parentId: parsed.parentId,
+        depth: parsed.depth,
+        metadata: parsed.metadata,
+      } as SubTask;
+    } catch {
+      return null;
+    }
   }
 
   /**

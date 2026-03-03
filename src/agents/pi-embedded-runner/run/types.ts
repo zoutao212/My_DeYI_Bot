@@ -15,6 +15,39 @@ import type { ClientToolDefinition } from "./params.js";
 type AuthStorage = ReturnType<typeof discoverAuthStorage>;
 type ModelRegistry = ReturnType<typeof discoverModels>;
 
+export type AttemptOutcomeKind =
+  | "ok"
+  | "timeout"
+  | "aborted"
+  | "context_overflow"
+  | "compaction_failure"
+  | "rate_limit"
+  | "provider_error"
+  | "tool_error"
+  | "tool_calling_degraded"
+  | "cloud_code_assist_format_error"
+  | "unknown_error";
+
+export type AttemptOutcome = {
+  kind: AttemptOutcomeKind;
+  ok: boolean;
+  retryable: boolean;
+  suggestedAction: "continue" | "retry" | "degrade" | "shrink_context" | "fail";
+  suggestedDelayMs?: number;
+  details?: {
+    message?: string;
+    stopReason?: string;
+    provider?: string;
+    modelId?: string;
+    toolName?: string;
+  };
+  hints?: {
+    needsTextToolMode?: boolean;
+    needsContextShrink?: boolean;
+    shouldUseContinueGeneration?: boolean;
+  };
+};
+
 export type EmbeddedRunAttemptParams = {
   sessionId: string;
   sessionKey?: string;
@@ -99,6 +132,11 @@ export type EmbeddedRunAttemptResult = {
   toolMetas: Array<{ toolName: string; meta?: string }>;
   lastAssistant: AssistantMessage | undefined;
   lastToolError?: { toolName: string; meta?: string; error?: string };
+  /**
+   * 统一失败分类与恢复建议（激进长程连续改造的核心契约）。
+   * 由 attempt 层生成，供 run.ts / followup-runner / orchestrator 统一消费。
+   */
+  attemptOutcome?: AttemptOutcome;
   didSendViaMessagingTool: boolean;
   messagingToolSentTexts: string[];
   messagingToolSentTargets: MessagingToolSend[];

@@ -22,6 +22,8 @@ import {
   safewOnboardingAdapter,
   SafewConfigSchema,
   type ChannelMessageActionAdapter,
+  type ChannelMessageActionContext,
+  type ChannelGatewayContext,
   type ChannelPlugin,
   type ClawdbotConfig,
   type ResolvedSafewAccount,
@@ -31,12 +33,17 @@ import { getSafewRuntime } from "./runtime.js";
 
 const meta = getChatChannelMeta("safew");
 
+type SafewListActionsParams = { cfg: ClawdbotConfig };
+type SafewExtractToolSendParams = { args: Record<string, unknown> };
+
 const safewMessageActions: ChannelMessageActionAdapter = {
-  listActions: (ctx) => getSafewRuntime().channel.safew.messageActions.listActions(ctx),
-  extractToolSend: (ctx) =>
-    getSafewRuntime().channel.safew.messageActions.extractToolSend(ctx),
-  handleAction: async (ctx) =>
-    await getSafewRuntime().channel.safew.messageActions.handleAction(ctx),
+  listActions: (params: SafewListActionsParams) =>
+    getSafewRuntime().channel.safew.messageActions.listActions?.(params) ?? [],
+  extractToolSend: (params: SafewExtractToolSendParams) =>
+    getSafewRuntime().channel.safew.messageActions.extractToolSend?.(params) ?? null,
+  handleAction: async (ctx: ChannelMessageActionContext) =>
+    await (getSafewRuntime().channel.safew.messageActions.handleAction?.(ctx) ??
+      Promise.reject(new Error("Safew message action handler not configured"))),
 };
 
 function parseReplyToMessageId(replyToId?: string | null) {
@@ -376,7 +383,7 @@ export const safewPlugin: ChannelPlugin<ResolvedSafewAccount> = {
     },
   },
   gateway: {
-    startAccount: async (ctx) => {
+    startAccount: async (ctx: ChannelGatewayContext<ResolvedSafewAccount>) => {
       const account = ctx.account;
       const token = account.token.trim();
       let safewBotLabel = "";

@@ -239,6 +239,8 @@ type MessageToolOptions = {
   agentAccountId?: string;
   agentSessionKey?: string;
   config?: ClawdbotConfig;
+  /** Default delivery target for this tool invocation (e.g. safew:<chatId>). */
+  agentTo?: string;
   currentChannelId?: string;
   currentChannelProvider?: string;
   currentThreadTs?: string;
@@ -345,6 +347,23 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
       const action = readStringParam(params, "action", {
         required: true,
       }) as ChannelMessageActionName;
+
+      const resolvedTarget = (() => {
+        const raw = readStringParam(params, "target") ?? "";
+        const trimmed = raw.trim();
+        if (!trimmed) return "";
+        return trimmed;
+      })();
+      const wantsCurrentTarget =
+        !resolvedTarget || /^(current|here|this)$/i.test(resolvedTarget.trim());
+      if (wantsCurrentTarget && options?.agentTo?.trim()) {
+        params.target = options.agentTo.trim();
+      }
+
+      const channelHint = readStringParam(params, "channel") ?? "";
+      if (!channelHint.trim() && options?.currentChannelProvider?.trim()) {
+        params.channel = options.currentChannelProvider.trim();
+      }
 
       const accountId = readStringParam(params, "accountId") ?? agentAccountId;
       if (accountId) {

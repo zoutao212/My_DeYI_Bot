@@ -1,4 +1,5 @@
 import type { FollowupRun, QueueDropPolicy, QueueMode, QueueSettings } from "./types.js";
+import { deleteQueueSnapshot, loadQueueSnapshot, scheduleSaveQueueSnapshot } from "./persistence.js";
 
 export type FollowupQueueState = {
   items: FollowupRun[];
@@ -32,6 +33,8 @@ export function getFollowupQueue(key: string, settings: QueueSettings): Followup
         ? Math.floor(settings.cap)
         : existing.cap;
     existing.dropPolicy = settings.dropPolicy ?? existing.dropPolicy;
+    // 🆕 配置更新后落盘（debounce），并确保有快照时能尽快写入新的 mode/cap 等
+    scheduleSaveQueueSnapshot(key, existing);
     return existing;
   }
 
@@ -53,6 +56,25 @@ export function getFollowupQueue(key: string, settings: QueueSettings): Followup
     summaryLines: [],
   };
   FOLLOWUP_QUEUES.set(key, created);
+
+  // 🆕 重启恢复：尝试从磁盘加载队列快照（fire-and-forget，不阻塞调用方）
+  void loadQueueSnapshot(key).then((snap) => {
+    if (!snap) return;
+    const q = FOLLOWUP_QUEUES.get(key);
+    if (!q) return;
+    q.items = snap.items;
+    q.lastEnqueuedAt = snap.lastEnqueuedAt;
+    q.mode = snap.mode;
+    q.debounceMs = snap.debounceMs;
+    q.cap = snap.cap;
+    q.dropPolicy = snap.dropPolicy;
+    q.droppedCount = snap.droppedCount;
+    q.summaryLines = snap.summaryLines;
+    q.lastRun = snap.lastRun;
+  }).catch(() => {
+    // ignore
+  });
+
   return created;
 }
 
@@ -68,5 +90,7 @@ export function clearFollowupQueue(key: string): number {
   queue.lastRun = undefined;
   queue.lastEnqueuedAt = 0;
   FOLLOWUP_QUEUES.delete(cleaned);
+  // 🆕 清理快照（不阻塞）
+  void deleteQueueSnapshot(cleaned);
   return cleared;
 }

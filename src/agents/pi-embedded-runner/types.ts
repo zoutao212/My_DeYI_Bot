@@ -1,5 +1,6 @@
 import type { MessagingToolSend } from "../pi-embedded-messaging.js";
 import type { SessionSystemPromptReport } from "../../config/sessions/types.js";
+import type { AttemptOutcome } from "./run/types.js";
 
 export type EmbeddedPiAgentMeta = {
   sessionId: string;
@@ -42,6 +43,8 @@ export type EmbeddedPiRunResult = {
     isError?: boolean;
   }>;
   meta: EmbeddedPiRunMeta;
+  /** attempt 层的结构化失败分类与恢复建议（激进长程连续改造契约）。 */
+  attemptOutcome?: AttemptOutcome;
   // True if a messaging tool (telegram, whatsapp, discord, slack, sessions_send)
   // successfully sent a message. Used to suppress agent's confirmation text.
   didSendViaMessagingTool?: boolean;

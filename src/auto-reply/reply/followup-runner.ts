@@ -46,6 +46,42 @@ import { estimateTokens, allocateBudget, truncateToTokenBudget, type BudgetReque
 import { localGrepSearch, getDefaultMemoryDirs } from "../../memory/local-search.js";
 import { searchNovelAssets, hasNovelAssets, formatNovelSnippetsForPrompt } from "../../memory/novel-assets-searcher.js";
 
+function _sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+async function loadRecentPhaseContext(params: {
+  sessionId: string;
+  maxFiles: number;
+  maxChars: number;
+}): Promise<string> {
+  try {
+    const phaseDir = path.join(os.homedir(), ".clawdbot", "tasks", params.sessionId, "logs", "phases");
+    const files = await fs.readdir(phaseDir);
+    const phaseFiles = files
+      .filter((f) => f.startsWith("phase_") && f.endsWith(".md"))
+      // 文件名带 timestamp，按字符串逆序即可近似最新在前
+      .sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
+      .slice(0, Math.max(0, params.maxFiles));
+
+    if (phaseFiles.length === 0) return "";
+
+    let buf = "";
+    for (const f of phaseFiles) {
+      const p = path.join(phaseDir, f);
+      const raw = await fs.readFile(p, "utf-8");
+      const snippet = raw.length > 1600 ? `${raw.slice(0, 1600)}\n...[截断]` : raw;
+      const entry = `\n\n---\n[phase:${f}]\n${snippet}`;
+      if (buf.length + entry.length > params.maxChars) break;
+      buf += entry;
+    }
+
+    return buf.trim();
+  } catch {
+    return "";
+  }
+}
+
 // ── P10: 输出验证门（OutputValidator）──
 // 规则驱动，零 LLM 调用。在标记 completed 之前拦截明显无效输出。
 type OutputFailureCode = "hallucinated_tool_calls" | "output_too_short" | "context_overflow_signal" | "llm_refusal" | "excessive_repetition" | "delegation_attempt" | "api_content_block";
@@ -697,9 +733,15 @@ export function createFollowupRunner(params: {
         // 🆕 进度报告：开始等待 LLM 回复
         progressReporter?.onLLMStart();
 
+        const contextShrinkLevel = subTask?.metadata?.contextShrinkLevel ?? 0;
+        const shouldInjectHeavyContext = contextShrinkLevel <= 0;
+        const phaseContext = !shouldInjectHeavyContext
+          ? await loadRecentPhaseContext({ sessionId, maxFiles: 2, maxChars: 3500 })
+          : "";
+
         // 🆕 Gap2: 经验池注入执行 prompt — 让 LLM 在执行时避免已知错误模式
         let experienceHint = "";
-        if (subTask?.taskType) {
+        if (shouldInjectHeavyContext && subTask?.taskType) {
           try {
             const { generateExperienceSummary } = await import(
               "../../agents/intelligent-task-decomposition/experience-pool.js"
@@ -717,7 +759,7 @@ export function createFollowupRunner(params: {
         // 仅对 writing/research/analysis/design 类型启用，零远程 API 调用
         let subTaskMemoryCtx = "";
         const isSubTaskForMemory = Boolean(queued.subTaskId) && !queued.isRootTask && !queued.isNewRootTask;
-        if (isSubTaskForMemory && queued.run.workspaceDir) {
+        if (shouldInjectHeavyContext && isSubTaskForMemory && queued.run.workspaceDir) {
           const memTaskType = subTask?.taskType ?? "generic";
           const MEMORY_TASK_TYPES = ["writing", "research", "analysis", "design"];
           if (MEMORY_TASK_TYPES.includes(memTaskType)) {
@@ -754,7 +796,7 @@ export function createFollowupRunner(params: {
         // 从 NovelsAssets/ 目录检索与当前任务相关的原文片段（风格参考、情节参考）
         // 仅对 writing/design 类型子任务启用，零远程 API 调用
         let novelReferenceCtx = "";
-        if (isSubTaskForMemory && queued.run.workspaceDir) {
+        if (shouldInjectHeavyContext && isSubTaskForMemory && queued.run.workspaceDir) {
           const novelTaskTypes = ["writing", "design"];
           const taskType = subTask?.taskType ?? "generic";
           if (novelTaskTypes.includes(taskType)) {
@@ -878,6 +920,11 @@ export function createFollowupRunner(params: {
                     ? `workspace/${queued.rootTaskId}`
                     : "workspace";
                   
+                  // 🆕 a4: 阶段归档上下文（轻量）
+                  const phaseHint = phaseContext
+                    ? `\n\n[🧾 最近阶段归档]\n以下是系统自动记录的最近阶段检查点摘要（用于长程连续与断点续跑）。请以它为准继续推进，不要重复已完成的工作：\n${phaseContext}`
+                    : "";
+
                   // 🆕 A1: 迭代优化 — 如果有上次输出和失败原因，注入到 prompt
                   let iterationHint = "";
                   if (subTask?.metadata?.previousOutput || subTask?.metadata?.lastFailureFindings) {
@@ -943,7 +990,7 @@ export function createFollowupRunner(params: {
                   const dirHint = isChunkTask
                     ? "（请严格按照任务描述中指定的路径和文件名保存）"
                     : `，保存到 ${taskOutputDir}/ 目录下（文件名含任务摘要）`;
-                  return `[⚠️ 强制规则] 你必须亲自使用 write 工具将生成内容写入${fileTypeHint}${dirHint}。然后在聊天中仅回复简短确认。禁止将完整内容直接输出到聊天。\n[🚫 禁止委派] 严禁调用 enqueue_task、sessions_spawn、batch_enqueue_tasks。你必须自己直接完成任务，不能把任务交给任何人。${iterationHint}\n\n${queued.prompt}`;
+                  return `[⚠️ 强制规则] 你必须亲自使用 write 工具将生成内容写入${fileTypeHint}${dirHint}。然后在聊天中仅回复简短确认。禁止将完整内容直接输出到聊天。\n[🚫 禁止委派] 严禁调用 enqueue_task、sessions_spawn、batch_enqueue_tasks。你必须自己直接完成任务，不能把任务交给任何人。${iterationHint}${phaseHint}\n\n${queued.prompt}`;
                 }
                 return queued.prompt;
               })(),
@@ -1183,6 +1230,70 @@ export function createFollowupRunner(params: {
         runResult = fallbackResult.result;
         fallbackProvider = fallbackResult.provider;
         fallbackModel = fallbackResult.model;
+
+        // ── AttemptOutcome: attempt 层结构化恢复建议（激进长程连续改造契约）──
+        // 在任何“输出净化/OutputValidator/落盘”之前优先处理，以避免错误被当作产出。
+        if (taskTree && subTask && runResult.attemptOutcome) {
+          const ao = runResult.attemptOutcome;
+          // 记录到 metadata 以便后续诊断与回放
+          if (!subTask.metadata) subTask.metadata = {};
+          subTask.metadata.lastAttemptOutcome = ao;
+
+          if (!ao.ok) {
+            // degrade: 标记 provider 降级，让下一次从 attempt.ts Step 3.9 起就进入文本工具模式
+            if (ao.suggestedAction === "degrade" && ao.hints?.needsTextToolMode && fallbackProvider) {
+              try {
+                const { markDegradedProvider } = await import("../../agents/text-tool-fallback.js");
+                markDegradedProvider(fallbackProvider, fallbackModel ?? "unknown");
+                console.log(
+                  `[followup-runner] 🔧 AttemptOutcome degrade: 标记 provider ${fallbackProvider}/${fallbackModel} 为降级（下次启用文本工具模式）`,
+                );
+              } catch {
+                // 降级模块加载失败不阻塞
+              }
+            }
+
+            // shrink_context: 提升收缩等级并重试（下一轮自动减少上下文注入）
+            if (ao.suggestedAction === "shrink_context" || ao.hints?.needsContextShrink) {
+              subTask.metadata.contextShrinkLevel = (subTask.metadata.contextShrinkLevel ?? 0) + 1;
+              console.warn(
+                `[followup-runner] ⚠️ AttemptOutcome shrink_context: contextShrinkLevel=${subTask.metadata.contextShrinkLevel}, kind=${ao.kind}`,
+              );
+            }
+
+            // retry/degrade/shrink_context：统一走“pending + 入队 + finalize”闭环
+            const shouldRetry = (ao.suggestedAction === "retry" || ao.suggestedAction === "degrade" || ao.suggestedAction === "shrink_context")
+              && ao.retryable !== false
+              && (subTask.retryCount ?? 0) < 4;
+
+            if (shouldRetry) {
+              subTask.retryCount = (subTask.retryCount ?? 0) + 1;
+              subTask.status = "pending";
+              subTask.error = `AttemptOutcome(${ao.kind}): ${ao.details?.message ?? ""}`.trim();
+              await orchestrator.saveTaskTree(taskTree);
+
+              const delayMs = Math.min(Math.max(ao.suggestedDelayMs ?? 0, 0), 10_000);
+              if (delayMs > 0) {
+                console.log(`[followup-runner] ⏳ AttemptOutcome retry backoff: ${delayMs}ms`);
+                await _sleep(delayMs);
+              }
+
+              if (queued.run.sessionKey) {
+                const retryFollowupRun = buildFollowupRun(queued, subTask);
+                const resolvedQueue = resolveQueueSettings({
+                  cfg: queued.run.config ?? ({} as any),
+                  inlineMode: "followup",
+                });
+                enqueueFollowupRun(queued.run.sessionKey, retryFollowupRun, resolvedQueue, "none");
+                console.log(
+                  `[followup-runner] 🔄 AttemptOutcome retry 已入队: ${subTask.id} (retryCount=${subTask.retryCount}, kind=${ao.kind})`,
+                );
+                finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
+              }
+              return;
+            }
+          }
+        }
 
         // 🆕 进度报告：LLM 回复完成
         {

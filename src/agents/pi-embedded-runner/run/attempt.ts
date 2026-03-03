@@ -91,7 +91,7 @@ import { isTimeoutError } from "../../failover-error.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
 import { withLlmRequestContext } from "../../../infra/llm-request-context.js";
-import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
+import type { AttemptOutcome, EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
 import { detectAndLoadPromptImages } from "./images.js";
 
 export function injectHistoryImagesIntoMessages(
@@ -1588,6 +1588,130 @@ export async function runEmbeddedAttempt(
         )
         .map((entry) => ({ toolName: entry.toolName, meta: entry.meta }));
 
+      const cloudCodeAssistFormatError = Boolean(
+        lastAssistant?.errorMessage && isCloudCodeAssistFormatError(lastAssistant.errorMessage),
+      );
+
+      const buildAttemptOutcome = (): AttemptOutcome => {
+        const msg =
+          (promptError instanceof Error ? promptError.message : promptError ? String(promptError) : "").trim();
+
+        const lower = msg.toLowerCase();
+        const isContextOverflow =
+          /context.*(?:length|limit|overflow|exceeded)|maximum.*(?:context|token)|prompt.*too.*long|request.*too.*large/i.test(
+            msg,
+          );
+        const isRateLimit =
+          /429|too many requests|rate[_ -]?limit|负载已饱和|请稍后再试|overloaded|upstream.*saturated/i.test(msg);
+
+        if (aborted && timedOut) {
+          return {
+            kind: "timeout",
+            ok: false,
+            retryable: true,
+            suggestedAction: "retry",
+            suggestedDelayMs: 2000,
+            details: { message: msg, provider: params.provider, modelId: params.modelId },
+          };
+        }
+        if (aborted) {
+          return {
+            kind: "aborted",
+            ok: false,
+            retryable: true,
+            suggestedAction: "retry",
+            suggestedDelayMs: 1000,
+            details: { message: msg, provider: params.provider, modelId: params.modelId },
+          };
+        }
+        if (cloudCodeAssistFormatError) {
+          return {
+            kind: "cloud_code_assist_format_error",
+            ok: false,
+            retryable: true,
+            suggestedAction: "degrade",
+            suggestedDelayMs: 500,
+            details: { message: lastAssistant?.errorMessage ?? msg, provider: params.provider, modelId: params.modelId },
+            hints: { needsTextToolMode: true },
+          };
+        }
+        if (promptError) {
+          if (isContextOverflow) {
+            return {
+              kind: "context_overflow",
+              ok: false,
+              retryable: false,
+              suggestedAction: "shrink_context",
+              details: { message: msg, provider: params.provider, modelId: params.modelId },
+              hints: { needsContextShrink: true },
+            };
+          }
+          if (isRateLimit) {
+            return {
+              kind: "rate_limit",
+              ok: false,
+              retryable: true,
+              suggestedAction: "retry",
+              suggestedDelayMs: 4000,
+              details: { message: msg, provider: params.provider, modelId: params.modelId },
+            };
+          }
+          if (/compaction/i.test(lower)) {
+            return {
+              kind: "compaction_failure",
+              ok: false,
+              retryable: true,
+              suggestedAction: "retry",
+              suggestedDelayMs: 1000,
+              details: { message: msg, provider: params.provider, modelId: params.modelId },
+            };
+          }
+          return {
+            kind: "provider_error",
+            ok: false,
+            retryable: true,
+            suggestedAction: "retry",
+            suggestedDelayMs: 1500,
+            details: { message: msg, provider: params.provider, modelId: params.modelId },
+          };
+        }
+
+        if (spotRecoveryExecuted) {
+          return {
+            kind: "ok",
+            ok: true,
+            retryable: false,
+            suggestedAction: "continue",
+            details: { provider: params.provider, modelId: params.modelId },
+          };
+        }
+
+        const lastToolErr = getLastToolError?.();
+        if (lastToolErr?.error) {
+          return {
+            kind: "tool_error",
+            ok: false,
+            retryable: true,
+            suggestedAction: "retry",
+            suggestedDelayMs: 800,
+            details: {
+              message: lastToolErr.error,
+              provider: params.provider,
+              modelId: params.modelId,
+              toolName: lastToolErr.toolName,
+            },
+          };
+        }
+
+        return {
+          kind: "ok",
+          ok: true,
+          retryable: false,
+          suggestedAction: "continue",
+          details: { provider: params.provider, modelId: params.modelId },
+        };
+      };
+
       return {
         aborted,
         timedOut,
@@ -1599,14 +1723,13 @@ export async function runEmbeddedAttempt(
         toolMetas: toolMetasNormalized,
         lastAssistant,
         lastToolError: getLastToolError?.(),
+        attemptOutcome: buildAttemptOutcome(),
         didSendViaMessagingTool: didSendViaMessagingTool(),
         messagingToolSentTexts: getMessagingToolSentTexts(),
         messagingToolSentTargets: getMessagingToolSentTargets(),
         // 🔧 P98: P88 Spot Recovery 成功执行后为 true
         spotRecoveryExecuted,
-        cloudCodeAssistFormatError: Boolean(
-          lastAssistant?.errorMessage && isCloudCodeAssistFormatError(lastAssistant.errorMessage),
-        ),
+        cloudCodeAssistFormatError,
         // Client tool call detected (OpenResponses hosted tools)
         clientToolCall: clientToolCallDetected ?? undefined,
       };

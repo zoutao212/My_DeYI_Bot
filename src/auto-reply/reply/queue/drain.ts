@@ -11,6 +11,7 @@ import type { FollowupRun } from "./types.js";
 import { findParallelGroups } from "../../../agents/intelligent-task-decomposition/dependency-analyzer.js";
 import { runWithTracking } from "../../../agents/intelligent-task-decomposition/file-tracker.js";
 import { getGlobalOrchestrator } from "../../../agents/tools/enqueue-task-tool.js";
+import { flushQueueSnapshot, scheduleSaveQueueSnapshot, writeDeadlockDiagnostic } from "./persistence.js";
 
 // ☆新 V3: 并行并发上限，防止同时发射过多 LLM 请求导致 rate limiting 或 token 预算瞬间耗尽
 // 🔧 P21 修复：从 3 降到 2，trace 证明 3 并发就触发上游 429
@@ -87,6 +88,7 @@ export function scheduleFollowupDrain(
                       const isStale = (item: FollowupRun) => Boolean(item.subTaskId || item.isQueueTask);
                       const staleCount = queue.items.filter(isStale).length;
                       queue.items = queue.items.filter((item) => !isStale(item));
+                      scheduleSaveQueueSnapshot(key, queue);
                       console.log(`[drain] 🧹 ${schedule.reason}, discarded ${staleCount} stale items`);
                       continue;
                     }
@@ -96,6 +98,7 @@ export function scheduleFollowupDrain(
                       const roundId = schedule.roundId;
                       const before = queue.items.length;
                       queue.items = queue.items.filter((item) => item.rootTaskId !== roundId);
+                      scheduleSaveQueueSnapshot(key, queue);
                       if (schedule.treeModified) {
                         await orchestrator.saveTaskTree(taskTree);
                       }
@@ -109,6 +112,7 @@ export function scheduleFollowupDrain(
                       if (roundId) {
                         const before = queue.items.length;
                         queue.items = queue.items.filter((item) => item.rootTaskId !== roundId);
+                        scheduleSaveQueueSnapshot(key, queue);
                         const discarded = before - queue.items.length;
                         if (discarded > 0) {
                           await orchestrator.markRoundCompleted(taskTree, roundId);
@@ -128,12 +132,43 @@ export function scheduleFollowupDrain(
                       const nonTaskIdx = queue.items.findIndex((item) => !item.subTaskId && !item.isQueueTask);
                       if (nonTaskIdx >= 0) {
                         const nonTask = queue.items.splice(nonTaskIdx, 1)[0];
+                        scheduleSaveQueueSnapshot(key, queue);
                         waitCount = 0; // 执行了非任务项，重置计数器
                         await runFollowup(nonTask);
                       } else {
                         // 🔧 P4 修复：安全阀 — 防止无限等待
                         waitCount++;
                         if (waitCount >= MAX_WAIT_ITERATIONS) {
+                          // 🆕 激进增强：死链诊断落盘（不阻塞）
+                          try {
+                            const pendingTasks = taskTree.subTasks.filter(
+                              (t: any) => t.status === "pending" && (nextPeek.rootTaskId ? t.rootTaskId === nextPeek.rootTaskId : true),
+                            );
+                            const pendingIds = pendingTasks.map((t: any) => t.id).filter(Boolean);
+                            const blockedBy: Record<string, string[]> = {};
+                            for (const t of pendingTasks) {
+                              const deps = (t.dependencies ?? []).filter((d: any) => typeof d === "string");
+                              if (deps.length === 0) continue;
+                              const unmet = deps.filter((depId: string) => {
+                                const dep = taskTree.subTasks.find((x: any) => x.id === depId);
+                                return !dep || dep.status === "pending" || dep.status === "active";
+                              });
+                              if (unmet.length > 0 && t.id) blockedBy[t.id] = unmet;
+                            }
+                            void writeDeadlockDiagnostic({
+                              queueKey: key,
+                              reason: `wait safety valve triggered: ${waitCount} iterations`,
+                              queueState: queue,
+                              taskTreeId: taskTree.id,
+                              roundId: nextPeek.rootTaskId,
+                              pendingTaskIds: pendingIds,
+                              blockedBy,
+                            }).then((p) => {
+                              if (p) console.log(`[drain] 🧾 Deadlock diagnostic saved: ${p}`);
+                            });
+                          } catch {
+                            // ignore
+                          }
                           console.warn(
                             `[drain] ⚠️ Wait safety valve triggered: ${waitCount} iterations (${waitCount * 2}s), ` +
                             `falling back to FIFO for remaining ${queue.items.length} items`,
@@ -162,6 +197,7 @@ export function scheduleFollowupDrain(
                             // 真正的死锁：强制 FIFO 执行队列头部任务
                             const stuckItem = queue.items.shift();
                             if (stuckItem) {
+                              scheduleSaveQueueSnapshot(key, queue);
                               waitCount = 0;
                               console.log(`[drain] ▶️ Safety FIFO: ${stuckItem.summaryLine || 'none'} (${stuckItem.subTaskId || 'no-id'})`);
                               // 🔧 问题 V 修复：safety FIFO 也用 runWithTracking 包裹
@@ -202,6 +238,7 @@ export function scheduleFollowupDrain(
                             parallelItems.push(queue.items.splice(idx, 1)[0]);
                           }
                         }
+                        if (parallelItems.length > 0) scheduleSaveQueueSnapshot(key, queue);
                         if (parallelItems.length > 1) {
                           console.log(`[drain] 🚀 Tree-driven parallel: ${parallelItems.length} tasks (max concurrency=${MAX_PARALLEL_CONCURRENCY})`);
                           const batchStart = Date.now();
@@ -212,6 +249,7 @@ export function scheduleFollowupDrain(
                         }
                         // 只匹配到 1 个或 0 个，放回队列回退到串行
                         queue.items.unshift(...parallelItems);
+                        scheduleSaveQueueSnapshot(key, queue);
                       }
 
                       // 串行执行：匹配第一个可执行任务
@@ -223,6 +261,7 @@ export function scheduleFollowupDrain(
                         });
                         if (idx >= 0) {
                           const matched = queue.items.splice(idx, 1)[0];
+                          scheduleSaveQueueSnapshot(key, queue);
                           console.log(`[drain] ▶️ Tree-driven: ${matched.summaryLine || 'none'} (${matched.subTaskId || 'no-id'})`);
                           // 🔧 问题 V 修复：串行执行也用 runWithTracking 包裹
                           // 原因：串行执行时没有 ALS 上下文，trackFileWrite 回退到栈顶 taskId，
@@ -275,6 +314,7 @@ export function scheduleFollowupDrain(
                     // FIFO 兜底：直接取队列头部执行
                     const fallback = queue.items.shift();
                     if (!fallback) { console.log(`[drain] ⚠️ FIFO fallback: queue empty`); break; }
+                    scheduleSaveQueueSnapshot(key, queue);
                     console.log(`[drain] ▶️ FIFO fallback: ${fallback.summaryLine || 'none'}`);
                     // 🔧 问题 V 修复：FIFO fallback 也用 runWithTracking 包裹
                     if (fallback.subTaskId) {
@@ -296,6 +336,7 @@ export function scheduleFollowupDrain(
           // FIFO 兜底（任务树查询失败或无 sessionId 时）
           const next = queue.items.shift();
           if (!next) { console.log(`[drain] ⚠️ queue task shift() returned undefined, breaking`); break; }
+          scheduleSaveQueueSnapshot(key, queue);
           console.log(`[drain] ▶️ FIFO: ${next.summaryLine || 'none'}, isQueueTask=${next.isQueueTask}, depth=${next.taskDepth}`);
           // 🔧 问题 V 修复：FIFO 路径也用 runWithTracking 包裹
           if (next.subTaskId) {
@@ -315,6 +356,7 @@ export function scheduleFollowupDrain(
           if (forceIndividualCollect) {
             const next = queue.items.shift();
             if (!next) break;
+            scheduleSaveQueueSnapshot(key, queue);
             await runFollowup(next);
             continue;
           }
@@ -342,11 +384,13 @@ export function scheduleFollowupDrain(
             forceIndividualCollect = true;
             const next = queue.items.shift();
             if (!next) break;
+            scheduleSaveQueueSnapshot(key, queue);
             await runFollowup(next);
             continue;
           }
 
           const items = queue.items.splice(0, queue.items.length);
+          scheduleSaveQueueSnapshot(key, queue);
           const summary = buildQueueSummaryPrompt({ state: queue, noun: "message" });
           const run = items.at(-1)?.run ?? queue.lastRun;
           if (!run) break;
@@ -456,6 +500,7 @@ export function scheduleFollowupDrain(
 
         const next = queue.items.shift();
         if (!next) { console.log(`[drain] ⚠️ queue.items.shift() returned undefined, breaking`); break; }
+        scheduleSaveQueueSnapshot(key, queue);
         console.log(`[drain] ▶️ Running task: summary=${next.summaryLine || 'none'}, isQueueTask=${next.isQueueTask}, isRootTask=${next.isRootTask}, depth=${next.taskDepth}`);
         // 🔧 问题 V 修复：通用路径也用 runWithTracking 包裹
         if (next.subTaskId) {
@@ -527,8 +572,12 @@ export function scheduleFollowupDrain(
     } finally {
       queue.draining = false;
       console.log(`[drain] 🔚 Finally: items=${queue.items.length}, droppedCount=${queue.droppedCount}`);
+      // 🆕 flush 持久化（不阻塞队列继续调度，但尽量保证磁盘快照一致）
+      void flushQueueSnapshot(key);
       if (queue.items.length === 0 && queue.droppedCount === 0) {
         FOLLOWUP_QUEUES.delete(key);
+        // 🆕 队列已空：flush 后删除快照，避免重启加载空队列造成干扰
+        void import("./persistence.js").then((m) => m.deleteQueueSnapshot(key)).catch(() => {});
       } else {
         scheduleFollowupDrain(key, runFollowup);
       }

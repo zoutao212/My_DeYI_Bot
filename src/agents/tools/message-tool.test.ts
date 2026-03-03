@@ -47,6 +47,34 @@ describe("message tool agent routing", () => {
     expect(call?.agentId).toBe("alpha");
     expect(call?.sessionKey).toBeUndefined();
   });
+
+  it("fills target=current using agentTo", async () => {
+    mocks.runMessageAction.mockClear();
+    mocks.runMessageAction.mockResolvedValue({
+      kind: "send",
+      action: "send",
+      channel: "safew",
+      handledBy: "plugin",
+      payload: {},
+      dryRun: true,
+    } satisfies MessageActionRunResult);
+
+    const tool = createMessageTool({
+      config: {} as never,
+      agentTo: "safew:123",
+      currentChannelProvider: "safew",
+    });
+
+    await tool.execute("1", {
+      action: "send",
+      target: "current",
+      message: "/newse",
+    });
+
+    const call = mocks.runMessageAction.mock.calls[0]?.[0];
+    expect(call?.params?.target).toBe("safew:123");
+    expect(call?.params?.channel).toBe("safew");
+  });
 });
 
 describe("message tool path passthrough", () => {

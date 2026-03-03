@@ -1,5 +1,6 @@
 import { applyQueueDropPolicy, shouldSkipQueueItem } from "../../../utils/queue-helpers.js";
 import { FOLLOWUP_QUEUES, getFollowupQueue } from "./state.js";
+import { scheduleSaveQueueSnapshot } from "./persistence.js";
 import type { FollowupRun, QueueDedupeMode, QueueSettings } from "./types.js";
 
 function isRunAlreadyQueued(
@@ -47,6 +48,8 @@ export function enqueueFollowupRun(
   if (!shouldEnqueue) return false;
 
   queue.items.push(run);
+  // 🆕 队列快照持久化（debounce）：长程连续/重启恢复用
+  scheduleSaveQueueSnapshot(key, queue);
   return true;
 }
 

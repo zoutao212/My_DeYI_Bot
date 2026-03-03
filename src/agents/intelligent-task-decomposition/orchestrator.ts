@@ -5687,6 +5687,46 @@ ${childOutputs.join("\n\n---\n\n")}
       }
     }
 
+    // 🆕 a1: AttemptOutcome 兜底消费（中枢决策）
+    // followup-runner 已经会在更早的阶段短路处理 attemptOutcome，但为了防止未来新增分支
+    // 或异常路径漏掉短路，这里再做一次“最后防线”的统一决策。
+    const ao = subTask.metadata?.lastAttemptOutcome;
+    if (ao && ao.ok === false) {
+      if (!subTask.metadata) subTask.metadata = {};
+
+      // shrink_context：提升收缩等级（跨重试持久化）
+      if (ao.suggestedAction === "shrink_context" || ao.hints?.needsContextShrink) {
+        subTask.metadata.contextShrinkLevel = (subTask.metadata.contextShrinkLevel ?? 0) + 1;
+      }
+
+      const maxRetries = this.getDefaultMaxRetries();
+      const currentRetry = subTask.retryCount ?? 0;
+      const wantsRetry =
+        ao.suggestedAction === "retry" || ao.suggestedAction === "degrade" || ao.suggestedAction === "shrink_context";
+
+      // 激进策略：即使 ao.retryable=false，只要是 shrink_context 且收缩等级尚低，也给一次重试机会。
+      const allowShrinkRetry = ao.suggestedAction === "shrink_context" && (subTask.metadata.contextShrinkLevel ?? 0) <= 2;
+      const shouldRetry = wantsRetry && currentRetry < maxRetries && (ao.retryable === true || allowShrinkRetry);
+
+      if (shouldRetry) {
+        subTask.status = "pending";
+        subTask.error = `AttemptOutcome(${ao.kind}): ${ao.details?.message ?? message}`.trim();
+        subTask.retryCount = currentRetry + 1;
+        await this.taskTreeManager.save(taskTree);
+        console.log(
+          `[Orchestrator] 🔄 onTaskFailed(AttemptOutcome): ${subTask.id} kind=${ao.kind}, ` +
+            `action=${ao.suggestedAction}, attempt ${subTask.retryCount}/${maxRetries}, ` +
+            `contextShrinkLevel=${subTask.metadata.contextShrinkLevel ?? 0}`,
+        );
+        return {
+          action: "retry",
+          reason: `AttemptOutcome 建议重试 (${subTask.retryCount}/${maxRetries}): ${ao.kind}`,
+          needsRequeue: true,
+          cascadeSkip: false,
+        };
+      }
+    }
+
     // 1. 判断是否可重试
     const isRetryable = this.isRetryableError(error);
     const maxRetries = this.getDefaultMaxRetries();

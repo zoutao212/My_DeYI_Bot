@@ -208,15 +208,46 @@ export async function sendMessageSafew(
       logHttpError(label ?? "request", err);
       throw err;
     });
-  const wrapChatNotFound = (err: unknown) => {
-    if (!/400: Bad Request: chat not found/i.test(formatErrorMessage(err))) return err;
-    return new Error(
-      [
-        `Safew send failed: chat not found (chat_id=${chatId}).`,
-        "Likely: bot not started in DM, bot removed from group/channel, group migrated (new -100… id), or wrong bot token.",
-        `Input was: ${JSON.stringify(to)}.`,
-      ].join(" "),
-    );
+  const wrapSafewSendError = (err: unknown) => {
+    const errText = formatErrorMessage(err);
+
+    if (/\b401\b.*unauthorized/i.test(errText) || /401:\s*unauthorized/i.test(errText)) {
+      return new Error(
+        [
+          `Safew send failed: Unauthorized (401). accountId=${account.accountId} chat_id=${chatId}.`,
+          `Input was: ${JSON.stringify(to)}.`,
+          "Likely:",
+          "- bot token is wrong for this accountId",
+          "- SAFEW_BOT_TOKEN / channels.safew.accounts.<id>.botToken/tokenFile not loaded as expected",
+          "- token was revoked / account mapping mismatch",
+        ].join(" "),
+      );
+    }
+
+    if (/\b403\b.*forbidden/i.test(errText) || /403:\s*forbidden/i.test(errText)) {
+      return new Error(
+        [
+          `Safew send failed: Forbidden (403). accountId=${account.accountId} chat_id=${chatId}.`,
+          `Input was: ${JSON.stringify(to)}.`,
+          "Likely:",
+          "- bot is not a member of the group/channel",
+          "- bot lacks permission to post in the target chat",
+          "- posting is disabled for the bot/user in that chat",
+        ].join(" "),
+      );
+    }
+
+    if (/400: Bad Request: chat not found/i.test(errText)) {
+      return new Error(
+        [
+          `Safew send failed: chat not found (chat_id=${chatId}). accountId=${account.accountId}.`,
+          "Likely: bot not started in DM, bot removed from group/channel, group migrated (new -100… id), or wrong bot token.",
+          `Input was: ${JSON.stringify(to)}.`,
+        ].join(" "),
+      );
+    }
+
+    return err;
   };
 
   const textMode = opts.textMode ?? "markdown";
@@ -266,10 +297,10 @@ export async function sendMessageSafew(
               : api.sendMessage(chatId, fallback),
           "message-plain",
         ).catch((err2) => {
-          throw wrapChatNotFound(err2);
+          throw wrapSafewSendError(err2);
         });
       }
-      throw wrapChatNotFound(err);
+      throw wrapSafewSendError(err);
     });
     return res;
   };
@@ -311,18 +342,18 @@ export async function sendMessageSafew(
         () => api.sendAnimation(chatId, file, mediaParams),
         "animation",
       ).catch((err) => {
-        throw wrapChatNotFound(err);
+        throw wrapSafewSendError(err);
       });
     } else if (kind === "image") {
       result = await requestWithDiag(() => api.sendPhoto(chatId, file, mediaParams), "photo").catch(
         (err) => {
-          throw wrapChatNotFound(err);
+          throw wrapSafewSendError(err);
         },
       );
     } else if (kind === "video") {
       result = await requestWithDiag(() => api.sendVideo(chatId, file, mediaParams), "video").catch(
         (err) => {
-          throw wrapChatNotFound(err);
+          throw wrapSafewSendError(err);
         },
       );
     } else if (kind === "audio") {
@@ -337,14 +368,14 @@ export async function sendMessageSafew(
           () => api.sendVoice(chatId, file, mediaParams),
           "voice",
         ).catch((err) => {
-          throw wrapChatNotFound(err);
+          throw wrapSafewSendError(err);
         });
       } else {
         result = await requestWithDiag(
           () => api.sendAudio(chatId, file, mediaParams),
           "audio",
         ).catch((err) => {
-          throw wrapChatNotFound(err);
+          throw wrapSafewSendError(err);
         });
       }
     } else {
@@ -352,7 +383,7 @@ export async function sendMessageSafew(
         () => api.sendDocument(chatId, file, mediaParams),
         "document",
       ).catch((err) => {
-        throw wrapChatNotFound(err);
+        throw wrapSafewSendError(err);
       });
     }
     const mediaMessageId = String(result?.message_id ?? "unknown");

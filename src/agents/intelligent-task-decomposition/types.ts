@@ -4,6 +4,8 @@
  * 定义任务树、子任务、检查点、失败日志、错误日志等核心数据结构
  */
 
+import type { AttemptOutcome } from "../pi-embedded-runner/run/types.js";
+
 /**
  * 任务树
  * 
@@ -647,6 +649,15 @@ export interface SubTaskMetadata {
     suggestions: string[];
   };
 
+  /**
+   * 上下文收缩等级（0=不收缩）。当检测到上下文溢出/临时性崩溃时逐步提升，
+   * followup-runner 会据此减少“经验池/记忆/素材”等重上下文注入，避免长程连续被 context 爆炸拖死。
+   */
+  contextShrinkLevel?: number;
+
+  /** attempt 层结构化失败分类与恢复建议（用于诊断与回放，不影响业务逻辑） */
+  lastAttemptOutcome?: AttemptOutcome;
+
   // 🆕 迭代优化相关字段
 
   /** 上一次执行的输出（restart 时保存，用于下次重试时注入 prompt 做迭代优化） */
@@ -788,8 +799,10 @@ export interface SubTaskMetadata {
   /**
    * 输出契约 — 任务执行前确定的结构化产出规范
    *
-   * 解决"Prompt-as-Contract 反模式"：系统依赖自然语言 prompt 控制文件名/语言/字数，
-   * LLM 不可靠时系统无法兜底。OutputContract 提供程序化的强制执行机制。
+   * 生命周期：
+   * 1. 创建时：由 decomposeWritingTaskIntoSegments / decomposeFailedTask / enqueue_task 生成
+   * 2. 继承时：续写/分段子任务从父任务继承（不丢失上下文）
+   * 3. 执行后：followup-runner 用 contract 校验产出文件名，不符时自动重命名
    */
   outputContract?: OutputContract;
 }
