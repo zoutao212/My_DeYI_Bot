@@ -6,7 +6,6 @@ import { dispatchReplyWithBufferedBlockDispatcher } from "../auto-reply/reply/pr
 import { removeAckReactionAfterReply } from "../channels/ack-reactions.js";
 import { logAckFailure, logTypingFailure } from "../channels/logging.js";
 import { createReplyPrefixContext } from "../channels/reply-prefix.js";
-import { createTypingCallbacks } from "../channels/typing.js";
 import { danger, logVerbose } from "../globals.js";
 import { resolveMarkdownTableMode } from "../config/markdown-tables.js";
 import { deliverReplies } from "./bot/delivery.js";
@@ -116,6 +115,24 @@ export const dispatchSafewMessage = async ({
     await draftStream.flush();
   };
 
+  let fallbackTypingTimer: NodeJS.Timeout | undefined;
+  const startTypingFallback = () => {
+    if (fallbackTypingTimer) return;
+    void sendTyping().catch(() => {});
+    fallbackTypingTimer = setInterval(() => {
+      void sendTyping().catch(() => {});
+    }, 5000);
+  };
+  const stopTypingFallback = () => {
+    if (fallbackTypingTimer) {
+      clearInterval(fallbackTypingTimer);
+      fallbackTypingTimer = undefined;
+    }
+  };
+
+  // Immediate typing loop to cover task trees, media understanding, and complex dispatch
+  startTypingFallback();
+
   const disableBlockStreaming =
     Boolean(draftStream) ||
     (typeof safewCfg.blockStreaming === "boolean" ? !safewCfg.blockStreaming : undefined);
@@ -157,17 +174,18 @@ export const dispatchSafewMessage = async ({
       onError: (err, info) => {
         runtime.error?.(danger(`safew ${info.kind} reply failed: ${String(err)}`));
       },
-      onReplyStart: createTypingCallbacks({
-        start: sendTyping,
-        onStartError: (err) => {
+      onReplyStart: async () => {
+        // We let the fallback timer handle continuous typing for Safew to ensure 
+        // task trees and complex operations are fully covered.
+        await sendTyping().catch((err) => {
           logTypingFailure({
             log: logVerbose,
             channel: "safew",
             target: String(chatId),
             error: err,
           });
-        },
-      }).onReplyStart,
+        });
+      },
     },
     replyOptions: {
       skillFilter,
@@ -182,6 +200,8 @@ export const dispatchSafewMessage = async ({
         prefixContext.onModelSelected(ctx);
       },
     },
+  }).finally(() => {
+    stopTypingFallback();
   });
   draftStream?.stop();
   if (!queuedFinal) {

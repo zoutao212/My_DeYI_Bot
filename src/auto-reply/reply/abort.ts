@@ -20,7 +20,7 @@ import {
   resolveMainSessionAlias,
 } from "../../agents/tools/sessions-helpers.js";
 
-const ABORT_TRIGGERS = new Set(["stop", "esc", "abort", "wait", "exit", "interrupt"]);
+const ABORT_TRIGGERS = new Set(["stop", "esc", "abort", "wait", "exit", "interrupt", "停止", "停止任务", "中止", "取消"]);
 const ABORT_MEMORY = new Map<string, boolean>();
 
 export function isAbortTrigger(text?: string): boolean {
