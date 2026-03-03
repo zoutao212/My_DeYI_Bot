@@ -401,7 +401,15 @@ function extractRootTaskIdFromSegment(segmentMessages: AgentMessage[]): string |
   return undefined;
 }
 
-/** 将旧任务段落压缩为 1-2 条摘要消息 */
+/** 
+ * 将旧任务段落压缩为 1-2 条摘要消息
+ * 
+ * 🆕 V2 优化：
+ * - 彻底剥离 tool call JSON 数据（toolCall/toolUse/functionCall 类型的 content block）
+ * - 只提取 assistant 的自然语言文本
+ * - 摘要总长度限制在 300 字符以内
+ * - 提取多条 assistant 文本，不仅仅是最后一条
+ */
 function compressSegmentToSummary(
   segment: TaskSegment,
   messages: AgentMessage[],
@@ -412,15 +420,23 @@ function compressSegmentToSummary(
   const taskCount = countToolCalls(segmentMessages, "enqueue_task");
   const writeCount = countToolCalls(segmentMessages, "write");
   const execCount = countToolCalls(segmentMessages, "exec");
+  const readCount = countToolCalls(segmentMessages, "read");
   const userTurns = segmentMessages.filter((m) => m.role === "user").length;
+  const toolResultCount = segmentMessages.filter(
+    (m) => m.role === "toolResult" || (m.role as string) === "tool",
+  ).length;
 
-  // 提取最后一条 assistant 文本摘要（如果有）
+  // 🆕 V2: 提取 assistant 的自然语言文本（过滤掉 toolCall 类型的 block）
+  // 从最后往前扫描，收集有意义的文本
   let lastAssistantText = "";
   for (let i = segmentMessages.length - 1; i >= 0; i--) {
-    if (segmentMessages[i].role === "assistant") {
-      const text = extractText(segmentMessages[i]);
-      if (text.length > 20) {
-        lastAssistantText = text.length > 150 ? text.substring(0, 150) + "..." : text;
+    const msg = segmentMessages[i];
+    if (msg.role === "assistant") {
+      const naturalText = extractNaturalLanguageText(msg);
+      if (naturalText.length > 20) {
+        lastAssistantText = naturalText.length > 200
+          ? naturalText.substring(0, 200) + "..."
+          : naturalText;
         break;
       }
     }
@@ -428,10 +444,12 @@ function compressSegmentToSummary(
 
   // 构建压缩摘要
   const stats: string[] = [];
-  if (taskCount > 0) stats.push(`${taskCount} 个子任务`);
-  if (writeCount > 0) stats.push(`${writeCount} 次文件写入`);
-  if (execCount > 0) stats.push(`${execCount} 次命令执行`);
   if (userTurns > 0) stats.push(`${userTurns} 轮对话`);
+  if (taskCount > 0) stats.push(`${taskCount} 个子任务`);
+  if (readCount > 0) stats.push(`${readCount} 次读取`);
+  if (writeCount > 0) stats.push(`${writeCount} 次写入`);
+  if (execCount > 0) stats.push(`${execCount} 次执行`);
+  if (toolResultCount > 0) stats.push(`${toolResultCount} 个工具结果`);
 
   const statsText = stats.length > 0 ? `（${stats.join(", ")}）` : "";
 
@@ -439,13 +457,28 @@ function compressSegmentToSummary(
   const firstTimestamp = segmentMessages[0]?.timestamp ?? Date.now();
   const lastTimestamp = segmentMessages[segmentMessages.length - 1]?.timestamp ?? Date.now();
 
+  // 🆕 V2: 限制摘要总长度在 300 字符以内
+  const taskGoalTruncated = segment.taskGoal.length > 100
+    ? segment.taskGoal.substring(0, 100) + "..."
+    : segment.taskGoal;
+  
+  const finalStatusText = lastAssistantText
+    ? `\n最终状态: ${lastAssistantText}`
+    : "";
+  
+  // 确保总文本不超过 300 字符
+  let summaryText = `[历史任务已完成] ${taskGoalTruncated}${statsText}${finalStatusText}`;
+  if (summaryText.length > 300) {
+    summaryText = summaryText.substring(0, 297) + "...";
+  }
+
   const summaryMessages: AgentMessage[] = [
     {
       role: "user",
       content: [
         {
           type: "text",
-          text: `[历史任务 - 已压缩] ${segment.taskGoal}`,
+          text: `[历史任务 - 已压缩] ${taskGoalTruncated}`,
         },
       ],
       timestamp: firstTimestamp,
@@ -455,7 +488,7 @@ function compressSegmentToSummary(
       content: [
         {
           type: "text",
-          text: `[历史任务已完成] ${segment.taskGoal}${statsText}${lastAssistantText ? `\n最终状态: ${lastAssistantText}` : ""}`,
+          text: summaryText,
         },
       ],
       api: "context-pruning" as never,
@@ -468,6 +501,39 @@ function compressSegmentToSummary(
   ];
 
   return summaryMessages;
+}
+
+/**
+ * 从 assistant 消息中提取自然语言文本（排除 toolCall/toolUse/functionCall 块）
+ * 
+ * 与 extractText 不同，这个函数只提取纯文本块，
+ * 忽略工具调用块中的 JSON 数据，避免摘要中包含原始 JSON。
+ */
+function extractNaturalLanguageText(msg: AgentMessage): string {
+  if (!("content" in msg)) return "";
+  const content = msg.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const texts: string[] = [];
+    for (const item of content) {
+      if (item == null || typeof item !== "object") continue;
+      const block = item as unknown as Record<string, unknown>;
+      // 只提取 text 类型，排除 toolCall/toolUse/functionCall/thinking
+      if (block.type === "text" && typeof block.text === "string") {
+        const text = block.text.trim();
+        // 🆕 过滤掉看起来像 JSON 或工具输出的文本
+        if (text.startsWith("{") && text.endsWith("}")) continue;
+        if (text.startsWith("[{") && text.endsWith("}]")) continue;
+        // 过滤掉 [Historical context: ...] 这种幻觉文本
+        if (text.startsWith("[Historical context:")) continue;
+        if (text.length > 0) {
+          texts.push(text);
+        }
+      }
+    }
+    return texts.join("\n");
+  }
+  return "";
 }
 
 /** 统计段落中特定工具的调用次数 */

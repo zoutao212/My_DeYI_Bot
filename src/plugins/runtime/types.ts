@@ -129,6 +129,16 @@ type SendMessageTelegram = typeof import("../../telegram/send.js").sendMessageTe
 type MonitorTelegramProvider = typeof import("../../telegram/monitor.js").monitorTelegramProvider;
 type TelegramMessageActions =
   typeof import("../../channels/plugins/actions/telegram.js").telegramMessageActions;
+type AuditSafewGroupMembership =
+  typeof import("../../safew/audit.js").auditSafewGroupMembership;
+type CollectSafewUnmentionedGroupIds =
+  typeof import("../../safew/audit.js").collectSafewUnmentionedGroupIds;
+type ProbeSafew = typeof import("../../safew/probe.js").probeSafew;
+type ResolveSafewToken = typeof import("../../safew/token.js").resolveSafewToken;
+type SendMessageSafew = typeof import("../../safew/send.js").sendMessageSafew;
+type MonitorSafewProvider = typeof import("../../safew/monitor.js").monitorSafewProvider;
+type SafewMessageActions =
+  typeof import("../../channels/plugins/actions/safew.js").safewMessageActions;
 type ProbeSignal = typeof import("../../signal/probe.js").probeSignal;
 type SendMessageSignal = typeof import("../../signal/send.js").sendMessageSignal;
 type MonitorSignalProvider = typeof import("../../signal/index.js").monitorSignalProvider;
@@ -311,6 +321,15 @@ export type PluginRuntime = {
       sendMessageTelegram: SendMessageTelegram;
       monitorTelegramProvider: MonitorTelegramProvider;
       messageActions: TelegramMessageActions;
+    };
+    safew: {
+      auditGroupMembership: AuditSafewGroupMembership;
+      collectUnmentionedGroupIds: CollectSafewUnmentionedGroupIds;
+      probeSafew: ProbeSafew;
+      resolveSafewToken: ResolveSafewToken;
+      sendMessageSafew: SendMessageSafew;
+      monitorSafewProvider: MonitorSafewProvider;
+      messageActions: SafewMessageActions;
     };
     signal: {
       probeSignal: ProbeSignal;

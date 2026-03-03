@@ -125,7 +125,7 @@ export function createSafewBot(opts: SafewBotOptions) {
       ? Math.max(1, Math.floor(safewCfg.timeoutSeconds))
       : undefined;
   const client: ApiClientOptions = {
-    baseFetchUrl: "https://api.safew.org",
+    apiRoot: "https://api.safew.org",
     ...(shouldProvideFetch && fetchImpl
       ? { fetch: fetchImpl as unknown as ApiClientOptions["fetch"] }
       : {}),

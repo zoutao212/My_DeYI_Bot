@@ -93,6 +93,7 @@ export {
   GoogleChatConfigSchema,
   IMessageConfigSchema,
   MSTeamsConfigSchema,
+  SafewConfigSchema,
   SignalConfigSchema,
   SlackConfigSchema,
   TelegramConfigSchema,
@@ -152,6 +153,7 @@ export {
   resolveDiscordGroupRequireMention,
   resolveGoogleChatGroupRequireMention,
   resolveIMessageGroupRequireMention,
+  resolveSafewGroupRequireMention,
   resolveSlackGroupRequireMention,
   resolveTelegramGroupRequireMention,
   resolveWhatsAppGroupRequireMention,
@@ -159,6 +161,7 @@ export {
   resolveDiscordGroupToolPolicy,
   resolveGoogleChatGroupToolPolicy,
   resolveIMessageGroupToolPolicy,
+  resolveSafewGroupToolPolicy,
   resolveSlackGroupToolPolicy,
   resolveTelegramGroupToolPolicy,
   resolveWhatsAppGroupToolPolicy,
@@ -174,6 +177,8 @@ export {
 export {
   listDiscordDirectoryGroupsFromConfig,
   listDiscordDirectoryPeersFromConfig,
+  listSafewDirectoryGroupsFromConfig,
+  listSafewDirectoryPeersFromConfig,
   listSlackDirectoryGroupsFromConfig,
   listSlackDirectoryPeersFromConfig,
   listTelegramDirectoryGroupsFromConfig,
@@ -299,6 +304,20 @@ export {
   normalizeTelegramMessagingTarget,
 } from "../channels/plugins/normalize/telegram.js";
 export { collectTelegramStatusIssues } from "../channels/plugins/status-issues/telegram.js";
+
+// Channel: SafeW
+export {
+  listSafewAccountIds,
+  resolveDefaultSafewAccountId,
+  resolveSafewAccount,
+  type ResolvedSafewAccount,
+} from "../safew/accounts.js";
+export { safewOnboardingAdapter } from "../channels/plugins/onboarding/safew.js";
+export {
+  looksLikeSafewTargetId,
+  normalizeSafewMessagingTarget,
+} from "../channels/plugins/normalize/safew.js";
+export { collectSafewStatusIssues } from "../channels/plugins/status-issues/safew.js";
 
 // Channel: Signal
 export {

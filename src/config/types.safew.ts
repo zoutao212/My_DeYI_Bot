@@ -1,4 +1,4 @@
-﻿import type {
+import type {
   BlockStreamingChunkConfig,
   BlockStreamingCoalesceConfig,
   DmPolicy,
@@ -25,11 +25,11 @@ export type SafewCapabilitiesConfig =
       inlineButtons?: SafewInlineButtonsScope;
     };
 
-/** Custom command definition for Safew bot menu. */
+/** Custom command definition for safew bot menu. */
 export type SafewCustomCommand = {
   /** Command name (without leading /). */
   command: string;
-  /** Description shown in Safew command menu. */
+  /** Description shown in safew command menu. */
   description: string;
 };
 
@@ -40,21 +40,21 @@ export type SafewAccountConfig = {
   capabilities?: SafewCapabilitiesConfig;
   /** Markdown formatting overrides (tables). */
   markdown?: MarkdownConfig;
-  /** Override native command registration for Safew (bool or "auto"). */
+  /** Override native command registration for safew (bool or "auto"). */
   commands?: ProviderCommandsConfig;
-  /** Custom commands to register in Safew's command menu (merged with native). */
+  /** Custom commands to register in safew's command menu (merged with native). */
   customCommands?: SafewCustomCommand[];
   /** Allow channel-initiated config writes (default: true). */
   configWrites?: boolean;
   /**
-   * Controls how Safew direct chats (DMs) are handled:
+   * Controls how safew direct chats (DMs) are handled:
    * - "pairing" (default): unknown senders get a pairing code; owner must approve
    * - "allowlist": only allow senders in allowFrom (or paired allow store)
    * - "open": allow all inbound DMs (requires allowFrom to include "*")
    * - "disabled": ignore all inbound DMs
    */
   dmPolicy?: DmPolicy;
-  /** If false, do not start this Safew account. Default: true. */
+  /** If false, do not start this safew account. Default: true. */
   enabled?: boolean;
   botToken?: string;
   /** Path to file containing bot token (for secret managers like agenix). */
@@ -63,7 +63,7 @@ export type SafewAccountConfig = {
   replyToMode?: ReplyToMode;
   groups?: Record<string, SafewGroupConfig>;
   allowFrom?: Array<string | number>;
-  /** Optional allowlist for Safew group senders (user ids or usernames). */
+  /** Optional allowlist for safew group senders (user ids or usernames). */
   groupAllowFrom?: Array<string | number>;
   /**
    * Controls how group messages are handled:
@@ -88,12 +88,12 @@ export type SafewAccountConfig = {
   draftChunk?: BlockStreamingChunkConfig;
   /** Merge streamed block replies before sending. */
   blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
-  /** Draft streaming mode for Safew (off|partial|block). Default: partial. */
+  /** Draft streaming mode for safew (off|partial|block). Default: partial. */
   streamMode?: "off" | "partial" | "block";
   mediaMaxMb?: number;
-  /** Safew API client timeout in seconds (grammY ApiClientOptions). */
+  /** safew API client timeout in seconds (grammY ApiClientOptions). */
   timeoutSeconds?: number;
-  /** Retry policy for outbound Safew API calls. */
+  /** Retry policy for outbound safew API calls. */
   retry?: OutboundRetryConfig;
   proxy?: string;
   webhookUrl?: string;
@@ -151,6 +151,6 @@ export type SafewGroupConfig = {
 };
 
 export type SafewConfig = {
-  /** Optional per-account Safew configuration (multi-account). */
+  /** Optional per-account safew configuration (multi-account). */
   accounts?: Record<string, SafewAccountConfig>;
 } & SafewAccountConfig;

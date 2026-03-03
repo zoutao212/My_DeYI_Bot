@@ -5,6 +5,7 @@ import {
 } from "../../config/group-policy.js";
 import type { DiscordConfig } from "../../config/types.js";
 import type { GroupToolPolicyConfig } from "../../config/types.tools.js";
+import { resolveSafewAccount } from "../../safew/accounts.js";
 import { resolveSlackAccount } from "../../slack/accounts.js";
 
 type GroupMentionParams = {
@@ -107,6 +108,24 @@ export function resolveTelegramGroupRequireMention(
   return resolveChannelGroupRequireMention({
     cfg: params.cfg,
     channel: "telegram",
+    groupId: chatId ?? params.groupId,
+    accountId: params.accountId,
+  });
+}
+
+export function resolveSafewGroupRequireMention(
+  params: GroupMentionParams,
+): boolean | undefined {
+  const { chatId, topicId } = parseTelegramGroupId(params.groupId);
+  const requireMention = resolveTelegramRequireMention({
+    cfg: params.cfg,
+    chatId,
+    topicId,
+  });
+  if (typeof requireMention === "boolean") return requireMention;
+  return resolveChannelGroupRequireMention({
+    cfg: params.cfg,
+    channel: "safew",
     groupId: chatId ?? params.groupId,
     accountId: params.accountId,
   });
@@ -224,6 +243,18 @@ export function resolveTelegramGroupToolPolicy(
   return resolveChannelGroupToolsPolicy({
     cfg: params.cfg,
     channel: "telegram",
+    groupId: chatId ?? params.groupId,
+    accountId: params.accountId,
+  });
+}
+
+export function resolveSafewGroupToolPolicy(
+  params: GroupMentionParams,
+): GroupToolPolicyConfig | undefined {
+  const { chatId } = parseTelegramGroupId(params.groupId);
+  return resolveChannelGroupToolsPolicy({
+    cfg: params.cfg,
+    channel: "safew",
     groupId: chatId ?? params.groupId,
     accountId: params.accountId,
   });

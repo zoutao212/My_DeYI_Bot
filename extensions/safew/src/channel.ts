@@ -1,4 +1,4 @@
-﻿import {
+import {
   applyAccountNameToChannelSection,
   buildChannelConfigSchema,
   collectSafewStatusIssues,

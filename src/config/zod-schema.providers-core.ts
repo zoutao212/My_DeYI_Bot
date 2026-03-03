@@ -155,6 +155,35 @@ export const TelegramConfigSchema = TelegramAccountSchemaBase.extend({
   validateTelegramCustomCommands(value, ctx);
 });
 
+// SafeW Config Schema (reuses Telegram structure since API is compatible)
+export const SafewAccountSchemaBase = TelegramAccountSchemaBase;
+
+export const SafewAccountSchema = SafewAccountSchemaBase.superRefine((value, ctx) => {
+  requireOpenAllowFrom({
+    policy: value.dmPolicy,
+    allowFrom: value.allowFrom,
+    ctx,
+    path: ["allowFrom"],
+    message:
+      'channels.safew.dmPolicy="open" requires channels.safew.allowFrom to include "*"',
+  });
+  validateTelegramCustomCommands(value, ctx);
+});
+
+export const SafewConfigSchema = SafewAccountSchemaBase.extend({
+  accounts: z.record(z.string(), SafewAccountSchema.optional()).optional(),
+}).superRefine((value, ctx) => {
+  requireOpenAllowFrom({
+    policy: value.dmPolicy,
+    allowFrom: value.allowFrom,
+    ctx,
+    path: ["allowFrom"],
+    message:
+      'channels.safew.dmPolicy="open" requires channels.safew.allowFrom to include "*"',
+  });
+  validateTelegramCustomCommands(value, ctx);
+});
+
 export const DiscordDmSchema = z
   .object({
     enabled: z.boolean().optional(),

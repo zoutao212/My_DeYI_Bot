@@ -1,4 +1,4 @@
-﻿import type { ClawdbotPluginApi } from "clawdbot/plugin-sdk";
+import type { ClawdbotPluginApi } from "clawdbot/plugin-sdk";
 import { emptyPluginConfigSchema } from "clawdbot/plugin-sdk";
 
 import { safewPlugin } from "./src/channel.js";

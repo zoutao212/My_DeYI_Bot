@@ -45,6 +45,7 @@ import { recordInboundSession } from "../../channels/session.js";
 import { discordMessageActions } from "../../channels/plugins/actions/discord.js";
 import { signalMessageActions } from "../../channels/plugins/actions/signal.js";
 import { telegramMessageActions } from "../../channels/plugins/actions/telegram.js";
+import { safewMessageActions } from "../../channels/plugins/actions/safew.js";
 import { createWhatsAppLoginTool } from "../../channels/plugins/agent-tools/whatsapp-login.js";
 import { monitorWebChannel } from "../../channels/web/index.js";
 import {
@@ -112,6 +113,14 @@ import { monitorTelegramProvider } from "../../telegram/monitor.js";
 import { probeTelegram } from "../../telegram/probe.js";
 import { sendMessageTelegram } from "../../telegram/send.js";
 import { resolveTelegramToken } from "../../telegram/token.js";
+import {
+  auditSafewGroupMembership,
+  collectSafewUnmentionedGroupIds,
+} from "../../safew/audit.js";
+import { monitorSafewProvider } from "../../safew/monitor.js";
+import { probeSafew } from "../../safew/probe.js";
+import { sendMessageSafew } from "../../safew/send.js";
+import { resolveSafewToken } from "../../safew/token.js";
 import { loadWebMedia } from "../../web/media.js";
 import { getActiveWebListener } from "../../web/active-listener.js";
 import {
@@ -295,6 +304,15 @@ export function createPluginRuntime(): PluginRuntime {
         sendMessageTelegram,
         monitorTelegramProvider,
         messageActions: telegramMessageActions,
+      },
+      safew: {
+        auditGroupMembership: auditSafewGroupMembership,
+        collectUnmentionedGroupIds: collectSafewUnmentionedGroupIds,
+        probeSafew,
+        resolveSafewToken,
+        sendMessageSafew,
+        monitorSafewProvider,
+        messageActions: safewMessageActions,
       },
       signal: {
         probeSignal,
