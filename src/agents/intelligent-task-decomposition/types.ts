@@ -627,6 +627,9 @@ export interface SubTaskMetadata {
   
   /** 实际产生的文件完整路径列表（用于 mergeTaskOutputs 精准定位） */
   producedFilePaths?: string[];
+
+  /** 持久化/落盘警告（不阻塞主流程，但必须可追溯） */
+  persistenceWarnings?: string[];
   
   // 🆕 兜底落盘相关字段
   

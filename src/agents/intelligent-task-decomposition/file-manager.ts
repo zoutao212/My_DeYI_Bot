@@ -416,6 +416,9 @@ export class FileManager {
     const taskDir = path.join(this.taskTreePath, "tasks", subTask.id);
     await fs.mkdir(taskDir, { recursive: true });
 
+    const artifactsDir = path.join(taskDir, "artifacts");
+    await fs.mkdir(artifactsDir, { recursive: true });
+
     const metadata = {
       id: subTask.id,
       summary: subTask.summary,
@@ -429,6 +432,9 @@ export class FileManager {
         output: `tasks/${subTask.id}/output.txt`,
         artifacts: `tasks/${subTask.id}/artifacts/`,
       },
+      producedFiles: subTask.metadata?.producedFiles ?? [],
+      producedFilePaths: subTask.metadata?.producedFilePaths ?? [],
+      persistenceWarnings: subTask.metadata?.persistenceWarnings ?? [],
     };
 
     const metadataPath = path.join(taskDir, "metadata.json");
@@ -534,6 +540,9 @@ export class FileManager {
       const raw = await fs.readFile(metadataPath, "utf-8");
       const parsed = JSON.parse(raw) as any;
       if (!parsed || typeof parsed !== "object") return null;
+      const producedFiles = Array.isArray(parsed.producedFiles) ? parsed.producedFiles : [];
+      const producedFilePaths = Array.isArray(parsed.producedFilePaths) ? parsed.producedFilePaths : [];
+      const persistenceWarnings = Array.isArray(parsed.persistenceWarnings) ? parsed.persistenceWarnings : [];
       // metadata.json 是子集，这里只取我们关心的字段；其余字段缺失不影响。
       return {
         id: subTaskId,
@@ -544,7 +553,12 @@ export class FileManager {
         completedAt: parsed.completedAt,
         parentId: parsed.parentId,
         depth: parsed.depth,
-        metadata: parsed.metadata,
+        metadata: {
+          ...(parsed.metadata ?? {}),
+          producedFiles,
+          producedFilePaths,
+          persistenceWarnings,
+        },
       } as SubTask;
     } catch {
       return null;
@@ -628,6 +642,17 @@ export class FileManager {
       source: "tracked" | "artifacts" | "output";
     }> = [];
     
+    // 先推断主要任务类型（用于后续策略判断）
+    const taskTypeCounts: Record<string, number> = {};
+    for (const sub of taskTree.subTasks) {
+      const tt = sub.taskType ?? "generic";
+      taskTypeCounts[tt] = (taskTypeCounts[tt] ?? 0) + 1;
+    }
+    const dominantType = Object.entries(taskTypeCounts)
+      .sort((a, b) => b[1] - a[1])[0]?.[0] ?? "generic";
+    const isWritingMerge = dominantType === "writing" ||
+      (taskTree.rootTask ?? "").match(/[写创作小说章节文章翻译]/);
+
     for (const subTask of taskTree.subTasks) {
       if (subTask.status !== "completed") continue;
 
@@ -757,7 +782,9 @@ export class FileManager {
       }
       
       // 策略 3：兜底读取 output.txt（LLM 回复文本）
-      if (!found) {
+      // ⚠️ 写作类任务：output.txt 被定义为回执/摘要，不允许参与“正文合并”
+      // 只能在非写作类任务中作为最终兜底。
+      if (!found && !isWritingMerge && subTask.taskType !== "writing") {
         try {
           const output = await this.readTaskOutput(subTask.id);
           if (output && output.trim().length > 50) { // 至少 50 字符才认为是有效内容
@@ -849,18 +876,7 @@ export class FileManager {
     const mergeFiles = filteredFiles.length > 0 ? filteredFiles : allFiles; // 如果全被过滤了，回退到原始列表
     
     // 🆕 P66: 任务类型感知合并格式
-    // 推断主要任务类型（从子任务的 taskType 或 rootTask 关键词推断）
-    const taskTypeCounts: Record<string, number> = {};
-    for (const sub of taskTree.subTasks) {
-      const tt = sub.taskType ?? "generic";
-      taskTypeCounts[tt] = (taskTypeCounts[tt] ?? 0) + 1;
-    }
-    const dominantType = Object.entries(taskTypeCounts)
-      .sort((a, b) => b[1] - a[1])[0]?.[0] ?? "generic";
-
-    // 根据任务类型选择合并策略
-    const isWritingMerge = dominantType === "writing" ||
-      (taskTree.rootTask ?? "").match(/[写创作小说章节文章翻译]/);
+    // dominantType/isWritingMerge 已在上方计算（避免重复扫描）
     const isCodingMerge = dominantType === "coding";
 
     let mergedContent = "";

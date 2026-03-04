@@ -8,6 +8,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import type { TaskTree, SubTask, Checkpoint, ValidationResult } from "./types.js";
+import { TaskEventLogger } from "./task-event-logger.js";
 
 /**
  * 任务树管理器
@@ -19,6 +20,15 @@ export class TaskTreeManager {
   private _pendingSave = new Map<string, ReturnType<typeof setTimeout>>();
   /** 🔧 P10 修复：写锁（Promise 链串行化，防止并发写入导致数据丢失） */
   private _writeLock = new Map<string, Promise<void>>();
+  private _eventLogger = new Map<string, TaskEventLogger>();
+
+  private getEventLogger(sessionId: string): TaskEventLogger {
+    const existing = this._eventLogger.get(sessionId);
+    if (existing) return existing;
+    const created = new TaskEventLogger(sessionId);
+    this._eventLogger.set(sessionId, created);
+    return created;
+  }
 
   /**
    * 获取任务树目录路径
@@ -429,6 +439,20 @@ export class TaskTreeManager {
     subTask.status = status;
     if (status === "completed") {
       subTask.completedAt = Date.now();
+    }
+
+    // 🆕 方案C C1：旁路事件流（append-only）
+    // 不阻塞主流程；用于回放/审计与故障排查。
+    try {
+      const logger = this.getEventLogger(taskTree.id);
+      await logger.append("subtask_status_changed", {
+        subTaskId,
+        status,
+        rootTaskId: subTask.rootTaskId ?? undefined,
+        roundId: subTask.roundId ?? undefined,
+      });
+    } catch {
+      // ignore
     }
 
     // 🆕 用 rootTaskId 作用域更新任务树状态（避免多轮累积导致误判）

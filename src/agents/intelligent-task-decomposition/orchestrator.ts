@@ -7,6 +7,7 @@
 import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import { TaskEventLogger } from "./task-event-logger.js";
 import type { TaskTree, SubTask, TaskTreeChange, QualityReviewResult, TaskBatch, BatchExecutionResult, BatchExecutionOptions, PostProcessResult, Round, RoundStatus, ExecutionContext, CreateDecision, StartDecision, FailureDecision, RoundCompletedResult, DrainScheduleResult } from "./types.js";
 import { TaskTreeManager } from "./task-tree-manager.js";
 import { RetryManager } from "./retry-manager.js";
@@ -89,6 +90,19 @@ export class Orchestrator {
     
     // 初始化批量执行组件
     this.taskGrouper = new TaskGrouper(groupingOptions);
+  }
+
+  private async _appendTaskEvent(
+    sessionId: string,
+    type: any,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      const logger = new TaskEventLogger(sessionId);
+      await logger.append(type, data);
+    } catch {
+      // ignore
+    }
   }
 
   /**
@@ -208,6 +222,57 @@ export class Orchestrator {
       console.log(`[Orchestrator] 📁 FileManager 延迟初始化: ${sessionId}`);
     }
     return this.fileManager;
+  }
+
+  private _pushPersistenceWarning(subTask: SubTask, warning: string): void {
+    if (!subTask.metadata) subTask.metadata = {};
+    if (!subTask.metadata.persistenceWarnings) subTask.metadata.persistenceWarnings = [];
+    subTask.metadata.persistenceWarnings.push(warning);
+  }
+
+  private async finalizeSubTaskPersistence(
+    taskTree: TaskTree,
+    subTask: SubTask,
+    options?: {
+      timelineType?: "task_completed" | "task_failed";
+      timelineDescription?: string;
+      logMessage?: string;
+    },
+  ): Promise<void> {
+    try {
+      const fm = await this.ensureFileManager(taskTree.id);
+      await fm.saveTaskOutput(subTask.id, subTask.output || "", "txt");
+      await fm.saveTaskMetadata(subTask);
+      if (options?.timelineType && options.timelineDescription) {
+        await fm.recordTimelineEvent(options.timelineType, subTask.id, options.timelineDescription);
+      }
+      if (options?.logMessage) {
+        await fm.logExecution(options.logMessage);
+      }
+
+      // 🆕 方案C C1：落盘成功事件（append-only）
+      await this._appendTaskEvent(taskTree.id, "persistence_finalized", {
+        subTaskId: subTask.id,
+        rootTaskId: subTask.rootTaskId ?? undefined,
+        roundId: subTask.roundId ?? undefined,
+        producedFilePathsCount: subTask.metadata?.producedFilePaths?.length ?? 0,
+        persistenceWarningsCount: subTask.metadata?.persistenceWarnings?.length ?? 0,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this._pushPersistenceWarning(subTask, `finalizeSubTaskPersistence 失败: ${msg}`);
+      console.warn(`[Orchestrator] ⚠️ finalizeSubTaskPersistence failed:`, err);
+
+      // 🆕 方案C C1：落盘失败事件（append-only）
+      await this._appendTaskEvent(taskTree.id, "persistence_failed", {
+        subTaskId: subTask.id,
+        rootTaskId: subTask.rootTaskId ?? undefined,
+        roundId: subTask.roundId ?? undefined,
+        error: msg,
+        producedFilePathsCount: subTask.metadata?.producedFilePaths?.length ?? 0,
+        persistenceWarningsCount: subTask.metadata?.persistenceWarnings?.length ?? 0,
+      });
+    }
   }
 
   /**
@@ -1110,26 +1175,11 @@ export class Orchestrator {
     }
 
     // ── 6. 保存任务输出到文件系统 ──
-    try {
-      const fm = await this.ensureFileManager(taskTree.id);
-      const outputPath = await fm.saveTaskOutput(
-        subTask.id,
-        subTask.output || "",
-        "txt",
-      );
-      await fm.saveTaskMetadata(subTask);
-      await fm.recordTimelineEvent(
-        "task_completed",
-        subTask.id,
-        `任务完成：${subTask.summary}`,
-      );
-      await fm.logExecution(
-        `Task ${subTask.id} completed: ${subTask.summary}`,
-      );
-      console.log(`[Orchestrator] 💾 Task output saved to: ${outputPath}`);
-    } catch (err) {
-      console.warn(`[Orchestrator] ⚠️ 保存任务输出到文件系统失败:`, err);
-    }
+    await this.finalizeSubTaskPersistence(taskTree, subTask, {
+      timelineType: "task_completed",
+      timelineDescription: `任务完成：${subTask.summary}`,
+      logMessage: `Task ${subTask.id} completed: ${subTask.summary}`,
+    });
 
     // ── 7. 保存任务树 ──
     await this.taskTreeManager.save(taskTree);
@@ -1301,7 +1351,6 @@ export class Orchestrator {
       // 更新输出和状态
       subTask.output = output;
       subTask.completedAt = Date.now();
-      await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "completed");
 
       // 🔧 收集文件追踪结果，写入 metadata.producedFiles
       const trackedFiles = collectTrackedFiles(subTask.id);
@@ -1317,6 +1366,8 @@ export class Orchestrator {
           trackedFiles.map(f => f.fileName).join(", ")
         );
       }
+
+      await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "completed");
 
       // 🔧 P0: 统一后处理（质量评估 + 文件验证 + 交付产物 + 持久化）
       const postResult = await this.postProcessSubTaskCompletion(taskTree, subTask);
@@ -2013,6 +2064,9 @@ export class Orchestrator {
       (t) => t.rootTaskId === rootTaskId && !t.metadata?.isSummaryTask,
     );
     const hasFailed = roundTasks.some((t) => t.status === "failed");
+    const completedCount = roundTasks.filter(t => t.status === "completed").length;
+    const failedCount = roundTasks.filter(t => t.status === "failed").length;
+    const skippedCount = roundTasks.filter(t => t.status === "skipped").length;
 
     // 🆕 V2: 同步更新 Round 对象状态
     const round = this.findRound(taskTree, rootTaskId);
@@ -2040,6 +2094,17 @@ export class Orchestrator {
       taskTree.status = hasFailed ? "failed" : "completed";
       console.log(`[Orchestrator] 🏁 Task tree marked as ${taskTree.status} (round: ${rootTaskId})`);
     }
+
+    // 🆕 方案C C1：轮次完成事件（append-only）
+    await this._appendTaskEvent(taskTree.id, "round_completed", {
+      rootTaskId,
+      roundStatus: hasFailed ? "failed" : "completed",
+      taskTreeStatus: taskTree.status,
+      totalTasks: roundTasks.length,
+      completed: completedCount,
+      failed: failedCount,
+      skipped: skippedCount,
+    });
 
     // 🆕 UTIL CP4: 回顾学习 — 统计轮次执行数据，评估 CP0 预判准确度，写入经验池
     try {
@@ -5598,13 +5663,11 @@ ${childOutputs.join("\n\n---\n\n")}
         if (taskTree.metadata) {
           taskTree.metadata.completedTasks = taskTree.subTasks.filter(t => t.status === "completed").length;
         }
-        try {
-          const fm = await this.ensureFileManager(taskTree.id);
-          await fm.saveTaskOutput(subTask.id, subTask.output || "", "txt");
-          await fm.saveTaskMetadata(subTask);
-        } catch {
-          // 保存失败不阻塞
-        }
+        await this.finalizeSubTaskPersistence(taskTree, subTask, {
+          timelineType: "task_completed",
+          timelineDescription: `任务完成（熔断跳过质检）：${subTask.summary}`,
+          logMessage: `Task ${subTask.id} completed (circuit breaker): ${subTask.summary}`,
+        });
         
         await this.taskTreeManager.save(taskTree);
         const result: PostProcessResult = {

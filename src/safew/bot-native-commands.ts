@@ -12,7 +12,12 @@ import {
 } from "../auto-reply/commands-registry.js";
 import { listSkillCommandsForAgents } from "../auto-reply/skill-commands.js";
 import type { CommandArgs } from "../auto-reply/commands-registry.js";
-import { resolveSafewCustomCommands } from "../config/safew-custom-commands.js";
+import {
+  SAFEW_COMMAND_NAME_PATTERN,
+  normalizeSafewCommandDescription,
+  normalizeSafewCommandName,
+  resolveSafewCustomCommands,
+} from "../config/safew-custom-commands.js";
 import { dispatchReplyWithBufferedBlockDispatcher } from "../auto-reply/reply/provider-dispatcher.js";
 import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
 import { danger, logVerbose } from "../globals.js";
@@ -41,6 +46,88 @@ import { firstDefined, isSenderAllowed, normalizeAllowFromWithStore } from "./bo
 import { readSafewAllowFromStore } from "./pairing-store.js";
 
 type SafewNativeCommandContext = Context & { match?: string };
+
+type SafewBotCommand = { command: string; description: string };
+
+const sanitizeSafewBotCommands = (commands: SafewBotCommand[]) => {
+  const MAX_COMMANDS = 50;
+  const MAX_DESC_LEN = 256;
+  const dropped: Array<{ command: string; reason: string }> = [];
+  const seen = new Set<string>();
+  const out: SafewBotCommand[] = [];
+
+  const normalizeDesc = (value: string): string => {
+    const raw = normalizeSafewCommandDescription(String(value ?? ""));
+    const cleaned = raw
+      .replace(/[\u0000-\u001F\u007F]+/g, " ")
+      .replace(/[\r\n]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!cleaned) return "";
+    return cleaned.length > MAX_DESC_LEN ? cleaned.slice(0, MAX_DESC_LEN) : cleaned;
+  };
+
+  for (const entry of commands) {
+    const name = normalizeSafewCommandName(String(entry?.command ?? ""));
+    if (!name) {
+      dropped.push({ command: String(entry?.command ?? ""), reason: "missing name" });
+      continue;
+    }
+    if (!SAFEW_COMMAND_NAME_PATTERN.test(name)) {
+      dropped.push({ command: name, reason: "invalid name" });
+      continue;
+    }
+    if (seen.has(name)) {
+      dropped.push({ command: name, reason: "duplicate" });
+      continue;
+    }
+    const description = normalizeDesc(String(entry?.description ?? ""));
+    if (!description) {
+      dropped.push({ command: name, reason: "missing description" });
+      continue;
+    }
+
+    seen.add(name);
+    out.push({ command: name, description });
+    if (out.length >= MAX_COMMANDS) {
+      dropped.push({ command: "...", reason: `limit reached (${MAX_COMMANDS})` });
+      break;
+    }
+  }
+
+  return { commands: out, dropped };
+};
+
+const ensureSafewCoreCommands = (commands: SafewBotCommand[]) => {
+  const out = [...commands];
+  const seen = new Set(out.map((c) => normalizeSafewCommandName(c.command)));
+  const ensure = (command: string, description: string) => {
+    if (seen.has(command)) return;
+    out.unshift({ command, description });
+    seen.add(command);
+  };
+
+  ensure("reset", "Reset the current session.");
+  ensure("new", "Start a new session.");
+  ensure("help", "Show available commands.");
+  return out;
+};
+
+const pickSafewMinimalCommands = (all: SafewBotCommand[]) => {
+  const wanted = new Set(["new", "reset", "help"]);
+  const picked = all.filter((c) => wanted.has(normalizeSafewCommandName(c.command)));
+  const seen = new Set(picked.map((c) => normalizeSafewCommandName(c.command)));
+  const ensure = (command: string, description: string) => {
+    if (seen.has(command)) return;
+    picked.push({ command, description });
+    seen.add(command);
+  };
+
+  ensure("new", "Start a new session.");
+  ensure("reset", "Reset the current session.");
+  ensure("help", "Show available commands.");
+  return picked;
+};
 
 type RegisterSafewNativeCommandsParams = {
   bot: Bot;
@@ -112,8 +199,29 @@ export const registerSafewNativeCommands = ({
   ];
 
   if (allCommands.length > 0) {
-    bot.api.setMyCommands(allCommands).catch((err) => {
-      runtime.error?.(danger(`safew setMyCommands failed: ${String(err)}`));
+    const requested = allCommands;
+    const sanitized = sanitizeSafewBotCommands(ensureSafewCoreCommands(requested));
+    const droppedPreview = sanitized.dropped
+      .slice(0, 5)
+      .map((d) => `${d.command}:${d.reason}`)
+      .join(", ");
+    logVerbose(
+      `safew setMyCommands: accountId=${accountId} requested=${requested.length} registered=${sanitized.commands.length} dropped=${sanitized.dropped.length}${droppedPreview ? ` (e.g. ${droppedPreview})` : ""}`,
+    );
+
+    bot.api.setMyCommands(sanitized.commands).catch(async (err) => {
+      logVerbose(`safew setMyCommands failed(will retry minimal): ${String(err)}`);
+
+      const minimalRaw = pickSafewMinimalCommands(requested);
+      const minimal = sanitizeSafewBotCommands(ensureSafewCoreCommands(minimalRaw));
+      logVerbose(
+        `safew setMyCommands retry(minimal): accountId=${accountId} registered=${minimal.commands.length}`,
+      );
+      try {
+        await bot.api.setMyCommands(minimal.commands);
+      } catch (err2) {
+        runtime.error?.(danger(`safew setMyCommands retry(minimal) failed: ${String(err2)}`));
+      }
     });
 
     if (typeof (bot as unknown as { command?: unknown }).command !== "function") {
