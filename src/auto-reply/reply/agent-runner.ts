@@ -41,6 +41,7 @@ import { getGlobalOrchestrator } from "../../agents/tools/enqueue-task-tool.js";
 import { createReplyToModeFilterForChannel, resolveReplyToMode } from "./reply-threading.js";
 import { persistSessionUsageUpdate } from "./session-usage.js";
 import { incrementCompactionCount } from "./session-updates.js";
+import { getActiveContext } from "../../agents/intelligent-task-decomposition/intent-complexity-analyzer.js";
 import type { TypingController } from "./typing.js";
 import { createTypingSignaler } from "./typing-mode.js";
 import { emitDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
@@ -189,6 +190,36 @@ export async function runReplyAgent(params: {
   if (shouldFollowup || resolvedQueue.mode === "steer") {
     // 🔧 不要自动加入用户消息！让 LLM 通过 enqueue_task 工具自己创建队列任务
     console.log(`[agent-runner] ⚠️ Skipping user message enqueue (LLM will create queue tasks via enqueue_task tool)`);
+
+    // 🧩 兜底：当 CP0 判断为复杂任务（suggest/force）时，避免把“入队”完全交给 LLM 自觉。
+    // 否则一旦模型本轮未调用 enqueue_task，就会出现“聊两句就结束/分解不足”。
+    try {
+      const sk = sessionKey?.trim();
+      const cp0 = sk ? getActiveContext(sk)?.intentAnalysis : undefined;
+      const shouldFallbackEnqueue =
+        Boolean(cp0 && cp0.strategy !== "direct") &&
+        (resolvedQueue.mode === "collect" ||
+          resolvedQueue.mode === "followup" ||
+          resolvedQueue.mode === "steer-backlog");
+      if (shouldFallbackEnqueue && queueKey) {
+        const didEnqueue = enqueueFollowupRun(
+          queueKey,
+          {
+            ...followupRun,
+            enqueuedAt: Date.now(),
+          },
+          resolvedQueue,
+          "message-id",
+        );
+        if (didEnqueue) {
+          console.log(
+            `[agent-runner] 🧩 Fallback enqueue enabled by CP0 (strategy=${cp0?.strategy ?? "unknown"})`,
+          );
+        }
+      }
+    } catch (err) {
+      console.warn(`[agent-runner] ⚠️ Fallback enqueue failed (non-blocking):`, err);
+    }
     
     if (activeSessionEntry && activeSessionStore && sessionKey) {
       const updatedAt = Date.now();

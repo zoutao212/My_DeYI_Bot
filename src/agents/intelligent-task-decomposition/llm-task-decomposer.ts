@@ -871,7 +871,7 @@ ${prompts.jsonOnlyReminder}`;
         provider: this.embeddedAgentRunConfig.provider ?? this.llmConfig.provider,
         model: this.embeddedAgentRunConfig.modelId ?? this.llmConfig.model,
         prompt,
-        promptProfile: "deyi_mini_decompose",
+        runMode: "decompose_agent",
         runId,
         timeoutMs: 120_000,
         toolAllowlist: ["submit_decomposition", "continue_generation"],

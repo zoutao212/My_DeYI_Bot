@@ -908,6 +908,7 @@ export function createFollowupRunner(params: {
               config: queued.run.config,
               // 🔧 子任务跳过 skills（省掉 skill 描述注入，减少 prompt 体积）
               skillsSnapshot: isSubTaskExec ? undefined : queued.run.skillsSnapshot,
+              runMode: "tool_exec_compact",
               toolAllowlist: subTaskToolAllowlist,
               // 🔧 子任务跳过 bootstrap 文件（AGENTS.md/SOUL.md），减少 prompt 体积
               skipBootstrapContext: isSubTaskExec,

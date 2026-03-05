@@ -18,6 +18,15 @@ export type ClientToolDefinition = {
   };
 };
 
+// 运行模式：用于把“用 full 还是用 mini/契约”从拍脑袋升级为可配置、可回放。
+// 目前仅作为元数据透传，不改变默认行为。
+export type EmbeddedRunMode =
+  | "tool_exec_full"
+  | "tool_exec_compact"
+  | "qc_agent"
+  | "decompose_agent"
+  | "delivery_agent";
+
 export type RunEmbeddedPiAgentParams = {
   sessionId: string;
   sessionKey?: string;
@@ -52,6 +61,8 @@ export type RunEmbeddedPiAgentParams = {
   prompt: string;
   images?: ImageContent[];
   promptProfile?: PromptProfile;
+  /** 运行模式（可回放）——用于上层决策矩阵，不影响当前执行逻辑。 */
+  runMode?: EmbeddedRunMode;
   /** Optional client-provided tools (OpenResponses hosted tools). */
   clientTools?: ClientToolDefinition[];
   /** Disable built-in tools for this run (LLM-only mode). */

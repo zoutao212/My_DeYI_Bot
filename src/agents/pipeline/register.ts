@@ -84,6 +84,22 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
         
         // 🔧 获取用户消息
         const userMessage = event.prompt || "";
+
+        const hasSystemPromptUpdateIntent =
+          /系统提示词|系统\s*prompt|底座|profile\.md|identity\.md|persona\.md|更新\s*(?:系统|底座|提示词|profile|identity|persona)|修改\s*(?:系统|底座|提示词|profile|identity|persona)/i.test(
+            userMessage,
+          );
+
+        const systemPromptUpdateHint = hasSystemPromptUpdateIntent
+          ? (
+              `\n\n[🧩 系统底座更新硬约束]\n` +
+              `- 你被要求“更新/优化系统提示词/底座认知”时，必须实际修改文件并落盘：\n` +
+              `  - ${String.raw`C:\Users\zouta\clawd\system\profile.md`}\n` +
+              `  - （可选）${String.raw`C:\Users\zouta\clawd\system\identity.md`}、${String.raw`C:\Users\zouta\clawd\system\config.json`}、${String.raw`C:\Users\zouta\clawd\system\prompts\*.md`}\n` +
+              `- 必须调用 write 或 edit 工具完成写入；只输出文本说明但不写文件 = 未完成。\n` +
+              `- 只优化“基础认知/行为契约”，不要堆叠文学性描写要求。`
+            )
+          : "";
         
         // 🔧 检测是否是原始用户消息在队列中
         const isOriginalUserMessageInQueue = userMessage.includes("[message_id:");
@@ -324,13 +340,13 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
 
           return {
             characterName: detectedCharacter,
-            prependContext: `\n\n🔵 [Pipeline Active] 动态管道已激活，角色：${detectedCharacter}${capabilityNote}\n`,
+            prependContext: `\n\n🔵 [Pipeline Active] 动态管道已激活，角色：${detectedCharacter}${capabilityNote}${systemPromptUpdateHint}\n`,
           };
         }
         
         log.info("🔵 [Pipeline] No character detected, using default system prompt");
         return {
-          prependContext: `\n\n🔵 [Pipeline Active] 动态管道已激活，使用默认系统提示词\n`,
+          prependContext: `\n\n🔵 [Pipeline Active] 动态管道已激活，使用默认系统提示词${systemPromptUpdateHint}\n`,
         };
       } catch (err) {
         log.error(`Pipeline hook failed: ${err}`);

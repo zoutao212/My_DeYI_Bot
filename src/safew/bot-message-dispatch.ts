@@ -8,6 +8,7 @@ import { logAckFailure, logTypingFailure } from "../channels/logging.js";
 import { createReplyPrefixContext } from "../channels/reply-prefix.js";
 import { danger, logVerbose } from "../globals.js";
 import { resolveMarkdownTableMode } from "../config/markdown-tables.js";
+import { onAgentEvent } from "../infra/agent-events.js";
 import { deliverReplies } from "./bot/delivery.js";
 import { resolveSafewDraftStreamingChunking } from "./draft-chunking.js";
 import { createSafewDraftStream } from "./draft-stream.js";
@@ -42,6 +43,31 @@ export const dispatchSafewMessage = async ({
     reactionApi,
     removeAckAfterReply,
   } = context;
+
+  const forwardedChatroomMessageIds = new Set<string>();
+  let forwardChain: Promise<void> = Promise.resolve();
+  let stopForwarding = false;
+  const expectedSessionKey = (ctxPayload as any)?.SessionKey ?? route.sessionKey;
+  const unsubscribeAgentEvents = onAgentEvent((evt) => {
+    if (stopForwarding) return;
+    if (!evt || evt.stream !== "assistant") return;
+    if (!evt.sessionKey || evt.sessionKey !== expectedSessionKey) return;
+    const data = evt.data || {};
+    const messageId = typeof data.messageId === "string" ? data.messageId : "";
+    const chatroomMessageText =
+      typeof data.chatroomMessageText === "string" ? data.chatroomMessageText : "";
+    if (!messageId || !chatroomMessageText) return;
+    if (forwardedChatroomMessageIds.has(messageId)) return;
+    forwardedChatroomMessageIds.add(messageId);
+
+    forwardChain = forwardChain
+      .then(async () => {
+        await bot.api.sendMessage(chatId, chatroomMessageText, {
+          ...(typeof resolvedThreadId === "number" ? { message_thread_id: resolvedThreadId } : {}),
+        });
+      })
+      .catch(() => {});
+  });
 
   const isPrivateChat = msg.chat.type === "private";
   const draftMaxChars = Math.min(textLimit, 4096);
@@ -145,64 +171,71 @@ export const dispatchSafewMessage = async ({
   });
   const chunkMode = resolveChunkMode(cfg, "safew", route.accountId);
 
-  const { queuedFinal } = await dispatchReplyWithBufferedBlockDispatcher({
-    ctx: ctxPayload,
-    cfg,
-    dispatcherOptions: {
-      responsePrefix: prefixContext.responsePrefix,
-      responsePrefixContextProvider: prefixContext.responsePrefixContextProvider,
-      deliver: async (payload, info) => {
-        if (info.kind === "final") {
-          await flushDraft();
-          draftStream?.stop();
-        }
-        await deliverReplies({
-          replies: [payload],
-          chatId: String(chatId),
-          token: opts.token,
-          runtime,
-          bot,
-          replyToMode,
-          textLimit,
-          messageThreadId: resolvedThreadId,
-          tableMode,
-          chunkMode,
-          onVoiceRecording: sendRecordVoice,
-          linkPreview: safewCfg.linkPreview,
-        });
-      },
-      onError: (err, info) => {
-        runtime.error?.(danger(`safew ${info.kind} reply failed: ${String(err)}`));
-      },
-      onReplyStart: async () => {
-        // We let the fallback timer handle continuous typing for Safew to ensure 
-        // task trees and complex operations are fully covered.
-        await sendTyping().catch((err) => {
-          logTypingFailure({
-            log: logVerbose,
-            channel: "safew",
-            target: String(chatId),
-            error: err,
-          });
-        });
-      },
-    },
-    replyOptions: {
-      skillFilter,
-      onPartialReply: draftStream ? (payload) => updateDraftFromPartial(payload.text) : undefined,
-      onReasoningStream: draftStream
-        ? (payload) => {
-            if (payload.text) draftStream.update(payload.text);
+  let queuedFinal;
+  try {
+    ({ queuedFinal } = await dispatchReplyWithBufferedBlockDispatcher({
+      ctx: ctxPayload,
+      cfg,
+      dispatcherOptions: {
+        responsePrefix: prefixContext.responsePrefix,
+        responsePrefixContextProvider: prefixContext.responsePrefixContextProvider,
+        deliver: async (payload, info) => {
+          if (info.kind === "final") {
+            await flushDraft();
+            draftStream?.stop();
           }
-        : undefined,
-      disableBlockStreaming,
-      onModelSelected: (ctx) => {
-        prefixContext.onModelSelected(ctx);
+          await deliverReplies({
+            replies: [payload],
+            chatId: String(chatId),
+            token: opts.token,
+            runtime,
+            bot,
+            replyToMode,
+            textLimit,
+            messageThreadId: resolvedThreadId,
+            tableMode,
+            chunkMode,
+            onVoiceRecording: sendRecordVoice,
+            linkPreview: safewCfg.linkPreview,
+          });
+        },
+        onError: (err, info) => {
+          runtime.error?.(danger(`safew ${info.kind} reply failed: ${String(err)}`));
+        },
+        onReplyStart: async () => {
+          await sendTyping().catch((err) => {
+            logTypingFailure({
+              log: logVerbose,
+              channel: "safew",
+              target: String(chatId),
+              error: err,
+            });
+          });
+        },
       },
-    },
-  }).finally(() => {
-    stopTypingFallback();
-  });
+      replyOptions: {
+        skillFilter,
+        onPartialReply: draftStream ? (payload) => updateDraftFromPartial(payload.text) : undefined,
+        onReasoningStream: draftStream
+          ? (payload) => {
+              if (payload.text) draftStream.update(payload.text);
+            }
+          : undefined,
+        disableBlockStreaming,
+        onModelSelected: (ctx) => {
+          prefixContext.onModelSelected(ctx);
+        },
+      },
+    }).finally(() => {
+      stopTypingFallback();
+    }));
+  } finally {
+    stopForwarding = true;
+    try {
+      unsubscribeAgentEvents?.();
+    } catch {
+    }
+  }
   draftStream?.stop();
   if (!queuedFinal) {
     if (isGroup && historyKey) {

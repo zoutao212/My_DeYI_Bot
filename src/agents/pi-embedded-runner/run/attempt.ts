@@ -532,8 +532,17 @@ export async function runEmbeddedAttempt(
       // - 其他角色 → minimal
       const SYSTEM_PERSONA_IDS = new Set(["lina", "demerzel", "dolores", "lisi"]);
       const _isSystemPersona = hookCharacterName ? SYSTEM_PERSONA_IDS.has(hookCharacterName) : false;
-      const promptMode = 
-        isSubagentSessionKey(params.sessionKey)
+      // 🧩 RunMode 驱动的系统底座强度：
+      // - qc/decompose/delivery: 必须 full（否则 minimal 可能跳过关键硬编码段落，导致标准漂移）
+      // - tool_exec_compact: 仍可 minimal（依赖 promptProfile 注入德姨 mini 底座）
+      // - 其他：延续原规则
+      const _runModeForcesFull =
+        params.runMode === "qc_agent" ||
+        params.runMode === "decompose_agent" ||
+        params.runMode === "delivery_agent";
+      const promptMode = _runModeForcesFull
+        ? "full"
+        : isSubagentSessionKey(params.sessionKey)
           ? "minimal"
           : _isSystemPersona
             ? "full"
@@ -1536,6 +1545,56 @@ export async function runEmbeddedAttempt(
             log.info(
               `[attempt] ✅ P118b 截断自动续传完成: ${_p118bAutoContCount} 轮`,
             );
+          }
+        }
+        // ═══════════════════════════════════════════════════════════════
+
+        // ═══════════════════════════════════════════════════════════════
+        // Step 5.8: No-op Guard（防“聊嗨就结束/不分解”安全网）
+        // 当任务被 CP0 判定为复杂（suggest/force），但本轮回复没有任何工具调用，
+        // 且输出内容疑似闲聊/承诺/计划（未执行关键动作），则自动再 prompt 1 次强约束引导。
+        // 设计目标：把“是否入队/是否行动”从 LLM 自觉，升级为系统的硬护栏。
+        // ═══════════════════════════════════════════════════════════════
+        if (!promptError && !aborted && !params.disableTools) {
+          try {
+            const { getActiveContext } = await import("../../intelligent-task-decomposition/intent-complexity-analyzer.js");
+            const sk = params.sessionKey?.trim();
+            const cp0 = sk ? getActiveContext(sk)?.intentAnalysis : undefined;
+            const shouldGuard = Boolean(cp0 && cp0.strategy !== "direct");
+            const hasAnyToolCalls = toolMetas.length > 0;
+            const lastText = assistantTexts.slice(-1).join("\n");
+            const looksLikeNoOp =
+              /(?:计划|打算|稍后|接下来|我会|我将|允许我|先为你|先给你|先展示|请允许|开始动手|现在就开始)/.test(
+                lastText,
+              ) &&
+              !/(?:已完成|已写入|已保存|已创建|已更新|已修改|已归档|已入队|enqueue_task|memory_write|write\b|edit\b)/.test(
+                lastText,
+              );
+
+            // 仅在“应分解/应执行”且“没工具调用且疑似空转”时触发
+            if (shouldGuard && !hasAnyToolCalls && looksLikeNoOp) {
+              log.warn(
+                `[attempt] ⚠️ No-op Guard triggered (cp0=${cp0?.strategy ?? "unknown"}): ` +
+                  `no tool calls + reply looks like planning/chat. Forcing a constrained reprompt.`,
+              );
+
+              const guardPrompt =
+                "[系统提示][No-op Guard] 你上一条回复没有执行任何实际操作。" +
+                "当前请求被系统判定为复杂任务，你必须立刻采取行动：\n" +
+                "- 若需要分解：请调用 enqueue_task 创建可执行的子任务（不要只写计划）。\n" +
+                "- 若不分解：请至少调用一个工具完成关键一步（read/memory_search/write 等）。\n" +
+                "- 禁止闲聊与承诺式描述；先行动，后用 1-2 句总结。";
+
+              try {
+                await abortable(activeSession.prompt(guardPrompt));
+                messagesSnapshot = activeSession.messages.slice();
+              } catch (err) {
+                promptError = err;
+              }
+            }
+          } catch (err) {
+            // 兜底：守卫异常不阻塞主流程
+            log.warn(`[attempt] No-op Guard failed (non-blocking): ${String(err)}`);
           }
         }
         // ═══════════════════════════════════════════════════════════════

@@ -10,7 +10,7 @@ import type { MessagingToolSend } from "../../pi-embedded-messaging.js";
 import type { BlockReplyChunking, ToolResultFormat } from "../../pi-embedded-subscribe.js";
 import type { SkillSnapshot } from "../../skills.js";
 import type { SessionSystemPromptReport } from "../../../config/sessions/types.js";
-import type { ClientToolDefinition } from "./params.js";
+import type { ClientToolDefinition, EmbeddedRunMode } from "./params.js";
 import type { PromptProfile } from "../prompt-profiles.js";
 
 type AuthStorage = ReturnType<typeof discoverAuthStorage>;
@@ -77,6 +77,8 @@ export type EmbeddedRunAttemptParams = {
   prompt: string;
   images?: ImageContent[];
   promptProfile?: PromptProfile;
+  /** 运行模式（可回放）——用于上层决策矩阵，不影响当前执行逻辑。 */
+  runMode?: EmbeddedRunMode;
   /** Optional client-provided tools (OpenResponses hosted tools). */
   clientTools?: ClientToolDefinition[];
   /** Disable built-in tools for this run (LLM-only mode). */

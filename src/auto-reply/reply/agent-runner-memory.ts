@@ -123,6 +123,7 @@ export async function runMemoryFlushIfNeeded(params: {
           extraSystemPrompt: flushSystemPrompt,
           ownerNumbers: params.followupRun.run.ownerNumbers,
           enforceFinalTag: resolveEnforceFinalTag(params.followupRun.run, provider),
+          runMode: "tool_exec_compact",
           provider,
           model,
           authProfileId,
