@@ -7,12 +7,14 @@ import type { AgentLayer } from "../multi-layer/layer-resolver.js";
 import type { EmbeddedSandboxInfo } from "./types.js";
 import type { ReasoningLevel, ThinkLevel } from "./utils.js";
 import { log } from "../pi-embedded-runner/logger.js";
+import { buildPromptProfileSystemPrompt, type PromptProfile } from "./prompt-profiles.js";
 
 export async function buildEmbeddedSystemPrompt(params: {
   workspaceDir: string;
   defaultThinkLevel?: ThinkLevel;
   reasoningLevel?: ReasoningLevel;
   extraSystemPrompt?: string;
+  promptProfile?: PromptProfile;
   ownerNumbers?: string[];
   reasoningTagHint: boolean;
   heartbeatPrompt?: string;
@@ -64,12 +66,17 @@ export async function buildEmbeddedSystemPrompt(params: {
   // 角色设定已统一由 persona-injector -> CharacterService 处理，
   // 通过 extraSystemPrompt 传入，此处不再重复加载。
   
+  const profilePrompt = await buildPromptProfileSystemPrompt(params.promptProfile);
+  const mergedExtraSystemPrompt = profilePrompt
+    ? (params.extraSystemPrompt ? `${profilePrompt}\n\n${params.extraSystemPrompt}` : profilePrompt)
+    : params.extraSystemPrompt;
+
   // 构建公共参数
   const commonParams = {
     workspaceDir: params.workspaceDir,
     defaultThinkLevel: params.defaultThinkLevel,
     reasoningLevel: params.reasoningLevel,
-    extraSystemPrompt: params.extraSystemPrompt,
+    extraSystemPrompt: mergedExtraSystemPrompt,
     ownerNumbers: params.ownerNumbers,
     reasoningTagHint: params.reasoningTagHint,
     heartbeatPrompt: params.heartbeatPrompt,

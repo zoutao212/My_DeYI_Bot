@@ -17,6 +17,7 @@ import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../defaults.js";
 import { FailoverError } from "../failover-error.js";
 import { runWithModelFallback } from "../model-fallback.js";
 import type { LLMCaller } from "./batch-executor.js";
+import { buildPromptProfileSystemPrompt } from "../pi-embedded-runner/prompt-profiles.js";
 
 /**
  * 系统 LLM 调用器配置
@@ -130,6 +131,8 @@ export function createSystemLLMCaller(params?: SystemLLMCallerConfig): LLMCaller
 
   return {
     async call(prompt: string): Promise<string> {
+      const base = await buildPromptProfileSystemPrompt("deyi_mini_base");
+      const effectivePrompt = base ? `${base}\n\n${prompt}` : prompt;
       const agentDir = resolveClawdbotAgentDir();
       const startedAt = Date.now();
 
@@ -160,7 +163,7 @@ export function createSystemLLMCaller(params?: SystemLLMCallerConfig): LLMCaller
           console.log(
             `[SystemLLMCaller] 调用 LLM: provider=${attemptProvider}, model=${attemptModelId}, ` +
               `api=${model.api}, reasoning=${(model as any).reasoning ?? false}, ` +
-              `prompt长度=${prompt.length}, maxTokens=${maxTokens}`,
+              `prompt长度=${effectivePrompt.length}, maxTokens=${maxTokens}`,
           );
 
           const controller = new AbortController();
@@ -180,7 +183,7 @@ export function createSystemLLMCaller(params?: SystemLLMCallerConfig): LLMCaller
                 messages: [
                   {
                     role: "user" as const,
-                    content: prompt,
+                    content: effectivePrompt,
                     timestamp: Date.now(),
                   },
                 ],
@@ -207,7 +210,7 @@ export function createSystemLLMCaller(params?: SystemLLMCallerConfig): LLMCaller
                   messages: [
                     {
                       role: "user" as const,
-                      content: prompt,
+                      content: effectivePrompt,
                       timestamp: Date.now(),
                     },
                   ],

@@ -69,6 +69,7 @@ function scrubAnthropicRefusalMagic(prompt: string): string {
 export async function runEmbeddedPiAgent(
   params: RunEmbeddedPiAgentParams,
 ): Promise<EmbeddedPiRunResult> {
+  const resolvedPromptProfile = params.promptProfile ?? "deyi_mini_base";
   const sessionLane = resolveSessionLane(params.sessionKey?.trim() || params.sessionId);
   const globalLane = resolveGlobalLane(params.lane);
   const enqueueGlobal =
@@ -336,6 +337,7 @@ export async function runEmbeddedPiAgent(
               skillsSnapshot: params.skillsSnapshot,
               prompt,
               images: params.images,
+              promptProfile: resolvedPromptProfile,
               disableTools: params.disableTools,
               toolAllowlist: params.toolAllowlist,
               skipBootstrapContext: params.skipBootstrapContext,
@@ -395,6 +397,7 @@ export async function runEmbeddedPiAgent(
                   messageChannel: params.messageChannel,
                   messageProvider: params.messageProvider,
                   agentAccountId: params.agentAccountId,
+                  promptProfile: resolvedPromptProfile,
                   authProfileId: lastProfileId,
                   sessionFile: params.sessionFile,
                   workspaceDir: params.workspaceDir,

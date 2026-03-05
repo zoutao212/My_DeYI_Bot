@@ -35,6 +35,12 @@ import { homedir } from "node:os";
 import { getPrompts } from "./prompts-loader.js";
 import { extractJsonFromResponse } from "./json-extractor.js";
 import type { LLMCaller } from "./batch-executor.js";
+import type { ClawdbotConfig } from "../../config/config.js";
+import crypto from "node:crypto";
+import nodeFs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { runEmbeddedPiAgent } from "../pi-embedded.js";
 
 /**
  * LLM 配置接口
@@ -59,6 +65,12 @@ class LLMDegradedError extends Error {
   }
 }
 
+type EmbeddedAgentRunConfig = {
+  config: ClawdbotConfig;
+  provider?: string;
+  modelId?: string;
+};
+
 /**
  * AI 自主质量评估器
  */
@@ -66,6 +78,7 @@ export class QualityReviewer {
   private llmConfig: LLMConfig;
   private reviewsDir: string;
   private externalLLMCaller: LLMCaller | null;
+  private embeddedAgentRunConfig: EmbeddedAgentRunConfig | null = null;
 
   constructor(llmConfig: LLMConfig, llmCaller?: LLMCaller) {
     this.llmConfig = llmConfig;
@@ -78,6 +91,10 @@ export class QualityReviewer {
    */
   setLLMCaller(caller: LLMCaller): void {
     this.externalLLMCaller = caller;
+  }
+
+  setEmbeddedAgentRunConfig(cfg: EmbeddedAgentRunConfig): void {
+    this.embeddedAgentRunConfig = cfg;
   }
 
   /**
@@ -1395,7 +1412,58 @@ ${prompts.jsonOnlyReminder}`;
    * 让调用方可以选择走规则驱动验证，而不是盲目通过。
    */
   private async callLLM(prompt: string): Promise<string> {
-    // 优先使用注入的系统 LLM 调用器（走 auth profiles + completeSimple）
+    if (this.embeddedAgentRunConfig?.config) {
+      const runId = crypto.randomUUID();
+      const sessionId = `qc-${runId}`;
+      const sessionFile = path.join(
+        os.homedir(),
+        ".clawdbot",
+        "tasks",
+        "_qc_sessions",
+        `${sessionId}.jsonl`,
+      );
+      await nodeFs.mkdir(path.dirname(sessionFile), { recursive: true });
+
+      const result = await runEmbeddedPiAgent({
+        sessionId,
+        sessionKey: `agent:qc:${runId}`,
+        sessionFile,
+        workspaceDir: process.cwd(),
+        config: this.embeddedAgentRunConfig.config,
+        provider: this.embeddedAgentRunConfig.provider ?? this.llmConfig.provider,
+        model: this.embeddedAgentRunConfig.modelId ?? this.llmConfig.model,
+        prompt,
+        promptProfile: "deyi_mini_qc",
+        runId,
+        timeoutMs: 120_000,
+        toolAllowlist: ["submit_quality_review", "continue_generation"],
+        skipBootstrapContext: true,
+        skillsSnapshot: undefined,
+      });
+
+      const toolMetas = result.toolMetas ?? [];
+      const submitMeta = toolMetas
+        .slice()
+        .reverse()
+        .find((m) => m?.toolName === "submit_quality_review" && typeof (m as any)?.meta === "string") as
+        | { toolName: string; meta?: string }
+        | undefined;
+
+      const metaText = submitMeta?.meta?.trim();
+      if (!metaText) {
+        throw new LLMDegradedError(
+          `质检未提交：未检测到 submit_quality_review 工具调用（toolMetas=${toolMetas.length}）`,
+        );
+      }
+
+      try {
+        const parsed = JSON.parse(metaText);
+        return JSON.stringify(parsed);
+      } catch (err) {
+        throw new LLMDegradedError(`质检提交解析失败：${String(err)} meta=${metaText}`);
+      }
+    }
+
     if (this.externalLLMCaller) {
       console.log(`[QualityReviewer] 使用系统 LLM 管线评估，提示词长度: ${prompt.length}`);
       try {
@@ -1406,7 +1474,6 @@ ${prompts.jsonOnlyReminder}`;
       }
     }
 
-    // 无 LLM 可用
     console.warn(`[QualityReviewer] ⚠️ P44: 无可用 LLM，抛出降级错误让调用方走规则检查`);
     throw new LLMDegradedError("无可用 LLM 管线");
   }

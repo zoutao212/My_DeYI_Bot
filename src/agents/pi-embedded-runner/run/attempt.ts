@@ -572,7 +572,7 @@ export async function runEmbeddedAttempt(
             userName: params.ownerNumbers?.[0],
           });
           enhancedExtraSystemPrompt = enhancedExtraSystemPrompt
-            ? `${personaPrompt}\n\n${enhancedExtraSystemPrompt}`
+            ? `${enhancedExtraSystemPrompt}\n\n${personaPrompt}`
             : personaPrompt;
           log.info(`[attempt] Persona injected: ${resolved.displayName} (source=${resolved.source})`);
 
@@ -654,6 +654,7 @@ export async function runEmbeddedAttempt(
         defaultThinkLevel: params.thinkLevel,
         reasoningLevel: params.reasoningLevel ?? "off",
         extraSystemPrompt: enhancedExtraSystemPrompt,
+        promptProfile: params.promptProfile,
         ownerNumbers: params.ownerNumbers,
         reasoningTagHint,
         heartbeatPrompt: isDefaultAgent

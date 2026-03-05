@@ -117,6 +117,17 @@ export class Orchestrator {
       this.llmDecomposer.setLLMCaller(caller);
       this.qualityReviewer.setLLMCaller(caller);
 
+      this.llmDecomposer.setEmbeddedAgentRunConfig({
+        config,
+        provider,
+        modelId,
+      });
+      this.qualityReviewer.setEmbeddedAgentRunConfig({
+        config,
+        provider,
+        modelId,
+      });
+
       // 🆕 P3: 同时初始化 BatchExecutor（消除 batchExecutor 始终为 null 的问题）
       if (!this.batchExecutor) {
         this.batchExecutor = new BatchExecutor(caller);

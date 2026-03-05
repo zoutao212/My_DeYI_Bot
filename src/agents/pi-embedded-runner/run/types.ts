@@ -11,6 +11,7 @@ import type { BlockReplyChunking, ToolResultFormat } from "../../pi-embedded-sub
 import type { SkillSnapshot } from "../../skills.js";
 import type { SessionSystemPromptReport } from "../../../config/sessions/types.js";
 import type { ClientToolDefinition } from "./params.js";
+import type { PromptProfile } from "../prompt-profiles.js";
 
 type AuthStorage = ReturnType<typeof discoverAuthStorage>;
 type ModelRegistry = ReturnType<typeof discoverModels>;
@@ -75,6 +76,7 @@ export type EmbeddedRunAttemptParams = {
   skillsSnapshot?: SkillSnapshot;
   prompt: string;
   images?: ImageContent[];
+  promptProfile?: PromptProfile;
   /** Optional client-provided tools (OpenResponses hosted tools). */
   clientTools?: ClientToolDefinition[];
   /** Disable built-in tools for this run (LLM-only mode). */

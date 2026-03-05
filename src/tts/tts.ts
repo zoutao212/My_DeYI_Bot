@@ -36,6 +36,7 @@ import {
   type ModelRef,
 } from "../agents/model-selection.js";
 import { resolveModel } from "../agents/pi-embedded-runner/model.js";
+import { buildPromptProfileSystemPrompt } from "../agents/pi-embedded-runner/prompt-profiles.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_TTS_MAX_LENGTH = 1500;
@@ -845,6 +846,9 @@ async function summarizeText(params: {
     ref.provider,
   );
 
+  const base = await buildPromptProfileSystemPrompt("deyi_mini_base");
+  const systemPrefix = base ? `${base}\n\n` : "";
+
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -857,6 +861,7 @@ async function summarizeText(params: {
             {
               role: "user",
               content:
+                systemPrefix +
                 `You are an assistant that summarizes texts concisely while keeping the most important information. ` +
                 `Summarize the text to approximately ${targetLength} characters. Maintain the original tone and style. ` +
                 `Reply only with the summary, without additional explanations.\n\n` +

@@ -23,6 +23,12 @@ import { getPrompts } from "./prompts-loader.js";
 import { extractJsonFromResponse } from "./json-extractor.js";
 import { classifyAndEnrich } from "./task-type-classifier.js";
 import type { LLMCaller } from "./batch-executor.js";
+import type { ClawdbotConfig } from "../../config/config.js";
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { runEmbeddedPiAgent } from "../pi-embedded.js";
 
 /**
  * LLM 配置接口
@@ -34,12 +40,19 @@ interface LLMConfig {
   endpoint?: string;
 }
 
+type EmbeddedAgentRunConfig = {
+  config: ClawdbotConfig;
+  provider?: string;
+  modelId?: string;
+};
+
 /**
  * LLM 任务分解器
  */
 export class LLMTaskDecomposer {
   private llmConfig: LLMConfig;
   private externalLLMCaller: LLMCaller | null;
+  private embeddedAgentRunConfig: EmbeddedAgentRunConfig | null = null;
 
   constructor(llmConfig: LLMConfig, llmCaller?: LLMCaller) {
     this.llmConfig = llmConfig;
@@ -51,6 +64,9 @@ export class LLMTaskDecomposer {
    */
   setLLMCaller(caller: LLMCaller): void {
     this.externalLLMCaller = caller;
+  }
+  setEmbeddedAgentRunConfig(cfg: EmbeddedAgentRunConfig): void {
+    this.embeddedAgentRunConfig = cfg;
   }
 
   /**
@@ -833,22 +849,69 @@ ${prompts.jsonOnlyReminder}`;
    * 调用 LLM
    */
   private async callLLM(prompt: string): Promise<string> {
-    // 优先使用注入的系统 LLM 调用器（走 auth profiles + completeSimple）
-    if (this.externalLLMCaller) {
-      console.log(`[LLMTaskDecomposer] 使用系统 LLM 管线分解，提示词长度: ${prompt.length}`);
+    if (this.embeddedAgentRunConfig?.config) {
+      const runId = crypto.randomUUID();
+      const sessionId = `decompose-${runId}`;
+      const sessionFile = path.join(
+        os.homedir(),
+        ".clawdbot",
+        "tasks",
+        "_decompose_sessions",
+        `${sessionId}.jsonl`,
+      );
+      await fs.mkdir(path.dirname(sessionFile), { recursive: true });
+
+      console.log(`[LLMTaskDecomposer] 🧠 使用 runEmbeddedPiAgent 分解（submit_decomposition），prompt长度: ${prompt.length}`);
+      const result = await runEmbeddedPiAgent({
+        sessionId,
+        sessionKey: `agent:decompose:${runId}`,
+        sessionFile,
+        workspaceDir: process.cwd(),
+        config: this.embeddedAgentRunConfig.config,
+        provider: this.embeddedAgentRunConfig.provider ?? this.llmConfig.provider,
+        model: this.embeddedAgentRunConfig.modelId ?? this.llmConfig.model,
+        prompt,
+        promptProfile: "deyi_mini_decompose",
+        runId,
+        timeoutMs: 120_000,
+        toolAllowlist: ["submit_decomposition", "continue_generation"],
+        skipBootstrapContext: true,
+        skillsSnapshot: undefined,
+      });
+
+      const toolMetas = result.toolMetas ?? [];
+      const submitMeta = toolMetas
+        .slice()
+        .reverse()
+        .find((m) => m?.toolName === "submit_decomposition" && typeof (m as any)?.meta === "string") as
+        | { toolName: string; meta?: string }
+        | undefined;
+
+      const metaText = submitMeta?.meta?.trim();
+      if (!metaText) {
+        throw new Error(
+          `分解未提交：未检测到 submit_decomposition 工具调用（toolMetas=${toolMetas.length}）`,
+        );
+      }
+
       try {
-        return await this.externalLLMCaller.call(prompt);
+        const parsed = JSON.parse(metaText) as { subTasks?: unknown };
+        if (!parsed || !Array.isArray((parsed as any).subTasks)) {
+          throw new Error("submit_decomposition 返回格式不正确：缺少 subTasks 数组");
+        }
+        return JSON.stringify({ subTasks: (parsed as any).subTasks });
       } catch (err) {
-        console.warn(`[LLMTaskDecomposer] ⚠️ 系统 LLM 调用失败，降级到规则驱动:`, err);
+        throw new Error(`分解提交解析失败：${String(err)} meta=${metaText}`);
       }
     }
 
-    // 🔧 V3 修复：不再返回无意义的占位符 JSON（"子任务 1 的详细描述"）
-    // 这种假数据会被 parseDecompositionResponse 当作有效分解结果，
-    // 创建出 prompt 为空壳的子任务，永远无法正确执行。
-    // 改为抛出错误，让调用方（decomposeRecursively）正确处理失败。
+    if (this.externalLLMCaller) {
+      console.log(`[LLMTaskDecomposer] 使用系统 LLM 管线分解（旧路径），提示词长度: ${prompt.length}`);
+      return await this.externalLLMCaller.call(prompt);
+    }
+
     console.error(`[LLMTaskDecomposer] ❌ LLM 不可用且无降级方案，提示词长度: ${prompt.length}`);
-    throw new Error("LLM 调用不可用：系统 LLM 调用器未初始化或调用失败，无法完成分解");
+    throw new Error("LLM 调用不可用：embeddedAgentRunConfig 未注入且系统 LLM 调用器未初始化，无法完成分解");
   }
 
   /**

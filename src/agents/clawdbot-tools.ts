@@ -22,6 +22,8 @@ import { createWebFetchTool, createWebSearchTool } from "./tools/web-tools.js";
 import { createTtsTool } from "./tools/tts-tool.js";
 import { createSendFileTool } from "./tools/send-file-tool.js";
 import { createContinueGenerationTool } from "./tools/continue-generation-tool.js";
+import { createSubmitDecompositionTool } from "./tools/submit-decomposition-tool.js";
+import { createSubmitQualityReviewTool } from "./tools/submit-quality-review-tool.js";
 
 export function createClawdbotTools(options?: {
   browserControlUrl?: string;
@@ -104,6 +106,8 @@ export function createClawdbotTools(options?: {
     }),
     createShowTaskBoardTool(),
     createContinueGenerationTool(),
+    createSubmitDecompositionTool(),
+    createSubmitQualityReviewTool(),
     createMessageTool({
       agentAccountId: options?.agentAccountId,
       agentSessionKey: options?.agentSessionKey,
