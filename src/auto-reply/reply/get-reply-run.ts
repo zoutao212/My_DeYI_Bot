@@ -245,6 +245,20 @@ export async function runPreparedReply(
   const isBareSessionReset =
     isNewSession &&
     ((baseBodyTrimmedRaw.length === 0 && rawBodyTrimmed.length > 0) || isBareNewOrReset);
+  if (isBareNewOrReset && isBareSessionReset) {
+    await typing.onReplyStart();
+    const modelLabel = `${provider}/${model}`;
+    const defaultLabel = `${defaultProvider}/${defaultModel}`;
+    const modelHint =
+      modelLabel === defaultLabel
+        ? `当前模型：${modelLabel}`
+        : `当前模型：${modelLabel}（默认：${defaultLabel}）`;
+    typing.cleanup();
+    return {
+      text: `✅ 已开启新会话\n${modelHint}\n\n接下来你想做什么？`,
+    };
+  }
+
   const baseBodyFinal = isBareSessionReset ? BARE_SESSION_RESET_PROMPT : baseBody;
   const baseBodyTrimmed = baseBodyFinal.trim();
   if (!baseBodyTrimmed) {

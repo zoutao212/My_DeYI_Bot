@@ -1,5 +1,6 @@
 export { extractQueueDirective } from "./queue/directive.js";
 export { clearSessionQueues } from "./queue/cleanup.js";
+export { clearSessionQueuesByPrefix } from "./queue/cleanup.js";
 export type { ClearSessionQueueResult } from "./queue/cleanup.js";
 export { scheduleFollowupDrain } from "./queue/drain.js";
 export { enqueueFollowupRun, getFollowupQueueDepth } from "./queue/enqueue.js";

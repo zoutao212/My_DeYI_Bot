@@ -7,44 +7,6 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-function buildDeyiMiniIdentity(): string {
-  return [
-    "[德姨·Mini 底座]",
-    "你是德默泽尔（德姨）的精炼底座版本。",
-    "你的职责是为系统内部的小型 LLM 请求提供稳定的价值观、边界与输出契约。",
-    "你不做长篇闲聊，不输出冗余解释，不编造事实。",
-  ].join("\n");
-}
-
-function buildBaseContract(): string {
-  return [
-    "[通用约束]",
-    "- 只做被请求的那一件事；不要扩展范围。",
-    "- 输出必须可被程序稳定解析（如要求结构化则必须结构化）。",
-    "- 遇到信息不足：给出最小可验证方案或明确缺失信息。",
-    "- 系统底座只维护基础认知/边界/输出契约；不要堆叠文学性描写要求或风格化表演。",
-    "- 若任务目标是更新系统底座提示词/规则文件：必须调用 write 或 edit 工具实际写入并落盘；只描述不写入=未完成。",
-  ].join("\n");
-}
-
-function buildDecomposeContract(): string {
-  return [
-    "[分解契约]",
-    "- 你现在只做任务分解，不执行任务。",
-    "- 必须覆盖总目标，子任务必须可执行、可验收。",
-    "- 最终必须调用 submit_decomposition 提交结构化结果。",
-  ].join("\n");
-}
-
-function buildQcContract(): string {
-  return [
-    "[质检契约]",
-    "- 你现在只做质量审查，不执行任务。",
-    "- 必须基于证据判断（任务描述/产出摘要/验证结果）。",
-    "- 最终必须调用 submit_quality_review 提交结构化结果。",
-  ].join("\n");
-}
-
 type SystemBaseConfig = {
   files?: {
     identity?: string;
@@ -129,10 +91,5 @@ export async function buildPromptProfileSystemPrompt(
     return fileBased;
   }
 
-  const parts: string[] = [buildDeyiMiniIdentity(), buildBaseContract()];
-  if (profile === "deyi_mini_decompose") parts.push(buildDecomposeContract());
-  if (profile === "deyi_mini_qc") parts.push(buildQcContract());
-  const builtIn = parts.join("\n\n");
-  cache.set(profile, builtIn);
-  return builtIn;
+  return undefined;
 }

@@ -16,7 +16,7 @@ import {
   stopSubagentsForRequester,
 } from "./abort.js";
 import type { CommandHandler } from "./commands-types.js";
-import { clearSessionQueues } from "./queue.js";
+import { clearSessionQueues, clearSessionQueuesByPrefix } from "./queue.js";
 
 function resolveSessionEntryForKey(
   store: Record<string, SessionEntry> | undefined,
@@ -278,9 +278,15 @@ export const handleStopCommand: CommandHandler = async (params, allowTextCommand
     abortEmbeddedPiRun(abortTarget.sessionId);
   }
   const cleared = clearSessionQueues([abortTarget.key, abortTarget.sessionId]);
+  const clearedByPrefix = clearSessionQueuesByPrefix([abortTarget.key]);
   if (cleared.followupCleared > 0 || cleared.laneCleared > 0) {
     logVerbose(
       `stop: cleared followups=${cleared.followupCleared} lane=${cleared.laneCleared} keys=${cleared.keys.join(",")}`,
+    );
+  }
+  if (clearedByPrefix.followupCleared > 0 || clearedByPrefix.laneCleared > 0) {
+    logVerbose(
+      `stop(prefix): cleared followups=${clearedByPrefix.followupCleared} lane=${clearedByPrefix.laneCleared} keys=${clearedByPrefix.keys.join(",")}`,
     );
   }
   if (abortTarget.entry && params.sessionStore && abortTarget.key) {

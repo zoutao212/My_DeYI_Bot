@@ -17,8 +17,8 @@ import path from "node:path";
 import type { ClawdbotConfig } from "../../config/config.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { runEmbeddedPiAgent } from "../pi-embedded.js";
+import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "../agent-scope.js";
 import { getCharacterService } from "../pipeline/characters/character-service.js";
-import { createSystemLLMCaller } from "../intelligent-task-decomposition/system-llm-caller.js";
 import type {
   ChatRoomMessage,
   CharacterResponse,
@@ -30,14 +30,49 @@ import { DEFAULT_CHATROOM_CONFIG, CHARACTER_ICONS } from "./types.js";
 import {
   fetchMemoryContext,
   formatMemoryContextForPrompt,
-  buildMemoryWriteGuide,
-  parseMemoryActions,
-  executeMemoryActions,
 } from "./memory-bridge.js";
 import { fillTemplate } from "./character-agent.l10n.types.js";
 import { getCharacterAgentL10n } from "./detector-l10n-loader.js";
 
 const log = createSubsystemLogger("chatroom:agent");
+
+const CHATROOM_TOOL_ALLOWLIST: string[] = [
+  "read",
+  "write",
+  "edit",
+  "apply_patch",
+  "memory_write",
+  "memory_update",
+  "memory_patch",
+  "memory_delete",
+  "memory_list",
+  "memory_deep_search",
+];
+
+function resolveProviderModel(config?: ClawdbotConfig): { provider?: string; model?: string } {
+  const agentDefaults = (config as Record<string, any> | undefined)?.agents?.defaults;
+  const modelCfg = agentDefaults?.model;
+  const provider = modelCfg?.primaryProviderId ?? agentDefaults?.provider;
+  const model = modelCfg?.primaryModelId ?? modelCfg?.id;
+  return {
+    provider: typeof provider === "string" ? provider : undefined,
+    model: typeof model === "string" ? model : undefined,
+  };
+}
+
+function resolveChatroomWorkspaceDir(params: {
+  config?: ClawdbotConfig;
+  agentSessionKey?: string;
+}): string {
+  const { config, agentSessionKey } = params;
+  if (!config) return process.cwd();
+  try {
+    const agentId = resolveSessionAgentId({ sessionKey: agentSessionKey, config });
+    return resolveAgentWorkspaceDir(config, agentId);
+  } catch {
+    return process.cwd();
+  }
+}
 
 // ============================================================================
 // 角色缓存（prompt + displayName 一体化，避免缓存命中时仍调 loadCharacter）
@@ -288,10 +323,6 @@ export async function generateCharacterResponse(params: {
     if (memoryContextText) {
       promptParts.push(`\n\n${memoryContextText}`);
     }
-    // 注入记忆写入指引
-    if (enableMemory && config) {
-      promptParts.push(`\n\n${buildMemoryWriteGuide(characterId)}`);
-    }
     promptParts.push(`\n\n${chatRoomContext}`);
     // 注入复杂度感知提示（如有）
     if (complexityHint) {
@@ -302,23 +333,56 @@ export async function generateCharacterResponse(params: {
     promptParts.push(`\n\n${fillTemplate(t.replyInstruction, { displayName: loaded.displayName })}`);
     const fullPrompt = promptParts.join("");
 
-    // 5. 调用 LLM（复用缓存的 caller 实例）
-    log.info(`[CharacterAgent] 调用 LLM: ${characterId} (${loaded.displayName}), prompt 长度=${fullPrompt.length}`);
+    // 5. 调用 LLM（工具模式：runEmbeddedPiAgent + toolAllowlist）
+    // chatroom 中要求：允许有限工具（文件读写/编辑/补丁 + memory CRUD），屏蔽网络/exec 等。
+    log.info(
+      `[CharacterAgent] 调用 LLM(tool-runner): ${characterId} (${loaded.displayName}), ` +
+        `prompt长度=${fullPrompt.length}, allowlist=${CHATROOM_TOOL_ALLOWLIST.join(",")}`,
+    );
 
-    const llmCaller = getCachedLLMCaller(config, cfg);
+    // 为每次角色调用创建隔离 session 文件，避免污染主 session
+    const taskId = crypto.randomUUID().slice(0, 8);
+    const sessionDir = path.join(os.homedir(), ".clawdbot", "chatroom-runs");
+    await fs.mkdir(sessionDir, { recursive: true });
+    const sessionFile = path.join(sessionDir, `chat_${characterId}_${taskId}.jsonl`);
+    const sessionId = `chatroom-${characterId}-${taskId}`;
 
-    const rawResponseText = await llmCaller.call(fullPrompt);
+    const { provider, model } = resolveProviderModel(config);
+    const workspaceDir = resolveChatroomWorkspaceDir({ config, agentSessionKey });
+
+    const runResult = await runEmbeddedPiAgent({
+      sessionId,
+      sessionKey: agentSessionKey,
+      messageProvider: "chatroom",
+      sessionFile,
+      workspaceDir,
+      config,
+      prompt: fullPrompt,
+      provider,
+      model,
+      timeoutMs: cfg.llmTimeoutMs,
+      runId: crypto.randomUUID(),
+      toolAllowlist: CHATROOM_TOOL_ALLOWLIST,
+      skipBootstrapContext: true,
+      enqueue: (task) => task(),
+    });
+
+    const contentParts: string[] = [];
+    if (runResult.payloads) {
+      for (const p of runResult.payloads) {
+        if (p.text && !p.isError) contentParts.push(p.text);
+      }
+    }
+    const rawResponseText = contentParts.join("\n\n");
     const durationMs = Date.now() - started;
 
-    log.info(`[CharacterAgent] ${characterId} 响应完成: ${rawResponseText.length}字, ${durationMs}ms`);
+    log.info(
+      `[CharacterAgent] ${characterId} 响应完成(tool-runner): ${rawResponseText.length}字, ` +
+        `${durationMs}ms, tools=${runResult.toolMetas?.length ?? 0}`,
+    );
 
-    // 6. 解析并执行记忆动作（Phase B）
-    const { actions, cleanedText } = parseMemoryActions(rawResponseText);
-    let memoryActionResults: import("./types.js").MemoryActionResult[] | undefined;
-    if (actions.length > 0 && enableMemory && config) {
-      const results = await executeMemoryActions(actions, config, agentSessionKey);
-      if (results.length > 0) memoryActionResults = results;
-    }
+    const cleanedText = rawResponseText.trim();
+    const memoryActionResults = undefined;
 
     return {
       characterId,
@@ -352,44 +416,11 @@ export async function generateCharacterResponse(params: {
   }
 }
 
-// ============================================================================
-// LLM Caller 单例缓存（避免每次调用都重建）
-// ============================================================================
-
-let cachedLLMCaller: { caller: ReturnType<typeof createSystemLLMCaller>; key: string } | null = null;
-
-/**
- * 获取缓存的 LLM caller 实例
- *
- * 当 config/chatroom 参数不变时复用同一实例，
- * 参数变化时自动重建。
- */
-function getCachedLLMCaller(
-  config: ClawdbotConfig | undefined,
-  chatroomCfg: ChatRoomConfig,
-): ReturnType<typeof createSystemLLMCaller> {
-  // key 含 LLM 参数 + config 指纹（provider 变化时重建 caller）
-  const cfgFingerprint = config ? JSON.stringify(config.models?.providers ?? {}).slice(0, 80) : "nocfg";
-  const key = `${chatroomCfg.maxOutputTokens}:${chatroomCfg.temperature}:${chatroomCfg.llmTimeoutMs}:${cfgFingerprint}`;
-  if (cachedLLMCaller && cachedLLMCaller.key === key) {
-    return cachedLLMCaller.caller;
-  }
-  const caller = createSystemLLMCaller({
-    config,
-    maxTokens: chatroomCfg.maxOutputTokens,
-    temperature: chatroomCfg.temperature,
-    timeoutMs: chatroomCfg.llmTimeoutMs,
-  });
-  cachedLLMCaller = { caller, key };
-  return caller;
-}
-
 /**
  * 清除所有缓存（角色 persona + LLM caller）
  */
 export function clearPersonaCache(): void {
   personaCache.clear();
-  cachedLLMCaller = null;
   log.debug("[CharacterAgent] Persona + LLM caller cache cleared");
 }
 

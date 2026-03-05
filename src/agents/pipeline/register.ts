@@ -130,11 +130,16 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
           return undefined;
         }
 
-        // ── 聊天室检测（优先级最高，在单角色检测之前） ──
+        // ── 聊天室检测（默认优先级最高） ──
+        // 但“系统底座更新”属于强工具链路（必须 write/edit 落盘），
+        // chatroom 是轻量模式（SystemLLMCaller + MemoryBridge），无法可靠执行 write/edit，
+        // 因此此类意图强制跳过聊天室模式，走单 agent 工具流程。
         const characterConfigs = getBuiltinCharacterConfigs();
         const stateKey = ctx.sessionKey ?? ctx.agentId ?? "default";
         const sessionActive = hasActiveSession(stateKey);
-        const chatRoomResult = detectChatRoomIntent(userMessage, characterConfigs, sessionActive);
+        const chatRoomResult = hasSystemPromptUpdateIntent
+          ? { isChatRoomMode: false, participants: [], triggerType: "single" as const }
+          : detectChatRoomIntent(userMessage, characterConfigs, sessionActive);
 
         // 退出聊天室
         if (chatRoomResult.triggerType === "exit" && sessionActive) {

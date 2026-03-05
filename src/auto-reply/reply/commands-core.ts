@@ -3,6 +3,7 @@ import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { shouldHandleTextCommands } from "../commands-registry.js";
 import { createInternalHookEvent, triggerInternalHook } from "../../hooks/internal-hooks.js";
 import { routeReply } from "./route-reply.js";
+import { abortEmbeddedPiRun } from "../../agents/pi-embedded.js";
 import { handleBashCommand } from "./commands-bash.js";
 import { handleCompactCommand } from "./commands-compact.js";
 import { handleConfigCommand, handleDebugCommand } from "./commands-config.js";
@@ -32,6 +33,7 @@ import type {
   CommandHandlerResult,
   HandleCommandsParams,
 } from "./commands-types.js";
+import { clearSessionQueues, clearSessionQueuesByPrefix } from "./queue.js";
 
 const HANDLERS: CommandHandler[] = [
   // Plugin commands are processed first, before built-in commands
@@ -79,6 +81,13 @@ export async function handleCommands(params: HandleCommandsParams): Promise<Comm
       cfg: params.cfg, // Pass config for LLM slug generation
     });
     await triggerInternalHook(hookEvent);
+
+    const sessionId = params.sessionEntry?.sessionId;
+    if (sessionId) {
+      abortEmbeddedPiRun(sessionId);
+    }
+    clearSessionQueues([params.sessionKey, sessionId]);
+    clearSessionQueuesByPrefix([params.sessionKey]);
 
     // Send hook messages immediately if present
     if (hookEvent.messages.length > 0) {

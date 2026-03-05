@@ -107,6 +107,7 @@ const ensureSafewCoreCommands = (commands: SafewBotCommand[]) => {
     seen.add(command);
   };
 
+  ensure("stop", "Abort the current run and clear queued tasks.");
   ensure("reset", "Reset the current session.");
   ensure("new", "Start a new session.");
   ensure("help", "Show available commands.");
@@ -114,7 +115,7 @@ const ensureSafewCoreCommands = (commands: SafewBotCommand[]) => {
 };
 
 const pickSafewMinimalCommands = (all: SafewBotCommand[]) => {
-  const wanted = new Set(["new", "reset", "help"]);
+  const wanted = new Set(["new", "reset", "stop", "help"]);
   const picked = all.filter((c) => wanted.has(normalizeSafewCommandName(c.command)));
   const seen = new Set(picked.map((c) => normalizeSafewCommandName(c.command)));
   const ensure = (command: string, description: string) => {
@@ -125,6 +126,7 @@ const pickSafewMinimalCommands = (all: SafewBotCommand[]) => {
 
   ensure("new", "Start a new session.");
   ensure("reset", "Reset the current session.");
+  ensure("stop", "Abort the current run and clear queued tasks.");
   ensure("help", "Show available commands.");
   return picked;
 };

@@ -46,6 +46,9 @@ import { estimateTokens, allocateBudget, truncateToTokenBudget, type BudgetReque
 import { localGrepSearch, getDefaultMemoryDirs } from "../../memory/local-search.js";
 import { searchNovelAssets, hasNovelAssets, formatNovelSnippetsForPrompt } from "../../memory/novel-assets-searcher.js";
 
+const TOOL_PROGRESS_MIN_GAP_MS = 1200;
+const TOOL_PROGRESS_ENABLED = process.env.CLAWDBOT_TASK_PROGRESS_TOOL_VERBOSE !== "0";
+
 function _sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 }
@@ -893,6 +896,31 @@ export function createFollowupRunner(params: {
                 }
               }
             }
+
+            let lastToolProgressSentAt = 0;
+            let lastToolProgressText = "";
+            const shouldEmitToolProgress = () =>
+              Boolean(TOOL_PROGRESS_ENABLED && queued.isQueueTask && queued.subTaskId);
+            const maybeSendToolProgress = async (text?: string) => {
+              const msg = (text ?? "").trim();
+              if (!msg) return;
+              if (!shouldEmitToolProgress()) return;
+
+              const now = Date.now();
+              if (now - lastToolProgressSentAt < TOOL_PROGRESS_MIN_GAP_MS) return;
+              if (msg === lastToolProgressText) return;
+
+              const MAX_CHARS = 600;
+              const clipped = msg.length > MAX_CHARS ? msg.slice(0, MAX_CHARS) + "…" : msg;
+
+              lastToolProgressSentAt = now;
+              lastToolProgressText = msg;
+              try {
+                await sendFollowupPayloads([{ text: `\n[🛠️ 工具进展]\n${clipped}` }], queued);
+              } catch {
+              }
+            };
+
             return runEmbeddedPiAgent({
               sessionId: queued.run.sessionId,
               sessionKey: effectiveSessionKey,
@@ -912,6 +940,11 @@ export function createFollowupRunner(params: {
               toolAllowlist: subTaskToolAllowlist,
               // 🔧 子任务跳过 bootstrap 文件（AGENTS.md/SOUL.md），减少 prompt 体积
               skipBootstrapContext: isSubTaskExec,
+              shouldEmitToolResult: shouldEmitToolProgress,
+              shouldEmitToolOutput: () => false,
+              onToolResult: async (payload) => {
+                await maybeSendToolProgress(payload?.text);
+              },
               prompt: (() => {
                 // 🔧 子任务强制落盘：在 prompt 本体注入指令（用户消息级，LLM 遵从度最高）
                 const isSubTask = Boolean(queued.subTaskId);
