@@ -685,8 +685,7 @@ export function createFollowupRunner(params: {
         }
       }
       
-      // 🔧 Executor 抽离：session 隔离 + toolAllowlist + fallback 调用 + payload 清洗
-      // followup-runner 仅保留编排
+      // 执行元信息容器（编排器只负责传递）
       const execMeta: {
         llmSessionFile?: string;
         fallbackProvider: string;
@@ -701,7 +700,7 @@ export function createFollowupRunner(params: {
 
       let autoCompactionCompleted = false;
       try {
-        // 🆕 V2 Phase 4: ExecutionContext 由 onTaskStarting 钩子构建，回退到旧推导
+        // 构建执行上下文（优先使用钩子结果，回退到推导）
         const isNewRoot = queued.isNewRootTask ?? false;
         const effectiveIsQueueTask = isNewRoot ? false : (queued.isQueueTask ?? true);
         const effectiveDepth = queued.taskDepth ?? 0;
@@ -714,7 +713,6 @@ export function createFollowupRunner(params: {
               depth: effectiveDepth,
             });
 
-        // 🔧 P12 修复：传入 runId 作为 contextId，防止并行 runner 的 finally 块互相清空上下文
         setCurrentFollowupRunContext({ 
           ...queued, 
           isQueueTask: effectiveIsQueueTask,
@@ -725,7 +723,6 @@ export function createFollowupRunner(params: {
           executionContext: execCtx,
         }, runId);
         
-        // 🆕 进度报告：开始等待 LLM 回复
         progressReporter?.onLLMStart();
 
         const contextShrinkLevel = subTask?.metadata?.contextShrinkLevel ?? 0;
@@ -734,7 +731,7 @@ export function createFollowupRunner(params: {
           ? await loadRecentPhaseContext({ sessionId, maxFiles: 2, maxChars: 3500 })
           : "";
 
-        // 🆕 Gap2: 经验池注入执行 prompt — 让 LLM 在执行时避免已知错误模式
+        // 经验池注入执行 prompt（避免已知错误模式）
         let experienceHint = "";
         if (shouldInjectHeavyContext && subTask?.taskType) {
           try {
@@ -750,7 +747,7 @@ export function createFollowupRunner(params: {
           }
         }
 
-        // 🆕 M10: 子任务记忆注入 — 用轻量本地搜索为子任务注入相关记忆
+        // 子任务记忆注入（轻量本地搜索）
         // 仅对 writing/research/analysis/design 类型启用，零远程 API 调用
         let subTaskMemoryCtx = "";
         const isSubTaskForMemory = Boolean(queued.subTaskId) && !queued.isRootTask && !queued.isNewRootTask;
@@ -787,7 +784,7 @@ export function createFollowupRunner(params: {
           }
         }
 
-        // 🆕 NovelsAssets: 写作/角色扮演子任务自动注入小说素材参考片段
+        // 小说素材注入（写作/角色扮演子任务）
         // 从 NovelsAssets/ 目录检索与当前任务相关的原文片段（风格参考、情节参考）
         // 仅对 writing/design 类型子任务启用，零远程 API 调用
         let novelReferenceCtx = "";
@@ -823,25 +820,22 @@ export function createFollowupRunner(params: {
         }
 
         const execPrompt = (() => {
-                // 🔧 子任务强制落盘：在 prompt 本体注入指令（用户消息级，LLM 遵从度最高）
+                // 子任务强制落盘（在 prompt 本体注入指令）
                 const isSubTask = Boolean(queued.subTaskId);
                 if (isSubTask) {
-                  // 🔧 写入目录：workspace/{rootTaskId}/，避免污染工作目录根
                   const taskOutputDir = queued.rootTaskId
                     ? `workspace/${queued.rootTaskId}`
                     : "workspace";
                   
-                  // 🆕 a4: 阶段归档上下文（轻量）
                   const phaseHint = phaseContext
                     ? `\n\n[🧾 最近阶段归档]\n以下是系统自动记录的最近阶段检查点摘要（用于长程连续与断点续跑）。请以它为准继续推进，不要重复已完成的工作：\n${phaseContext}`
                     : "";
 
-                  // 🆕 A1: 迭代优化 — 如果有上次输出和失败原因，注入到 prompt
+                  // 迭代优化（上次输出和失败原因注入）
                   let iterationHint = "";
                   if (subTask?.metadata?.previousOutput || subTask?.metadata?.lastFailureFindings) {
                     const parts: string[] = ["\n\n[⚠️ 迭代优化指令] 这是重试执行。请基于上次的结果进行改进，不要从零开始。"];
                     if (subTask.metadata.lastFailureFindings && subTask.metadata.lastFailureFindings.length > 0) {
-                      // 🔧 P108: 防御性类型检查 — lastFailureFindings 可能是字符串（LLM 质检返回不一致）
                       const findings = Array.isArray(subTask.metadata.lastFailureFindings)
                         ? subTask.metadata.lastFailureFindings
                         : [String(subTask.metadata.lastFailureFindings)];
@@ -849,8 +843,6 @@ export function createFollowupRunner(params: {
                       parts.push("请针对以上问题重点改进。");
                     }
                     if (subTask.metadata.previousOutput) {
-                      // 🔧 P47: 根据任务类型动态调整 previousOutput 截断长度
-                      // 刻板问题：固定 1500 字截断不区分任务类型——
                       // 写作类需要更多上下文保持风格/情节连贯，编码类 1000 字就够定位问题
                       const prevOutputTaskType = subTask.taskType ?? "generic";
                       let prevMaxLen = 1500; // 基线
@@ -859,7 +851,6 @@ export function createFollowupRunner(params: {
                       } else if (prevOutputTaskType === "coding" || prevOutputTaskType === "data") {
                         prevMaxLen = 1000; // 编码/数据类：关键错误信息通常在开头
                       }
-                      // 🔧 P60: 智能截断 — 按内容结构找最近的完整边界，避免断在句子/函数中间
                       let prevSnippet: string;
                       if (subTask.metadata.previousOutput.length <= prevMaxLen) {
                         prevSnippet = subTask.metadata.previousOutput;
@@ -867,16 +858,13 @@ export function createFollowupRunner(params: {
                         const raw = subTask.metadata.previousOutput.substring(0, prevMaxLen);
                         let cutIdx = prevMaxLen;
                         if (prevOutputTaskType === "writing") {
-                          // 写作类：找最后一个段落边界或句号
                           const paraIdx = raw.lastIndexOf("\n\n");
                           const sentIdx = Math.max(raw.lastIndexOf("。"), raw.lastIndexOf("！"), raw.lastIndexOf("？"), raw.lastIndexOf(".")); 
                           cutIdx = paraIdx > prevMaxLen * 0.6 ? paraIdx : (sentIdx > prevMaxLen * 0.6 ? sentIdx + 1 : prevMaxLen);
                         } else if (prevOutputTaskType === "coding") {
-                          // 编码类：找最后一个完整行
                           const lineIdx = raw.lastIndexOf("\n");
                           cutIdx = lineIdx > prevMaxLen * 0.5 ? lineIdx : prevMaxLen;
                         } else {
-                          // 其他：找最后一个句子边界
                           const sentIdx = Math.max(raw.lastIndexOf("。"), raw.lastIndexOf("。"), raw.lastIndexOf("\n"), raw.lastIndexOf(". "));
                           cutIdx = sentIdx > prevMaxLen * 0.6 ? sentIdx + 1 : prevMaxLen;
                         }
@@ -1830,9 +1818,8 @@ export function createFollowupRunner(params: {
         const message = err instanceof Error ? err.message : String(err);
         defaultRuntime.error?.(`Followup agent failed before reply: ${message}`);
         
-        // 🆕 V2 Phase 4: 委托 onTaskFailed 钩子集中处理重试/级联/停止
+        // 委托 onTaskFailed 钩子集中处理重试/级联/停止
         if (taskTree && subTask) {
-          // 🔧 竞态保护：错误路径也需要重新加载最新的任务树
           const freshTreeOnErr = await orchestrator.loadTaskTree(sessionId);
           if (freshTreeOnErr && queued.subTaskId) {
             const freshSubTaskOnErr = freshTreeOnErr.subTasks.find(t => t.id === queued.subTaskId);

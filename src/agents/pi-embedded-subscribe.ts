@@ -69,6 +69,11 @@ export function subscribeEmbeddedPiSession(params: SubscribeEmbeddedPiSessionPar
       lastToolName: null,
       consecutiveFailures: 0,
     },
+    streamThrottler: {
+      lastEmitTime: 0,
+      lastEmitTextLength: 0,
+      pendingEmitTimeout: undefined,
+    },
   };
 
   const assistantTexts = state.assistantTexts;

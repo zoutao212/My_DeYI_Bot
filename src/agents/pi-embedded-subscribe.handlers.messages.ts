@@ -114,28 +114,85 @@ export function handleMessageUpdate(
     if (cleanedText.startsWith(previousCleanedText)) {
       const deltaText = cleanedText.slice(previousCleanedText.length);
       ctx.state.lastStreamedAssistant = next;
-      emitAgentEvent({
-        runId: ctx.params.runId,
-        stream: "assistant",
-        data: {
-          text: cleanedText,
-          delta: deltaText,
-          mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
-        },
-      });
-      void ctx.params.onAgentEvent?.({
-        stream: "assistant",
-        data: {
-          text: cleanedText,
-          delta: deltaText,
-          mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
-        },
-      });
-      if (ctx.params.onPartialReply && ctx.state.shouldEmitPartialReplies) {
-        void ctx.params.onPartialReply({
-          text: cleanedText,
-          mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
+
+      // 节流检查：减少事件发射频率
+      const now = Date.now();
+      const textLength = cleanedText.length;
+      const { lastEmitTime, lastEmitTextLength, pendingEmitTimeout } = ctx.state.streamThrottler;
+      
+      // 节流条件：100ms 时间间隔 OR 50 字符增量
+      const timeSinceLastEmit = now - lastEmitTime;
+      const textIncrease = textLength - lastEmitTextLength;
+      const shouldEmit = timeSinceLastEmit >= 100 || textIncrease >= 50;
+      
+      if (shouldEmit) {
+        // 清除之前的延迟发射（如果有）
+        if (pendingEmitTimeout) {
+          clearTimeout(pendingEmitTimeout);
+          ctx.state.streamThrottler.pendingEmitTimeout = undefined;
+        }
+        
+        // 立即发射事件
+        ctx.state.streamThrottler.lastEmitTime = now;
+        ctx.state.streamThrottler.lastEmitTextLength = textLength;
+        
+        emitAgentEvent({
+          runId: ctx.params.runId,
+          stream: "assistant",
+          data: {
+            text: cleanedText,
+            delta: deltaText,
+            mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
+          },
         });
+        void ctx.params.onAgentEvent?.({
+          stream: "assistant",
+          data: {
+            text: cleanedText,
+            delta: deltaText,
+            mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
+          },
+        });
+        if (ctx.params.onPartialReply && ctx.state.shouldEmitPartialReplies) {
+          void ctx.params.onPartialReply({
+            text: cleanedText,
+            mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
+          });
+        }
+      } else if (!pendingEmitTimeout) {
+        // 设置延迟发射，确保最终内容会被推送
+        ctx.state.streamThrottler.pendingEmitTimeout = setTimeout(() => {
+          // 再次检查是否需要发射（防止重复发射）
+          if (ctx.state.lastStreamedAssistant === cleanedText) {
+            ctx.state.streamThrottler.lastEmitTime = Date.now();
+            ctx.state.streamThrottler.lastEmitTextLength = textLength;
+            ctx.state.streamThrottler.pendingEmitTimeout = undefined;
+            
+            emitAgentEvent({
+              runId: ctx.params.runId,
+              stream: "assistant",
+              data: {
+                text: cleanedText,
+                delta: cleanedText.slice((ctx.state.lastStreamedAssistant ?? "").length),
+                mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
+              },
+            });
+            void ctx.params.onAgentEvent?.({
+              stream: "assistant",
+              data: {
+                text: cleanedText,
+                delta: cleanedText.slice((ctx.state.lastStreamedAssistant ?? "").length),
+                mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
+              },
+            });
+            if (ctx.params.onPartialReply && ctx.state.shouldEmitPartialReplies) {
+              void ctx.params.onPartialReply({
+                text: cleanedText,
+                mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
+              });
+            }
+          }
+        }, 100 - timeSinceLastEmit); // 剩余等待时间
       }
     }
   }
@@ -288,4 +345,12 @@ export function handleMessageEnd(
   ctx.state.blockState.final = false;
   ctx.state.blockState.inlineCode = createInlineCodeState();
   ctx.state.lastStreamedAssistant = undefined;
+  
+  // 清理节流器状态
+  if (ctx.state.streamThrottler.pendingEmitTimeout) {
+    clearTimeout(ctx.state.streamThrottler.pendingEmitTimeout);
+    ctx.state.streamThrottler.pendingEmitTimeout = undefined;
+  }
+  ctx.state.streamThrottler.lastEmitTime = 0;
+  ctx.state.streamThrottler.lastEmitTextLength = 0;
 }

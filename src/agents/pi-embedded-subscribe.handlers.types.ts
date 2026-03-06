@@ -64,6 +64,13 @@ export type EmbeddedPiSubscribeState = {
     lastToolName: string | null;
     consecutiveFailures: number;
   };
+
+  /** 流式输出节流器：减少事件发射频率 */
+  streamThrottler: {
+    lastEmitTime: number;
+    lastEmitTextLength: number;
+    pendingEmitTimeout?: NodeJS.Timeout;
+  };
 };
 
 export type EmbeddedPiSubscribeContext = {
