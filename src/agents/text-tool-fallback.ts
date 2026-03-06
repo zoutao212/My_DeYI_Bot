@@ -449,6 +449,38 @@ function tryParseFunctionCallSyntax(raw: string): TextToolCall | null {
 // ─── P88: 单次幻觉工具调用解析（Spot Recovery）──────────────
 
 /**
+ * P88 修复: memory_patch 工具参数映射
+ * LLM 在 Historical context 格式中常使用错误的参数名，需要映射到正确的 schema
+ */
+function mapMemoryPatchArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const mapped: Record<string, unknown> = {};
+  
+  // 映射操作类型：mode -> operation
+  if (args.mode && typeof args.mode === "string") {
+    mapped.operation = args.mode;
+  } else if (args.operation && typeof args.operation === "string") {
+    mapped.operation = args.operation;
+  }
+  
+  // filePath 参数直接传递（记忆文件路径）
+  if (args.filePath && typeof args.filePath === "string") {
+    mapped.filePath = args.filePath;
+  }
+  
+  // section 参数直接传递（目标 section 标题）
+  if (args.section && typeof args.section === "string") {
+    mapped.section = args.section;
+  }
+  
+  // 直接传递其他参数
+  if (args.key !== undefined) mapped.key = args.key;
+  if (args.value !== undefined) mapped.value = args.value;
+  if (args.pattern !== undefined) mapped.pattern = args.pattern;
+  
+  return mapped;
+}
+
+/**
  * P88: 从非标准格式文本中解析工具调用（单次幻觉回退）。
  *
  * 当 provider 正常支持 function calling（hadPriorToolCalls=true），
@@ -474,16 +506,24 @@ export function parseSpotToolCallsFromText(text: string): TextToolCall[] {
     const toolName = match[1];
     const argsStr = match[2];
     try {
-      const args = JSON.parse(argsStr);
+      let args = JSON.parse(argsStr);
       if (args && typeof args === "object") {
+        // P88 修复: memory_patch 工具参数映射
+        if (toolName === "memory_patch") {
+          args = mapMemoryPatchArgs(args);
+        }
         results.push({ tool: toolName, args, raw: match[0] });
       }
     } catch {
       // JSON 中可能含换行的字符串值，尝试清理后重新解析
       try {
         const cleaned = argsStr.replace(/\n/g, "\\n");
-        const args = JSON.parse(cleaned);
+        let args = JSON.parse(cleaned);
         if (args && typeof args === "object") {
+          // P88 修复: memory_patch 工具参数映射
+          if (toolName === "memory_patch") {
+            args = mapMemoryPatchArgs(args);
+          }
           results.push({ tool: toolName, args, raw: match[0] });
         }
       } catch {
