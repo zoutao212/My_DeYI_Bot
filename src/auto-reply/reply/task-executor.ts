@@ -115,15 +115,43 @@ function buildToolAllowlist(params: {
     "memory_list",
     "memory_deep_search",
   ];
+
+  // 🆕 ToolCall 2.0 工具名称
+  const TOOLCALL_V2_TOOL_NAMES = [
+    "code_tool",
+    "tool_composer",
+    "memory_enhancer",
+  ];
+
   const promptLower = (params.prompt ?? "").toLowerCase();
+  
+  // 检测是否需要记忆工具
   const needsMemoryTools =
     MEMORY_TOOL_NAMES.some((t) => promptLower.includes(t)) ||
     /(?:记忆|memory)\s*(?:检索|搜索|查询|写入|更新|删除|列表|工具)/.test(promptLower) ||
     /(?:使用|调用|用)\s*(?:记忆|memory)/.test(promptLower);
+
+  // 🆕 检测是否需要 ToolCall 2.0 工具
+  const needsToolCallV2 =
+    TOOLCALL_V2_TOOL_NAMES.some((t) => promptLower.includes(t)) ||
+    /(?:智能|动态|语义|批量|自动|代码生成|工具组合)/.test(promptLower) ||
+    /(?:code_tool|tool_composer|memory_enhancer)/.test(promptLower) ||
+    /(?:生成|执行|分析).*代码/.test(promptLower) ||
+    /(?:工具组合|动态生成|智能处理)/.test(promptLower);
+
+  // 添加记忆工具
   if (needsMemoryTools) {
     for (const mt of MEMORY_TOOL_NAMES) {
       if (!allow.includes(mt)) allow.push(mt);
     }
+  }
+
+  // 🆕 添加 ToolCall 2.0 工具
+  if (needsToolCallV2) {
+    for (const vt of TOOLCALL_V2_TOOL_NAMES) {
+      if (!allow.includes(vt)) allow.push(vt);
+    }
+    console.log(`[task-executor] 🚀 ToolCall 2.0 工具检测: 添加 ${TOOLCALL_V2_TOOL_NAMES.join(", ")}`);
   }
 
   return allow;

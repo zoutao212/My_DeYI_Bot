@@ -24,6 +24,7 @@ import { createSendFileTool } from "./tools/send-file-tool.js";
 import { createContinueGenerationTool } from "./tools/continue-generation-tool.js";
 import { createSubmitDecompositionTool } from "./tools/submit-decomposition-tool.js";
 import { createSubmitQualityReviewTool } from "./tools/submit-quality-review-tool.js";
+import { integrateToolCallV2 } from "./toolcall-v2/index.js";
 
 export function createClawdbotTools(options?: {
   browserControlUrl?: string;
@@ -62,6 +63,13 @@ export function createClawdbotTools(options?: {
   modelHasVision?: boolean;
   /** Explicit agent ID override for cron/hook sessions. */
   requesterAgentIdOverride?: string;
+  /** ToolCall 2.0 配置 */
+  toolCallV2?: {
+    /** 是否启用代码工具 */
+    enableCodeTool?: boolean;
+    /** 是否启用工具组合器 */
+    enableToolComposer?: boolean;
+  };
 }): AnyAgentTool[] {
   const imageTool = options?.agentDir?.trim()
     ? createImageTool({
@@ -184,5 +192,12 @@ export function createClawdbotTools(options?: {
     toolAllowlist: options?.pluginToolAllowlist,
   });
 
-  return [...tools, ...pluginTools];
+  // 集成 ToolCall 2.0 工具
+  const allTools = [...tools, ...pluginTools];
+  const toolsWithV2 = integrateToolCallV2(allTools, {
+    enableCodeTool: options?.toolCallV2?.enableCodeTool ?? true,
+    enableToolComposer: options?.toolCallV2?.enableToolComposer ?? true,
+  });
+
+  return toolsWithV2;
 }

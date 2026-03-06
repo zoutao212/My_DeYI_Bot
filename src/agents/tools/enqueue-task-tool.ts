@@ -422,14 +422,15 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
               );
               splitResults.push({ id: splitSubTask.id, summary: newSummary });
 
-              // 为每个拆分出的子任务构建并入队 FollowupRun
+              // 🔧 P122 修复：区分主 agent 调用和队列任务调用
+              const isCalledFromMainAgent = !(currentFollowupRun.isQueueTask === true);
               const splitFollowupRun: FollowupRun = {
                 prompt: newPrompt,
                 summaryLine: newSummary,
                 enqueuedAt: Date.now(),
                 run: currentFollowupRun.run,
-                isQueueTask: true,
-                isRootTask: false,
+                isQueueTask: !isCalledFromMainAgent,  // 主 agent 调用保持 false，队列调用设置为 true
+                isRootTask: false,  // 拆分出的子任务不是根任务
                 isNewRootTask: false,
                 taskDepth: splitSubTask.depth ?? 0,
                 subTaskId: splitSubTask.id,
@@ -493,13 +494,17 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
         // 🚨 Bug #3 修复: 创建任务专用的 AbortController
         const taskAbortController = new AbortController();
         
+        // 🔧 P122 修复：区分主 agent 调用和队列任务调用
+        // 主 agent 直接调用（currentFollowupRun.isQueueTask 不为 true）：保持 isQueueTask=false，赋予完整权限
+        // 队列任务执行期间调用：设置 isQueueTask=true，限制权限防止套娃分解
+        const isCalledFromMainAgent = !(currentFollowupRun.isQueueTask === true);
         const followupRun: FollowupRun = {
           prompt,
           summaryLine: summary,
           enqueuedAt: Date.now(),
           run: currentFollowupRun.run,
-          isQueueTask: true,
-          isRootTask: isNewRootTask,  // 🔧 只有新根任务标记为根任务，子任务通过 depth guard 控制递归分解
+          isQueueTask: !isCalledFromMainAgent,  // 主 agent 调用保持 false，队列调用设置为 true
+          isRootTask: isNewRootTask || isCalledFromMainAgent,  // 主 agent 调用或新根任务都标记为根任务
           isNewRootTask: isNewRootTask,    // 方案 2：显式传播标记
           taskDepth: subTaskDepth,          // 方案 3：记录任务树深度
           subTaskId: subTask.id,            // 精确匹配：记录子任务 ID

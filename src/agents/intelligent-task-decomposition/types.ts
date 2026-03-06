@@ -808,6 +808,13 @@ export interface SubTaskMetadata {
    * 3. 执行后：followup-runner 用 contract 校验产出文件名，不符时自动重命名
    */
   outputContract?: OutputContract;
+
+  // 🆕 ToolCall 2.0 增强配置
+  /** ToolCall 2.0 增强配置 */
+  toolCallV2Config?: ToolCallV2Config;
+
+  /** 动态生成的执行策略 */
+  dynamicExecutionStrategy?: DynamicExecutionStrategy;
 }
 
 /**
@@ -839,6 +846,54 @@ export interface OutputContract {
 
   /** 父任务的 chapterFileName（继承用） */
   parentChapterFileName?: string;
+}
+
+// 🆕 ToolCall 2.0 增强执行相关类型
+
+/**
+ * ToolCall 2.0 增强配置
+ */
+export interface ToolCallV2Config {
+  /** 是否启用 ToolCall 2.0 增强 */
+  enabled: boolean;
+  /** 偏好的操作类型 */
+  preferredOperations: string[];
+  /** 增强级别：light/medium/heavy */
+  enhancementLevel: "light" | "medium" | "heavy";
+  /** 允许的编程语言 */
+  allowedLanguages?: ("python" | "javascript" | "typescript")[];
+  /** 允许的模块列表 */
+  allowedModules?: string[];
+  /** 是否允许工具组合 */
+  allowToolComposition?: boolean;
+  /** 是否允许记忆增强 */
+  allowMemoryEnhancement?: boolean;
+}
+
+/**
+ * 动态执行策略
+ */
+export interface DynamicExecutionStrategy {
+  /** 代码模板 */
+  codeTemplate?: string;
+  /** 工具组合配置 */
+  toolComposition?: {
+    name: string;
+    description: string;
+    composition_code: string;
+    language: 'python' | 'javascript' | 'typescript';
+    input_schema: Record<string, unknown>;
+    allowed_tools: string[];
+    timeout?: number;
+  };
+  /** 自适应算法列表 */
+  adaptiveAlgorithms?: string[];
+  /** 执行策略类型 */
+  strategyType: "code_generation" | "tool_composition" | "memory_enhancement" | "hybrid";
+  /** 预估执行时间（秒） */
+  estimatedExecutionTime?: number;
+  /** 预估内存使用（MB） */
+  estimatedMemoryUsage?: number;
 }
 
 /**
