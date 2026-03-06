@@ -33,6 +33,9 @@ import type { TypingController } from "./typing.js";
 import { createTypingSignaler } from "./typing-mode.js";
 import { setCurrentFollowupRunContext, clearCurrentFollowupRunContext } from "../../agents/tools/enqueue-task-tool.js";
 import { getGlobalOrchestrator } from "../../agents/tools/enqueue-task-tool.js";
+import { requeueAndContinue } from "./task-scheduler.js";
+import { judgeAttemptOutcome, judgeOutputValidator } from "./task-judge.js";
+import { executeEmbeddedLLM } from "./task-executor.js";
 import { buildSiblingContext } from "../../agents/memory/pipeline-integration.js";
 import { createMemoryService } from "../../agents/memory/factory.js";
 import { sendFallbackFile } from "./send-fallback-file.js";
@@ -41,12 +44,12 @@ import { deriveExecutionRole, createExecutionContext } from "../../agents/intell
 import { getPrompts } from "../../agents/intelligent-task-decomposition/prompts-loader.js";
 import type { SubTask, TaskTree, ExecutionContext } from "../../agents/intelligent-task-decomposition/types.js";
 import type { Orchestrator } from "../../agents/intelligent-task-decomposition/orchestrator.js";
+import { TaskRuntime } from "../../agents/intelligent-task-decomposition/task-runtime.js";
 import { TaskProgressReporter, getTaskProgressFromTree, formatDetailedProgress } from "../../agents/intelligent-task-decomposition/task-progress-reporter.js";
 import { estimateTokens, allocateBudget, truncateToTokenBudget, type BudgetRequest } from "../../agents/intelligent-task-decomposition/context-budget-manager.js";
 import { localGrepSearch, getDefaultMemoryDirs } from "../../memory/local-search.js";
 import { searchNovelAssets, hasNovelAssets, formatNovelSnippetsForPrompt } from "../../memory/novel-assets-searcher.js";
 
-const TOOL_PROGRESS_MIN_GAP_MS = 1200;
 const TOOL_PROGRESS_ENABLED = process.env.CLAWDBOT_TASK_PROGRESS_TOOL_VERBOSE !== "0";
 
 function _sleep(ms: number): Promise<void> {
@@ -96,45 +99,11 @@ interface OutputValidationResult {
 }
 
 /**
- * 🔧 P103: 检测 outputText 是否实际上是 API 错误消息
- *
- * 根因：PI library 将 429/503 等 API 错误格式化为中文文本
- * "⚠️ API 返回了错误响应..." 放入 content[0].text。
- * buildEmbeddedRunPayloads 的 shouldSuppressRawErrorText 只对比英文格式的
- * formatAssistantErrorText 输出和 rawErrorMessage JSON，无法匹配中文格式，
- * 导致错误消息流入 contentPayloads（未标记 isError），绕过 P100 守卫。
- *
- * 检测条件：文本较短（<1500 字符）且匹配 API 错误模式。
- * 真正的 LLM 写作产出通常远超 1500 字符，不会误触发。
+ * 🔧 P98 修复：当 P88 Spot Recovery 已成功执行时，跳过此检测。
+ * 根因：P88 在 attempt.ts 中检测到幻觉工具调用并执行了它们，但原始幻觉文本
+ * 仍留在 assistantTexts 中（session 历史不可变）。如果不跳过，OutputValidator
+ * 会看到幻觉模式并拒绝整个输出，导致 P88 的修复无效。
  */
-const _P103_API_ERROR_PATTERNS: RegExp[] = [
-  /api\s*返回了?\s*错误/i,
-  /too many requests/i,
-  /rate[_ ]?limit/i,
-  /["']?code["']?\s*:\s*429/,
-  /["']?status["']?\s*:\s*["']?too many requests/i,
-  /model[_ ]?not[_ ]?found/i,
-  /上游负载[已已]饱和/,
-  /请稍后再试/,
-  /service unavailable/i,
-  /["']?code["']?\s*:\s*503/,
-  /overloaded/i,
-  /upstream.*saturated/i,
-];
-
-function _isOutputApiError(text: string): boolean {
-  if (!text || text.length > 1500) return false;
-  // 至少匹配 2 个模式才确认（降低误判风险）
-  let matchCount = 0;
-  for (const pattern of _P103_API_ERROR_PATTERNS) {
-    if (pattern.test(text)) {
-      matchCount++;
-      if (matchCount >= 2) return true;
-    }
-  }
-  return false;
-}
-
 function validateSubTaskOutput(
   outputText: string,
   toolMetas: Array<{ toolName: string; [k: string]: unknown }>,
@@ -556,6 +525,7 @@ export function createFollowupRunner(params: {
       // 🔧 获取 Orchestrator 实例
       const orchestrator = getGlobalOrchestrator();
       const sessionId = queued.run.sessionId;
+      const taskRuntime = new TaskRuntime(sessionId);
       
       // 🔧 尝试从任务树中找到对应的子任务
       // 优先用 subTaskId 精确匹配，回退到 prompt 匹配（向后兼容）
@@ -576,6 +546,13 @@ export function createFollowupRunner(params: {
       let startDecisionCtx: ExecutionContext | undefined;
       if (taskTree && subTask) {
         console.log(`[followup-runner] 🔍 Found sub task in tree: ${subTask.id}`);
+
+        await taskRuntime.recordStart({
+          sessionId,
+          rootTaskId: queued.rootTaskId,
+          taskTree,
+          subTask,
+        });
 
         // 🆕 初始化任务进度报告器
         const progressInfo = getTaskProgressFromTree(taskTree, queued.rootTaskId);
@@ -621,6 +598,16 @@ export function createFollowupRunner(params: {
                     });
                     enqueueFollowupRun(queued.run.sessionKey, decompFollowupRun, resolvedQueue, "none");
                     console.log(`[followup-runner] 🆕 分解子任务已入队: ${newSubTask.id} (${newSubTask.summary})`);
+
+                    void taskRuntime.recordJudge(
+                      {
+                        sessionId,
+                        rootTaskId: queued.rootTaskId,
+                        taskTree,
+                        subTask: newSubTask,
+                      },
+                      { action: "accept" },
+                    );
                   }
                 }
                 finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
@@ -656,6 +643,22 @@ export function createFollowupRunner(params: {
           // 进入统一后处理（质检 + 轮次完成检查）
           try {
             const postResult = await orchestrator.onTaskCompleted(taskTree, subTask, queued.rootTaskId);
+
+            await taskRuntime.recordJudge(
+              {
+                sessionId,
+                rootTaskId: queued.rootTaskId,
+                taskTree,
+                subTask,
+              },
+              postResult.needsRequeue
+                ? { action: "retry", reason: "post_process_restart" }
+                : postResult.markedFailed
+                  ? { action: "fail", reason: "post_process_overthrow" }
+                  : postResult.decision === "decompose"
+                    ? { action: "decompose", reason: "post_process_decompose" }
+                    : { action: "accept" },
+            );
             if (postResult.roundCompleted && postResult.completedRoundId) {
               console.log(`[followup-runner] 🏁 V8 P2: Round completed via system strategy: ${postResult.completedRoundId}`);
               taskTree = (await orchestrator.loadTaskTree(sessionId)) ?? taskTree;
@@ -682,32 +685,21 @@ export function createFollowupRunner(params: {
         }
       }
       
-      // 🔧 Session 隔离：子任务使用独立的 session 文件，防止 LLM 上下文交叉污染
-      // 根因：所有子任务共享同一个 session 文件（JSONL 对话历史），导致：
-      // 1. 后续子任务的 LLM 上下文中包含前序子任务的完整对话
-      // 2. 重试时 LLM 看到所有章节的历史，输出混入其他子任务的内容
-      // 3. 质检正确检测到"内容归属错乱"，但根因是 session 污染
-      let llmSessionFile = queued.run.sessionFile;
-      if (queued.subTaskId && queued.isQueueTask) {
-        const isolatedSessionDir = path.join(
-          os.homedir(), ".clawdbot", "tasks", sessionId, "sessions"
-        );
-        await fs.mkdir(isolatedSessionDir, { recursive: true });
-        // 重试时使用新的 session 文件，避免锚定到上次失败的输出
-        // 迭代优化指令已通过 prompt 注入（previousOutput + lastFailureFindings），无需旧 session
-        const retryCount = subTask?.retryCount ?? 0;
-        const sessionSuffix = retryCount > 0 ? `_retry${retryCount}` : "";
-        llmSessionFile = path.join(isolatedSessionDir, `${queued.subTaskId}${sessionSuffix}.jsonl`);
-        console.log(
-          `[followup-runner] 🔒 Session 隔离: 子任务 ${queued.subTaskId} 使用独立 session` +
-          (retryCount > 0 ? ` (retry ${retryCount})` : ""),
-        );
-      }
+      // 🔧 Executor 抽离：session 隔离 + toolAllowlist + fallback 调用 + payload 清洗
+      // followup-runner 仅保留编排
+      const execMeta: {
+        llmSessionFile?: string;
+        fallbackProvider: string;
+        fallbackModel: string;
+      } = {
+        llmSessionFile: undefined,
+        fallbackProvider: queued.run.provider,
+        fallbackModel: queued.run.model,
+      };
+
+      let runResult: Awaited<ReturnType<typeof runEmbeddedPiAgent>> | undefined;
 
       let autoCompactionCompleted = false;
-      let runResult: Awaited<ReturnType<typeof runEmbeddedPiAgent>>;
-      let fallbackProvider = queued.run.provider;
-      let fallbackModel = queued.run.model;
       try {
         // 🆕 V2 Phase 4: ExecutionContext 由 onTaskStarting 钩子构建，回退到旧推导
         const isNewRoot = queued.isNewRootTask ?? false;
@@ -830,122 +822,7 @@ export function createFollowupRunner(params: {
           }
         }
 
-        const fallbackResult = await runWithModelFallback({
-          cfg: queued.run.config,
-          provider: queued.run.provider,
-          model: queued.run.model,
-          fallbacksOverride: resolveAgentModelFallbacksOverride(
-            queued.run.config,
-            resolveAgentIdFromSessionKey(queued.run.sessionKey),
-          ),
-          run: (provider, model) => {
-            const authProfileId =
-              provider === queued.run.provider ? queued.run.authProfileId : undefined;
-            // 🔧 并行子任务 session lane 隔离：
-            // 根因：runEmbeddedPiAgent 内部用 sessionKey 作为 session lane 的 key，
-            // maxConcurrent=1，导致同一 session 下的所有子任务被串行化。
-            // drain 的 Promise.allSettled 并行只是让多个 runner 同时进入队列等待，
-            // 但实际 LLM 调用是一个接一个的。
-            // 修复：给子任务的 sessionKey 加上 subTaskId 后缀，让每个子任务有独立的
-            // session lane，从而实现真正的并行 LLM 调用。
-            const effectiveSessionKey = (queued.isQueueTask && queued.subTaskId)
-              ? `${queued.run.sessionKey}:task:${queued.subTaskId}`
-              : queued.run.sessionKey;
-            // 🔧 子任务工具白名单：大幅裁剪 system prompt 体积（60KB → ~15KB）
-            // 创作/执行子任务只需 write+read+edit+exec，无需 browser/web/slack/canvas 等
-            const isSubTaskExec = Boolean(queued.subTaskId) && !queued.isRootTask && !queued.isNewRootTask;
-            // 🔧 P46: 根据任务类型动态调整工具白名单（替代一刀切 5 工具）
-            // 刻板问题：所有子任务统一只允许 write/read/edit/exec/process，
-            // 但自动化/研究类子任务需要 browser/web 等工具才能完成任务。
-            let subTaskToolAllowlist: string[] | undefined;
-            if (isSubTaskExec) {
-              const taskType = subTask?.taskType ?? "generic";
-              if (taskType === "automation") {
-                // 自动化类：需要浏览器、网络、命令执行等全套工具
-                subTaskToolAllowlist = ["write", "read", "edit", "exec", "process", "browser", "web", "fetch"];
-              } else if (taskType === "research" || taskType === "analysis") {
-                // 研究/分析类：需要网络搜索和文件读写
-                subTaskToolAllowlist = ["write", "read", "edit", "exec", "process", "web", "fetch"];
-              } else if (taskType === "coding") {
-                // 编码类：需要执行和测试
-                subTaskToolAllowlist = ["write", "read", "edit", "exec", "process", "test"];
-              } else {
-                // 写作/通用类：基础工具即可
-                subTaskToolAllowlist = ["write", "read", "edit", "exec", "process"];
-              }
-              // 🔧 P118: continue_generation 对所有任务类型可用（输出续传机制）
-              if (!subTaskToolAllowlist.includes("continue_generation")) {
-                subTaskToolAllowlist.push("continue_generation");
-              }
-              // 🔧 P102: prompt 驱动的 memory 工具动态注入
-              // 根因：子任务 prompt 明确要求使用 memory_search/write/update/delete 等工具，
-              // 但白名单中没有它们 → LLM 被迫用 exec 替代 → 路径不存在 → 退化为幻觉文本
-              const MEMORY_TOOL_NAMES = [
-                "memory_search", "memory_get", "memory_write", "memory_update",
-                "memory_delete", "memory_list", "memory_deep_search",
-              ];
-              const promptLower = (subTask?.prompt ?? queued.prompt ?? "").toLowerCase();
-              const needsMemoryTools = MEMORY_TOOL_NAMES.some((t) => promptLower.includes(t)) ||
-                /(?:记忆|memory)\s*(?:检索|搜索|查询|写入|更新|删除|列表|工具)/.test(promptLower) ||
-                /(?:使用|调用|用)\s*(?:记忆|memory)/.test(promptLower);
-              if (needsMemoryTools) {
-                for (const mt of MEMORY_TOOL_NAMES) {
-                  if (!subTaskToolAllowlist.includes(mt)) {
-                    subTaskToolAllowlist.push(mt);
-                  }
-                }
-              }
-            }
-
-            let lastToolProgressSentAt = 0;
-            let lastToolProgressText = "";
-            const shouldEmitToolProgress = () =>
-              Boolean(TOOL_PROGRESS_ENABLED && queued.isQueueTask && queued.subTaskId);
-            const maybeSendToolProgress = async (text?: string) => {
-              const msg = (text ?? "").trim();
-              if (!msg) return;
-              if (!shouldEmitToolProgress()) return;
-
-              const now = Date.now();
-              if (now - lastToolProgressSentAt < TOOL_PROGRESS_MIN_GAP_MS) return;
-              if (msg === lastToolProgressText) return;
-
-              const MAX_CHARS = 600;
-              const clipped = msg.length > MAX_CHARS ? msg.slice(0, MAX_CHARS) + "…" : msg;
-
-              lastToolProgressSentAt = now;
-              lastToolProgressText = msg;
-              try {
-                await sendFollowupPayloads([{ text: `\n[🛠️ 工具进展]\n${clipped}` }], queued);
-              } catch {
-              }
-            };
-
-            return runEmbeddedPiAgent({
-              sessionId: queued.run.sessionId,
-              sessionKey: effectiveSessionKey,
-              messageProvider: queued.run.messageProvider,
-              agentAccountId: queued.run.agentAccountId,
-              messageTo: queued.originatingTo,
-              messageThreadId: queued.originatingThreadId,
-              groupId: queued.run.groupId,
-              groupChannel: queued.run.groupChannel,
-              groupSpace: queued.run.groupSpace,
-              sessionFile: llmSessionFile,
-              workspaceDir: queued.run.workspaceDir,
-              config: queued.run.config,
-              // 🔧 子任务跳过 skills（省掉 skill 描述注入，减少 prompt 体积）
-              skillsSnapshot: isSubTaskExec ? undefined : queued.run.skillsSnapshot,
-              runMode: "tool_exec_compact",
-              toolAllowlist: subTaskToolAllowlist,
-              // 🔧 子任务跳过 bootstrap 文件（AGENTS.md/SOUL.md），减少 prompt 体积
-              skipBootstrapContext: isSubTaskExec,
-              shouldEmitToolResult: shouldEmitToolProgress,
-              shouldEmitToolOutput: () => false,
-              onToolResult: async (payload) => {
-                await maybeSendToolProgress(payload?.text);
-              },
-              prompt: (() => {
+        const execPrompt = (() => {
                 // 🔧 子任务强制落盘：在 prompt 本体注入指令（用户消息级，LLM 遵从度最高）
                 const isSubTask = Boolean(queued.subTaskId);
                 if (isSubTask) {
@@ -1027,8 +904,9 @@ export function createFollowupRunner(params: {
                   return `[⚠️ 强制规则] 你必须亲自使用 write 工具将生成内容写入${fileTypeHint}${dirHint}。然后在聊天中仅回复简短确认。禁止将完整内容直接输出到聊天。\n[🚫 禁止委派] 严禁调用 enqueue_task、sessions_spawn、batch_enqueue_tasks。你必须自己直接完成任务，不能把任务交给任何人。${iterationHint}${phaseHint}\n\n${queued.prompt}`;
                 }
                 return queued.prompt;
-              })(),
-              extraSystemPrompt: (() => {
+              })();
+
+        const execExtraSystemPrompt = (() => {
                 // 🆕 子任务间上下文共享：注入已完成兄弟任务的输出摘要
                 // 🔧 传入 currentTaskId，让 buildSiblingContext 智能过滤：
                 // 续写子任务只注入直接依赖的前序任务，避免 prompt 膨胀导致上下文溢出
@@ -1235,35 +1113,65 @@ export function createFollowupRunner(params: {
 
                 const combined = [base, siblingCtx, parentGoalCtx, subTaskMemoryCtx, novelReferenceCtx, persistInstruction, blueprintCtx, chapterOutlineCtx, experienceHint ? `\n\n${experienceHint}` : ""].filter(Boolean).join("");
                 return combined || undefined;
-              })(),
-              ownerNumbers: queued.run.ownerNumbers,
-              enforceFinalTag: queued.run.enforceFinalTag,
-              provider,
-              model,
-              authProfileId,
-              authProfileIdSource: authProfileId ? queued.run.authProfileIdSource : undefined,
-              thinkLevel: queued.run.thinkLevel,
-              verboseLevel: queued.run.verboseLevel,
-              reasoningLevel: queued.run.reasoningLevel,
-              execOverrides: queued.run.execOverrides,
-              bashElevated: queued.run.bashElevated,
-              timeoutMs: queued.run.timeoutMs,
-              runId,
-              blockReplyBreak: queued.run.blockReplyBreak,
-              onAgentEvent: (evt) => {
-                if (evt.stream !== "compaction") return;
-                const phase = typeof evt.data.phase === "string" ? evt.data.phase : "";
-                const willRetry = Boolean(evt.data.willRetry);
-                if (phase === "end" && !willRetry) {
-                  autoCompactionCompleted = true;
-                }
-              },
-            });
+              })();
+
+        const exec = await executeEmbeddedLLM({
+          queued,
+          sessionId,
+          prompt: execPrompt,
+          extraSystemPrompt: execExtraSystemPrompt,
+          taskType: subTask?.taskType ?? "generic",
+          retryCount: subTask?.retryCount ?? 0,
+          runId,
+          emitToolProgress: Boolean(TOOL_PROGRESS_ENABLED && queued.isQueueTask && queued.subTaskId),
+          emitToolProgressMinGapMs: 1200,
+          emitToolProgressMaxChars: 600,
+          toolProgress: {
+            enabled: Boolean(TOOL_PROGRESS_ENABLED && queued.isQueueTask && queued.subTaskId),
+            onToolResult: async (clipped?: string) => {
+              const msg = (clipped ?? "").trim();
+              if (!msg) return;
+              try {
+                await sendFollowupPayloads([{ text: `\n[🛠️ 工具进展]\n${msg}` }], queued);
+              } catch {
+              }
+            },
           },
         });
-        runResult = fallbackResult.result;
-        fallbackProvider = fallbackResult.provider;
-        fallbackModel = fallbackResult.model;
+
+        execMeta.llmSessionFile = exec.llmSessionFile;
+        execMeta.fallbackProvider = exec.fallbackProvider;
+        execMeta.fallbackModel = exec.fallbackModel;
+
+        if (!exec.runResult) {
+          throw new Error("executeEmbeddedLLM 返回缺少 runResult");
+        }
+
+        runResult = exec.runResult;
+        const localExecResult = {
+          outputText: exec.outputText,
+          apiErrorDetected: exec.apiErrorDetected,
+          apiErrorSummary: exec.apiErrorSummary,
+          apiErrorSource: exec.apiErrorSource,
+        };
+
+        if (taskTree && subTask) {
+          await taskRuntime.recordFinish(
+            {
+              sessionId,
+              rootTaskId: queued.rootTaskId,
+              taskTree,
+              subTask,
+            },
+            {
+              ok: true,
+              outputText: (runResult.payloads ?? []).map((p) => p.text).filter(Boolean).join("\n"),
+              toolMetas: runResult.toolMetas ?? [],
+              spotRecoveryExecuted: runResult.spotRecoveryExecuted,
+              attemptOutcome: runResult.attemptOutcome,
+            },
+          );
+        }
 
         // ── AttemptOutcome: attempt 层结构化恢复建议（激进长程连续改造契约）──
         // 在任何“输出净化/OutputValidator/落盘”之前优先处理，以避免错误被当作产出。
@@ -1275,12 +1183,12 @@ export function createFollowupRunner(params: {
 
           if (!ao.ok) {
             // degrade: 标记 provider 降级，让下一次从 attempt.ts Step 3.9 起就进入文本工具模式
-            if (ao.suggestedAction === "degrade" && ao.hints?.needsTextToolMode && fallbackProvider) {
+            if (ao.suggestedAction === "degrade" && ao.hints?.needsTextToolMode && execMeta.fallbackProvider) {
               try {
                 const { markDegradedProvider } = await import("../../agents/text-tool-fallback.js");
-                markDegradedProvider(fallbackProvider, fallbackModel ?? "unknown");
+                markDegradedProvider(execMeta.fallbackProvider, execMeta.fallbackModel ?? "unknown");
                 console.log(
-                  `[followup-runner] 🔧 AttemptOutcome degrade: 标记 provider ${fallbackProvider}/${fallbackModel} 为降级（下次启用文本工具模式）`,
+                  `[followup-runner] 🔧 AttemptOutcome degrade: 标记 provider ${execMeta.fallbackProvider}/${execMeta.fallbackModel} 为降级（下次启用文本工具模式）`,
                 );
               } catch {
                 // 降级模块加载失败不阻塞
@@ -1301,29 +1209,37 @@ export function createFollowupRunner(params: {
               && (subTask.retryCount ?? 0) < 4;
 
             if (shouldRetry) {
+              const judged = judgeAttemptOutcome({ taskTree, subTask, attemptOutcome: ao });
+              const judgeReason = judged?.reason ?? `AttemptOutcome:${String(ao.kind ?? "unknown")}`;
+              await taskRuntime.recordJudge(
+                {
+                  sessionId,
+                  rootTaskId: queued.rootTaskId,
+                  taskTree,
+                  subTask,
+                },
+                {
+                  action: "retry",
+                  reason: judgeReason,
+                  delayMs: ao.suggestedDelayMs,
+                },
+              );
+
               subTask.retryCount = (subTask.retryCount ?? 0) + 1;
               subTask.status = "pending";
               subTask.error = `AttemptOutcome(${ao.kind}): ${ao.details?.message ?? ""}`.trim();
               await orchestrator.saveTaskTree(taskTree);
 
-              const delayMs = Math.min(Math.max(ao.suggestedDelayMs ?? 0, 0), 10_000);
-              if (delayMs > 0) {
-                console.log(`[followup-runner] ⏳ AttemptOutcome retry backoff: ${delayMs}ms`);
-                await _sleep(delayMs);
-              }
-
-              if (queued.run.sessionKey) {
-                const retryFollowupRun = buildFollowupRun(queued, subTask);
-                const resolvedQueue = resolveQueueSettings({
-                  cfg: queued.run.config ?? ({} as any),
-                  inlineMode: "followup",
-                });
-                enqueueFollowupRun(queued.run.sessionKey, retryFollowupRun, resolvedQueue, "none");
-                console.log(
-                  `[followup-runner] 🔄 AttemptOutcome retry 已入队: ${subTask.id} (retryCount=${subTask.retryCount}, kind=${ao.kind})`,
-                );
-                finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
-              }
+              await requeueAndContinue({
+                reason: judgeReason,
+                delayMs: ao.suggestedDelayMs,
+                queued,
+                subTask,
+                taskTree,
+                sessionId,
+                taskRuntime,
+                createRunner: () => createFollowupRunner(params),
+              });
               return;
             }
           }
@@ -1331,8 +1247,8 @@ export function createFollowupRunner(params: {
 
         // 🆕 进度报告：LLM 回复完成
         {
-          const outputChars = (fallbackResult.result.payloads ?? [])
-            .reduce((sum, p) => sum + (p.text?.length ?? 0), 0);
+          const outputChars = (runResult.payloads ?? [])
+            .reduce((sum: number, p: { text?: string }) => sum + (p.text?.length ?? 0), 0);
           progressReporter?.onLLMComplete(outputChars > 0 ? outputChars : undefined);
         }
         
@@ -1350,140 +1266,43 @@ export function createFollowupRunner(params: {
             }
           }
 
-          const payloadArray = runResult.payloads ?? [];
-          // 🔧 P100 修复：排除 isError:true 的 payload（API 错误消息不应作为任务产出）
-          // 根因：LLM 返回 stopReason="error" 时，errorMessage 通过 buildEmbeddedRunPayloads
-          // 作为 isError:true 的 payload 传入。旧代码不区分正常输出和错误输出，
-          // 导致 "Incomplete JSON segment at the end" 等错误消息被存为 subTask.output，
-          // 进而触发字数不达标 → decomposeFailedTask → 生成无意义续写任务。
-          let contentPayloads = payloadArray.filter((p) => !p.isError);
-          let errorPayloads = payloadArray.filter((p) => p.isError);
+          // outputText 已由 Executor 负责清洗与归类
 
-          // 🔧 P110 修复：检测 contentPayloads 中的伪内容（API 错误格式化文本泄漏）
-          // 根因：API adapter 在 assistant.content[0].text 中放入格式化错误文本
-          // （如 "⚠️ API 返回了错误响应..."），但 formatAssistantErrorText 从 errorMessage
-          // 解析生成不同格式（如 "HTTP 429 ..."）。shouldSuppressRawErrorText 比较两者不匹配，
-          // 导致错误文本作为非 isError payload 通过。P100 检查 !outputText 失败。
-          {
-            const _p110IsApiErrorText = (text: string): boolean => {
-              const t = text.trim();
-              if (!t) return false;
-              // 中文格式化错误消息（API adapter 生成）
-              if (/^⚠️\s*API\s*返回了错误/.test(t)) return true;
-              // 英文格式化错误消息
-              if (/^⚠️\s*(?:The )?AI service returned an error/i.test(t)) return true;
-              // 包含错误 JSON payload 的文本
-              if (/错误信息[：:]\s*\{/.test(t) && /"(?:code|status)"/.test(t)) return true;
-              // HTTP 状态码错误（buildEmbeddedRunPayloads 格式）
-              if (/^HTTP\s+[45]\d{2}\b/i.test(t)) return true;
-              // 纯 JSON API 错误 payload
-              if (/^\{.*"error".*"(?:code|status|message)".*\}$/s.test(t)) return true;
-              // 常见 429/5xx 模式
-              if (/(?:Too Many Requests|rate.?limit|负载已饱和|upstream.*overloaded)/i.test(t) && t.length < 500) return true;
-              return false;
-            };
-            const realContent = contentPayloads.filter(p => !_p110IsApiErrorText(p.text ?? ""));
-            const pseudoErrors = contentPayloads.filter(p => _p110IsApiErrorText(p.text ?? ""));
-            if (realContent.length === 0 && pseudoErrors.length > 0) {
-              console.warn(
-                `[followup-runner] ⚠️ P110: ${pseudoErrors.length} 个 contentPayload 为 API 错误伪内容，重新归类为 errorPayloads`,
-              );
-              contentPayloads = realContent;
-              errorPayloads = [...errorPayloads, ...pseudoErrors];
-            }
-          }
-
-          // 🔧 P111 修复：过滤 [Historical context: ...] 幻觉文本
-          // 根因：LLM 成功执行工具后偶发输出幻觉工具调用文本（Gemini function calling 偶发失败），
-          // P88 Spot Recovery 尝试恢复但可能失败，幻觉文本仍留在 assistantTexts 中被存为 output。
-          // 修复：从内容中剥离 [Historical context: ...] 块，只保留真正的内容。
-          const _p111StripHistoricalContext = (text: string): string => {
-            return text.replace(
-              /\[Historical context:.*?Do not mimic this format[^\]]*\]/gs,
-              "",
-            ).trim();
-          };
-
-          const outputText = (() => {
-            const raw = contentPayloads.map((p) => p.text).filter(Boolean).join("\n");
-            const stripped = _p111StripHistoricalContext(raw);
-            if (stripped !== raw && stripped.length < raw.length * 0.5) {
-              console.warn(
-                `[followup-runner] ⚠️ P111: 输出中含 [Historical context:] 幻觉文本，已剥离 (${raw.length} → ${stripped.length} chars)`,
-              );
-            }
-            return stripped;
-          })();
-
-          // P100: 如果正常内容为空但有错误 payload → API 临时故障，直接重试
-          if (!outputText && errorPayloads.length > 0) {
-            const errorSummary = errorPayloads.map((p) => p.text).filter(Boolean).join("; ").substring(0, 200);
+          // P100/P103：API 错误检测已下沉到 Executor，统一使用结构化字段触发重试
+          if (localExecResult.apiErrorDetected) {
+            const errorSummary = (localExecResult.apiErrorSummary ?? "").substring(0, 200);
             console.warn(
-              `[followup-runner] ⚠️ P100: 无正常输出但有 API 错误: ${errorSummary}`,
+              `[followup-runner] ⚠️ API 错误检测(${localExecResult.apiErrorSource ?? "unknown"}): ${errorSummary}`,
             );
             subTask.retryCount = (subTask.retryCount ?? 0) + 1;
             const willRetryApiError = subTask.retryCount < 3;
             if (willRetryApiError) {
               subTask.status = "pending";
-              subTask.error = `API 错误（无正常输出）: ${errorSummary}`;
+              subTask.error = `API 错误(${localExecResult.apiErrorSource ?? "unknown"}): ${errorSummary}`;
               await orchestrator.saveTaskTree(taskTree);
-              console.log(
-                `[followup-runner] 🔄 P100: API 错误自动重试 (${subTask.retryCount}/3)`,
+              await taskRuntime.recordJudge(
+                {
+                  sessionId,
+                  rootTaskId: queued.rootTaskId,
+                  taskTree,
+                  subTask,
+                },
+                { action: "retry", reason: `api_error:${localExecResult.apiErrorSource ?? "unknown"}` },
               );
-              if (queued.run.sessionKey) {
-                const retryFollowupRun = buildFollowupRun(queued, subTask);
-                const resolvedQueue = resolveQueueSettings({
-                  cfg: queued.run.config ?? ({} as any),
-                  inlineMode: "followup",
-                });
-                enqueueFollowupRun(queued.run.sessionKey, retryFollowupRun, resolvedQueue, "none");
-                finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
-              }
-              return;
-            }
-            // 重试次数耗尽，标记失败
-            subTask.status = "failed";
-            subTask.error = `API 错误（重试耗尽）: ${errorSummary}`;
-            await orchestrator.saveTaskTree(taskTree);
-            if (queued.run.sessionKey) {
-              finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
-            }
-            return;
-          }
-
-          // 🔧 P103: 防御性 API 错误检测 — 检测 outputText 本身是否实际是 API 错误消息
-          // 根因：PI library 将 429 错误格式化为中文 "⚠️ API 返回了错误响应..." 放入 content[0].text，
-          // buildEmbeddedRunPayloads 的 shouldSuppressRawErrorText 无法匹配该中文格式（它只对比
-          // formatAssistantErrorText 的英文输出和 rawErrorMessage 的 JSON），导致错误文本流入
-          // contentPayloads（未标记 isError），outputText 非空，P100 守卫被绕过。
-          // 修复：对 outputText 做二次 API 错误模式检测，命中时走 P100 相同的重试/失败路径。
-          if (outputText && _isOutputApiError(outputText)) {
-            const errorSummary = outputText.substring(0, 200);
-            console.warn(
-              `[followup-runner] ⚠️ P103: output 实际为 API 错误消息: ${errorSummary}`,
-            );
-            subTask.retryCount = (subTask.retryCount ?? 0) + 1;
-            const willRetryP103 = subTask.retryCount < 3;
-            if (willRetryP103) {
-              subTask.status = "pending";
-              subTask.error = `API 错误（P103 检测）: ${errorSummary}`;
-              await orchestrator.saveTaskTree(taskTree);
-              console.log(
-                `[followup-runner] 🔄 P103: API 错误自动重试 (${subTask.retryCount}/3)`,
-              );
-              if (queued.run.sessionKey) {
-                const retryFollowupRun = buildFollowupRun(queued, subTask);
-                const resolvedQueue = resolveQueueSettings({
-                  cfg: queued.run.config ?? ({} as any),
-                  inlineMode: "followup",
-                });
-                enqueueFollowupRun(queued.run.sessionKey, retryFollowupRun, resolvedQueue, "none");
-                finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
-              }
+              await requeueAndContinue({
+                reason: `api_error:${localExecResult.apiErrorSource ?? "unknown"}`,
+                delayMs: 1500,
+                queued,
+                subTask,
+                taskTree,
+                sessionId,
+                taskRuntime,
+                createRunner: () => createFollowupRunner(params),
+              });
               return;
             }
             subTask.status = "failed";
-            subTask.error = `API 错误（P103 重试耗尽）: ${errorSummary}`;
+            subTask.error = `API 错误（重试耗尽）(${localExecResult.apiErrorSource ?? "unknown"}): ${errorSummary}`;
             await orchestrator.saveTaskTree(taskTree);
             if (queued.run.sessionKey) {
               finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
@@ -1493,16 +1312,37 @@ export function createFollowupRunner(params: {
 
           // 🆕 P10: 输出验证门 — 在标记 completed 之前拦截明显无效输出
           const isRootTaskExecution = Boolean(queued.isRootTask || queued.isNewRootTask);
-          const validation = validateSubTaskOutput(outputText, runResult.toolMetas ?? [], {
+          const validation = validateSubTaskOutput(localExecResult.outputText, runResult.toolMetas ?? [], {
             isRootTask: isRootTaskExecution,
             // 🔧 P98: P88 Spot Recovery 已处理幻觉工具调用时，跳过 OutputValidator 幻觉检测
             spotRecoveryExecuted: runResult.spotRecoveryExecuted,
           });
           if (!validation.valid) {
+            const judged = judgeOutputValidator({
+              valid: validation.valid,
+              failureCode: validation.failureCode,
+              failureReason: validation.failureReason,
+              suggestedAction: validation.suggestedAction,
+              retryCount: subTask.retryCount,
+              maxRetries: 3,
+            });
+
+            await taskRuntime.recordJudge(
+              {
+                sessionId,
+                rootTaskId: queued.rootTaskId,
+                taskTree,
+                subTask,
+              },
+              {
+                action: judged.action === "retry" ? "retry" : "fail",
+                reason: judged.reason,
+              },
+            );
             console.warn(
               `[followup-runner] ⚠️ OutputValidator 拦截: ${validation.failureCode} — ${validation.failureReason}`,
             );
-            subTask.output = outputText;
+            subTask.output = localExecResult.outputText;
             subTask.retryCount = (subTask.retryCount ?? 0) + 1;
 
             // V8 P3: 记录质量经验（OutputValidator 拦截）
@@ -1515,7 +1355,7 @@ export function createFollowupRunner(params: {
                   ? "标记 provider 降级，启用文本工具模式"
                   : "检查子任务 prompt 是否过于模糊",
                 taskType: subTask?.taskType,
-                providerHint: fallbackProvider,
+                providerHint: execMeta.fallbackProvider,
               }),
             ).catch(() => {});
 
@@ -1535,12 +1375,12 @@ export function createFollowupRunner(params: {
               // 根因：LLM 用纯文本输出 tool call，重试时同一 provider 仍然降级，
               // 但 text-tool-fallback 在 Step 5.5 才检测降级（太晚），导致重试同样失败。
               // 修复：提前标记降级，确保下次从 Step 3.9 就注入文本工具描述。
-              if (validation.failureCode === "hallucinated_tool_calls" && fallbackProvider) {
+              if (validation.failureCode === "hallucinated_tool_calls" && execMeta.fallbackProvider) {
                 try {
                   const { markDegradedProvider } = await import("../../agents/text-tool-fallback.js");
-                  markDegradedProvider(fallbackProvider, fallbackModel ?? "unknown");
+                  markDegradedProvider(execMeta.fallbackProvider, execMeta.fallbackModel ?? "unknown");
                   console.log(
-                    `[followup-runner] 🔧 P35: 标记 provider ${fallbackProvider}/${fallbackModel} 为降级，下次重试将启用文本工具模式`,
+                    `[followup-runner] 🔧 P35: 标记 provider ${execMeta.fallbackProvider}/${execMeta.fallbackModel} 为降级，下次重试将启用文本工具模式`,
                   );
                 } catch {
                   // text-tool-fallback 模块加载失败，不影响重试流程
@@ -1554,18 +1394,15 @@ export function createFollowupRunner(params: {
               console.log(
                 `[followup-runner] 🔄 OutputValidator 建议重试 (${subTask.retryCount}/3)`,
               );
-              if (queued.run.sessionKey) {
-                // 🔧 P1 修复：OutputValidator retry 时必须创建新的 FollowupRun 入队
-                // 修复前：只调用 finalizeWithFollowup 触发 drain，但队列中没有对应的 FollowupRun
-                const retryFollowupRun = buildFollowupRun(queued, subTask);
-                const resolvedQueue = resolveQueueSettings({
-                  cfg: queued.run.config ?? ({} as any),
-                  inlineMode: "followup",
-                });
-                enqueueFollowupRun(queued.run.sessionKey, retryFollowupRun, resolvedQueue, "none");
-                console.log(`[followup-runner] 🔄 OutputValidator 重试已入队: ${subTask.id} (retryCount=${subTask.retryCount})`);
-                finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
-              }
+              await requeueAndContinue({
+                reason: judged.reason,
+                queued,
+                subTask,
+                taskTree,
+                sessionId,
+                taskRuntime,
+                createRunner: () => createFollowupRunner(params),
+              });
               return;
             }
 
@@ -1601,12 +1438,12 @@ export function createFollowupRunner(params: {
           // assistantTexts 中（session 历史不可变），被存入 output 字段。
           // 这污染了后续合并管线（mergeTaskOutputs 读 output 字段）和质检。
           // 修复：当 spotRecoveryExecuted 时，剥离 [Historical context: ...] 模式行。
-          let cleanedOutputText = outputText;
-          if (runResult.spotRecoveryExecuted && outputText) {
-            const beforeLen = outputText.length;
-            cleanedOutputText = outputText
+          let cleanedOutputText = localExecResult.outputText;
+          if (runResult.spotRecoveryExecuted && localExecResult.outputText) {
+            const beforeLen = localExecResult.outputText.length;
+            cleanedOutputText = localExecResult.outputText
               .split("\n")
-              .filter(line => !/^\[Historical context:.*(?:called tool|Do not mimic)/i.test(line.trim()))
+              .filter((line: string) => !/^\[Historical context:.*(?:called tool|Do not mimic)/i.test(line.trim()))
               .join("\n")
               .trim();
             if (cleanedOutputText.length < beforeLen) {
@@ -1637,19 +1474,19 @@ export function createFollowupRunner(params: {
           // 🔧 FileTracker 断裂回退：从 toolMetas 中提取 write 工具的文件路径
           if (trackedFiles.length === 0 && runResult.toolMetas) {
             const writeMetas = runResult.toolMetas.filter(
-              (m) => m.toolName === "write" && typeof m.meta === "string" && m.meta.length > 0,
+              (m: any) => m.toolName === "write" && typeof m.meta === "string" && m.meta.length > 0,
             );
             if (writeMetas.length > 0) {
               if (!subTask.metadata) subTask.metadata = {};
               const homedir = os.homedir();
-              const recoveredPaths = writeMetas.map((m) => {
+              const recoveredPaths = writeMetas.map((m: any) => {
                 let p = String(m.meta);
                 if (p.startsWith("~/") || p.startsWith("~\\")) {
                   p = path.join(homedir, p.slice(2));
                 }
                 return p;
               });
-              const recoveredNames = recoveredPaths.map((p) => path.basename(p));
+              const recoveredNames = recoveredPaths.map((p: string) => path.basename(p));
               subTask.metadata.producedFiles = recoveredNames;
               subTask.metadata.producedFilePaths = recoveredPaths;
               console.log(
@@ -1710,12 +1547,12 @@ export function createFollowupRunner(params: {
           // 发送逻辑移到质检通过后（由 postProcessSubTaskCompletion 的 sendSubTaskFiles 处理）。
           await handleFallbackPersistence({
             subTask,
-            outputText,
+            outputText: localExecResult.outputText,
             toolMetas: runResult.toolMetas ?? [],
             sessionId,
             queued,
             skipSend: true, // 🔧 问题 JJ：不立即发送，等质检通过后再发
-            llmSessionFile, // 🔧 Session 隔离：传递隔离的 session 文件路径
+            llmSessionFile: execMeta.llmSessionFile, // 🔧 Session 隔离：传递隔离的 session 文件路径
           });
           
           // 🆕 V2 Phase 4: 统一后处理（onTaskCompleted 钩子替代散装逻辑）
@@ -1726,6 +1563,22 @@ export function createFollowupRunner(params: {
 
             const postResult = await orchestrator.onTaskCompleted(taskTree, subTask, queued.rootTaskId);
 
+            await taskRuntime.recordJudge(
+              {
+                sessionId,
+                rootTaskId: queued.rootTaskId,
+                taskTree,
+                subTask,
+              },
+              postResult.needsRequeue
+                ? { action: "retry", reason: "post_process_restart" }
+                : postResult.markedFailed
+                  ? { action: "fail", reason: "post_process_overthrow" }
+                  : postResult.decision === "decompose"
+                    ? { action: "decompose", reason: "post_process_decompose" }
+                    : { action: "accept" },
+            );
+
             if (postResult.needsRequeue) {
               progressReporter?.onQualityReviewComplete(false);
               progressReporter?.onTaskRestart(subTask.retryCount ?? 1);
@@ -1733,19 +1586,15 @@ export function createFollowupRunner(params: {
                 `[followup-runner] 🔄 子任务 ${subTask.id} 质量不达标，重新入队 (restart): ` +
                 `${JSON.stringify(postResult.findings)}`,
               );
-              // 🔧 BUG 修复：restart 时必须创建新的 FollowupRun 入队
-              // 修复前：只调用 finalizeWithFollowup 触发 drain，但队列中没有对应的 FollowupRun
-              // 导致 drain 的 getNextExecutableTasksForDrain 返回 execute，但找不到匹配项，任务永远不会被重新执行
-              if (queued.run.sessionKey) {
-                const restartFollowupRun = buildFollowupRun(queued, subTask);
-                const resolvedQueue = resolveQueueSettings({
-                  cfg: queued.run.config ?? ({} as any),
-                  inlineMode: "followup",
-                });
-                enqueueFollowupRun(queued.run.sessionKey, restartFollowupRun, resolvedQueue, "none");
-                console.log(`[followup-runner] 🔄 restart 子任务已重新入队: ${subTask.id} (retryCount=${subTask.retryCount})`);
-                finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
-              }
+              await requeueAndContinue({
+                reason: "post_process_restart",
+                queued,
+                subTask,
+                taskTree,
+                sessionId,
+                taskRuntime,
+                createRunner: () => createFollowupRunner(params),
+              });
               return;
             }
 
@@ -1854,8 +1703,8 @@ export function createFollowupRunner(params: {
                     completedSubTask,
                     fileContent || undefined,
                     queued.run.config,
-                    fallbackProvider,
-                    fallbackModel,
+                    execMeta.fallbackProvider,
+                    execMeta.fallbackModel,
                   );
                   if (summary && summary.length > 10) {
                     if (!completedSubTask.metadata) completedSubTask.metadata = {};
@@ -1997,19 +1846,27 @@ export function createFollowupRunner(params: {
 
           if (failDecision.needsRequeue) {
             console.warn(`[followup-runner] ⚠️ ${failDecision.reason}`);
-            if (queued.run.sessionKey) {
-              // 🔧 P0 修复：needsRequeue 时必须创建新的 FollowupRun 入队
-              // 修复前：只调用 finalizeWithFollowup 触发 drain，但队列中没有对应的 FollowupRun
-              // 导致 drain 找不到匹配项，重试永远不会执行
-              const retryFollowupRun = buildFollowupRun(queued, subTask);
-              const resolvedQueue = resolveQueueSettings({
-                cfg: queued.run.config ?? ({} as any),
-                inlineMode: "followup",
-              });
-              enqueueFollowupRun(queued.run.sessionKey, retryFollowupRun, resolvedQueue, "none");
-              console.log(`[followup-runner] 🔄 onTaskFailed 重试已入队: ${subTask.id} (retryCount=${subTask.retryCount})`);
-              finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
-            }
+            subTask.status = "pending";
+            await orchestrator.saveTaskTree(taskTree);
+            await taskRuntime.recordJudge(
+              {
+                sessionId,
+                rootTaskId: queued.rootTaskId,
+                taskTree,
+                subTask,
+              },
+              { action: "retry", reason: "on_task_failed" },
+            );
+            await requeueAndContinue({
+              reason: "on_task_failed",
+              delayMs: 1500,
+              queued,
+              subTask,
+              taskTree,
+              sessionId,
+              taskRuntime,
+              createRunner: () => createFollowupRunner(params),
+            });
           } else {
             console.error(`[followup-runner] ❌ ${failDecision.reason}`);
           }
@@ -2025,8 +1882,8 @@ export function createFollowupRunner(params: {
       }
 
       if (storePath && sessionKey) {
-        const usage = runResult.meta.agentMeta?.usage;
-        const modelUsed = runResult.meta.agentMeta?.model ?? fallbackModel ?? defaultModel;
+        const usage = runResult?.meta.agentMeta?.usage;
+        const modelUsed = runResult?.meta.agentMeta?.model ?? execMeta.fallbackModel ?? defaultModel;
         const contextTokensUsed =
           agentCfgContextTokens ??
           lookupContextTokens(modelUsed) ??
@@ -2038,15 +1895,15 @@ export function createFollowupRunner(params: {
           sessionKey,
           usage,
           modelUsed,
-          providerUsed: fallbackProvider,
+          providerUsed: execMeta.fallbackProvider,
           contextTokensUsed,
           logLabel: "followup",
         });
       }
 
-      const payloadArray = runResult.payloads ?? [];
+      const payloadArray = runResult?.payloads ?? [];
       if (payloadArray.length === 0) return;
-      const sanitizedPayloads = payloadArray.flatMap((payload) => {
+      const sanitizedPayloads = payloadArray.flatMap((payload: any) => {
         const text = payload.text;
         if (!text || !text.includes("HEARTBEAT_OK")) return [payload];
         const stripped = stripHeartbeatToken(text, { mode: "message" });
@@ -2072,11 +1929,11 @@ export function createFollowupRunner(params: {
 
       const dedupedPayloads = filterMessagingToolDuplicates({
         payloads: replyTaggedPayloads,
-        sentTexts: runResult.messagingToolSentTexts ?? [],
+        sentTexts: runResult?.messagingToolSentTexts ?? [],
       });
       const suppressMessagingToolReplies = shouldSuppressMessagingToolReplies({
         messageProvider: queued.run.messageProvider,
-        messagingToolSentTargets: runResult.messagingToolSentTargets,
+        messagingToolSentTargets: runResult?.messagingToolSentTargets,
         originatingTo: queued.originatingTo,
         accountId: queued.run.agentAccountId,
       });
