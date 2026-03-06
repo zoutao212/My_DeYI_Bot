@@ -32,6 +32,7 @@ import { getPrompts } from "./prompts-loader.js";
 import { classifyTaskType, classifyAndEnrich, classifyTaskTypeWithLLM, getBlueprintTypeKey, isWordCountCritical, requiresFileOutput, type TaskTypeClassification } from "./task-type-classifier.js";
 import type { ClawdbotConfig } from "../../config/config.js";
 import { getCP0DecomposeSignal, recordDecompositionDecision, type CP2DecisionSource } from "./intent-complexity-analyzer.js";
+import { createV2EnhancedExecutor, type V2EnhancedExecutor } from "./v2-enhanced-executor-simple.js";
 
 /**
  * 任务分解协调器
@@ -58,6 +59,9 @@ export class Orchestrator {
   private config: ClawdbotConfig | undefined;
   // 🔧 S4: 已通过完整性校验的轮次 ID（避免每次 drain 调用都重复校验）
   private validatedRounds = new Set<string>();
+
+  // 🆕 V2 增强执行器（ToolCall 2.0 集成）
+  private v2EnhancedExecutor: V2EnhancedExecutor;
 
   constructor(
     groupingOptions?: GroupingOptions,
@@ -90,6 +94,15 @@ export class Orchestrator {
     
     // 初始化批量执行组件
     this.taskGrouper = new TaskGrouper(groupingOptions);
+
+    // 🆕 初始化 V2 增强执行器
+    this.v2EnhancedExecutor = createV2EnhancedExecutor({
+      enableCodeTool: true,
+      enableToolComposer: true,
+      enableMemoryEnhancer: true,
+      defaultTimeout: 60,
+      defaultMemoryLimit: 256,
+    });
   }
 
   private async _appendTaskEvent(
@@ -316,6 +329,28 @@ export class Orchestrator {
       needsRequeue: false,
       markedFailed: false,
     };
+
+    // 🆕 0a. ToolCall 2.0 增强执行检测和处理
+    if (subTask.metadata?.toolCallV2Config?.enabled && !subTask.metadata?.dynamicExecutionStrategy) {
+      try {
+        console.log(`[Orchestrator] 🚀 检测到子任务 ${subTask.id} 配置了 ToolCall 2.0，生成动态执行策略`);
+        
+        // 生成动态执行策略
+        const dynamicStrategy = await this.v2EnhancedExecutor.generateDynamicStrategy(subTask);
+        
+        // 保存到元数据
+        if (!subTask.metadata) subTask.metadata = {};
+        subTask.metadata.dynamicExecutionStrategy = dynamicStrategy;
+        
+        // 添加到发现列表
+        result.findings.push(`ToolCall 2.0 增强策略已生成: ${dynamicStrategy.strategyType}`);
+        console.log(`[Orchestrator] ✅ 已为子任务 ${subTask.id} 生成 ${dynamicStrategy.strategyType} 策略`);
+        
+      } catch (strategyErr) {
+        console.warn(`[Orchestrator] ⚠️ ToolCall 2.0 策略生成失败: ${strategyErr}`);
+        result.suggestions.push("ToolCall 2.0 策略生成失败，将使用标准执行");
+      }
+    }
 
     // ── 0. V4: 分段子任务完成后触发合并 ──
     if (subTask.metadata?.isSegment) {
@@ -1652,6 +1687,117 @@ export class Orchestrator {
       );
     }
     return shouldDecompose;
+  }
+
+  /**
+   * 🆕 检测子任务是否需要 ToolCall 2.0 增强并配置相应参数
+   * 
+   * @param taskTree 任务树
+   * @param subTask 待检查的子任务
+   * @returns 是否配置了 ToolCall 2.0 增强
+   */
+  shouldConfigureToolCallV2(taskTree: TaskTree, subTask: SubTask): boolean {
+    // 使用 V2EnhancedExecutor 的检测逻辑
+    const needsV2Enhancement = this.v2EnhancedExecutor.shouldUseToolCallV2(subTask);
+    
+    if (!needsV2Enhancement) {
+      return false;
+    }
+
+    // 如果还没有配置 ToolCall 2.0，则进行配置
+    if (!subTask.metadata?.toolCallV2Config) {
+      console.log(`[Orchestrator] 🚀 检测到子任务 ${subTask.id} 需要 ToolCall 2.0 增强`);
+      
+      // 初始化元数据（如果不存在）
+      if (!subTask.metadata) {
+        subTask.metadata = {};
+      }
+
+      // 配置 ToolCall 2.0 参数
+      subTask.metadata.toolCallV2Config = {
+        enabled: true,
+        preferredOperations: this.determinePreferredOperations(subTask),
+        enhancementLevel: this.determineEnhancementLevel(subTask),
+        allowedLanguages: ["python", "javascript"],
+        allowedModules: ["json", "datetime", "re", "os", "path"],
+        allowToolComposition: true,
+        allowMemoryEnhancement: true,
+      };
+
+      console.log(`[Orchestrator] ✅ 已为子任务 ${subTask.id} 配置 ToolCall 2.0: ${subTask.metadata.toolCallV2Config.enhancementLevel} 级别`);
+      return true;
+    }
+
+    return true;
+  }
+
+  /**
+   * 🆕 确定子任务的偏好操作类型
+   */
+  private determinePreferredOperations(subTask: SubTask): string[] {
+    const { prompt, taskType } = subTask;
+    const promptLower = prompt.toLowerCase();
+
+    const operations: string[] = [];
+
+    // 基于任务类型确定操作
+    if (taskType === "analysis" || taskType === "research") {
+      operations.push("semantic_search", "intelligent_search", "smart_classify");
+    } else if (taskType === "data" || taskType === "automation") {
+      operations.push("batch_process", "data_validation", "text_transformation");
+    } else if (taskType === "coding") {
+      operations.push("code_analysis", "dynamic_generation");
+    }
+
+    // 基于内容关键词补充操作
+    if (promptLower.includes("知识图谱") || promptLower.includes("关系分析")) {
+      operations.push("knowledge_graph", "semantic_search");
+    }
+    if (promptLower.includes("批量") || promptLower.includes("多个文件")) {
+      operations.push("batch_process");
+    }
+    if (promptLower.includes("语义") || promptLower.includes("相似度")) {
+      operations.push("semantic_search");
+    }
+    if (promptLower.includes("分类") || promptLower.includes("标签")) {
+      operations.push("smart_classify", "auto_tagging");
+    }
+    if (promptLower.includes("摘要") || promptLower.includes("总结")) {
+      operations.push("content_summarization");
+    }
+
+    return operations.length > 0 ? operations : ["intelligent_search"];
+  }
+
+  /**
+   * 🆕 确定增强级别
+   */
+  private determineEnhancementLevel(subTask: SubTask): "light" | "medium" | "heavy" {
+    const { prompt, taskType } = subTask;
+    const promptLen = prompt.length;
+
+    // 基于任务复杂度和长度确定级别
+    if (taskType === "analysis" || taskType === "research") {
+      return promptLen > 2000 ? "heavy" : "medium";
+    } else if (taskType === "data" || taskType === "automation") {
+      return promptLen > 1500 ? "heavy" : "medium";
+    } else if (taskType === "coding") {
+      return promptLen > 1000 ? "medium" : "light";
+    } else {
+      // 基于关键词判断复杂度
+      const complexKeywords = ["知识图谱", "批量处理", "多个文件", "复杂分析", "深度学习"];
+      const hasComplexKeywords = complexKeywords.some(keyword => 
+        prompt.toLowerCase().includes(keyword)
+      );
+      
+      if (hasComplexKeywords || promptLen > 2500) {
+        return "heavy";
+      } else if (promptLen > 1000) {
+        return "medium";
+      } else {
+        return "light";
+      }
+    }
   }
 
   /**
