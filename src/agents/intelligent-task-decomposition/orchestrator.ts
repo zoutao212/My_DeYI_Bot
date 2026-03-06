@@ -32,7 +32,7 @@ import { getPrompts } from "./prompts-loader.js";
 import { classifyTaskType, classifyAndEnrich, classifyTaskTypeWithLLM, getBlueprintTypeKey, isWordCountCritical, requiresFileOutput, type TaskTypeClassification } from "./task-type-classifier.js";
 import type { ClawdbotConfig } from "../../config/config.js";
 import { getCP0DecomposeSignal, recordDecompositionDecision, type CP2DecisionSource } from "./intent-complexity-analyzer.js";
-import { createV2EnhancedExecutor, type V2EnhancedExecutor } from "./v2-enhanced-executor-simple.js";
+import { createV2EnhancedExecutor, type V2EnhancedExecutor } from "./v2-enhanced-executor-v2.js";
 
 /**
  * 任务分解协调器
@@ -99,9 +99,10 @@ export class Orchestrator {
     this.v2EnhancedExecutor = createV2EnhancedExecutor({
       enableCodeTool: true,
       enableToolComposer: true,
-      enableMemoryEnhancer: true,
+      enableMemoryEnhancement: true,
       defaultTimeout: 60,
       defaultMemoryLimit: 256,
+      executionMode: "simulated",
     });
   }
 
@@ -1364,6 +1365,9 @@ export class Orchestrator {
     }
 
     await this.taskTreeManager.save(taskTree);
+
+    // 🆕 ToolCall 2.0 增强检测和配置
+    this.shouldConfigureToolCallV2(taskTree, subTask);
 
     console.log(`[Orchestrator] ✅ Sub task added: ${subTask.id} (${summary}) [depth=${subTask.depth}, parent=${parentId || 'none'}]`);
     return subTask;

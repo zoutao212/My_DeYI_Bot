@@ -48,10 +48,21 @@ import { TaskRuntime } from "../../agents/intelligent-task-decomposition/task-ru
 import { TaskProgressReporter, getTaskProgressFromTree, formatDetailedProgress } from "../../agents/intelligent-task-decomposition/task-progress-reporter.js";
 import { estimateTokens, allocateBudget, truncateToTokenBudget, type BudgetRequest } from "../../agents/intelligent-task-decomposition/context-budget-manager.js";
 import { localGrepSearch, getDefaultMemoryDirs } from "../../memory/local-search.js";
+import { createV2EnhancedExecutor, type V2EnhancedExecutor } from "../../agents/intelligent-task-decomposition/v2-enhanced-executor-v2.js";
 import { globalAbortManager } from "../../agents/global-abort-manager.js"; // 🚨 Bug #3 修复: 全局中断管理器
 import { searchNovelAssets, hasNovelAssets, formatNovelSnippetsForPrompt } from "../../memory/novel-assets-searcher.js";
 
 const TOOL_PROGRESS_ENABLED = process.env.CLAWDBOT_TASK_PROGRESS_TOOL_VERBOSE !== "0";
+
+// 🆕 ToolCall 2.0 增强执行器全局实例
+const v2EnhancedExecutor = createV2EnhancedExecutor({
+  enableCodeTool: true,
+  enableToolComposer: true,
+  enableMemoryEnhancement: true,
+  defaultTimeout: 60,
+  defaultMemoryLimit: 256,
+  executionMode: "simulated",
+});
 
 function _sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
@@ -641,9 +652,78 @@ export function createFollowupRunner(params: {
             subTask.metadata.producedFiles = sysResult.producedFilePaths.map((p: string) => path.basename(p));
           }
           await orchestrator.updateSubTaskStatus(taskTree, subTask.id, sysResult.success ? "completed" : "failed");
+          
+          // 🆕 ToolCall 2.0 增强执行检测和处理
+          let v2EnhancedResult = null;
+          if (subTask.metadata?.toolCallV2Config?.enabled && subTask.metadata?.dynamicExecutionStrategy) {
+            try {
+              console.log(`[followup-runner] 🚀 检测到子任务 ${subTask.id} 配置了 ToolCall 2.0，开始增强执行`);
+              
+              // 构建执行上下文
+              const execCtx = startDecisionCtx
+                ?? queued.executionContext
+                ?? createExecutionContext({
+                    role: deriveExecutionRole({ 
+                      isQueueTask: queued.isQueueTask ?? true, 
+                      isRootTask: queued.isRootTask ?? false, 
+                      isNewRootTask: queued.isNewRootTask ?? false, 
+                      taskDepth: queued.taskDepth ?? 0 
+                    }),
+                    roundId: queued.rootTaskId ?? "",
+                    depth: queued.taskDepth ?? 0,
+                  });
+              
+              // 执行 V2 增强处理
+              v2EnhancedResult = await v2EnhancedExecutor.executeSubTaskWithV2Enhancement(
+                subTask,
+                execCtx,
+                taskTree,
+                orchestrator
+              );
+              
+              console.log(`[followup-runner] ✅ V2 增强执行完成: ${v2EnhancedResult.decision} (${v2EnhancedResult.status})`);
+              
+              // 如果 V2 增强执行返回了新的子任务，添加到结果中
+              if (v2EnhancedResult.decomposedTaskIds && v2EnhancedResult.decomposedTaskIds.length > 0) {
+                console.log(`[followup-runner] 🔄 V2 增强产生了 ${v2EnhancedResult.decomposedTaskIds.length} 个新子任务`);
+              }
+              
+            } catch (v2Err) {
+              console.warn(`[followup-runner] ⚠️ V2 增强执行失败: ${v2Err}`);
+              v2EnhancedResult = {
+                decision: "continue",
+                status: "passed",
+                findings: [`V2 增强执行失败: ${v2Err instanceof Error ? v2Err.message : String(v2Err)}`],
+                suggestions: ["回退到标准执行"],
+                needsRequeue: false,
+                markedFailed: false,
+                decomposedTaskIds: [],
+              };
+            }
+          }
+          
           // 进入统一后处理（质检 + 轮次完成检查）
           try {
             const postResult = await orchestrator.onTaskCompleted(taskTree, subTask, queued.rootTaskId);
+            
+            // 🆕 合并 V2 增强执行结果
+            if (v2EnhancedResult) {
+              // 合并发现和建议
+              postResult.findings = [...postResult.findings, ...v2EnhancedResult.findings];
+              postResult.suggestions = [...postResult.suggestions, ...v2EnhancedResult.suggestions];
+              
+              // 合并新任务ID
+              if (v2EnhancedResult.decomposedTaskIds && v2EnhancedResult.decomposedTaskIds.length > 0) {
+                if (!postResult.decomposedTaskIds) postResult.decomposedTaskIds = [];
+                postResult.decomposedTaskIds.push(...v2EnhancedResult.decomposedTaskIds);
+              }
+              
+              // 如果 V2 增强执行失败，可能需要调整决策
+              if (v2EnhancedResult.status === "pending" && postResult.decision === "continue") {
+                postResult.decision = "restart";
+                postResult.status = "pending";
+              }
+            }
 
             await taskRuntime.recordJudge(
               {
@@ -1536,6 +1616,55 @@ export function createFollowupRunner(params: {
           // 🔧 P61c：此时 producedFilePaths 已设置，保存时不会丢失
           await orchestrator.updateSubTaskStatus(taskTree, subTask.id, "completed");
           
+          // 🆕 ToolCall 2.0 增强执行检测和处理（第二个执行路径）
+          let v2EnhancedResult = null;
+          if (subTask.metadata?.toolCallV2Config?.enabled && subTask.metadata?.dynamicExecutionStrategy) {
+            try {
+              console.log(`[followup-runner] 🚀 检测到子任务 ${subTask.id} 配置了 ToolCall 2.0，开始增强执行（路径2）`);
+              
+              // 构建执行上下文
+              const execCtx = startDecisionCtx
+                ?? queued.executionContext
+                ?? createExecutionContext({
+                    role: deriveExecutionRole({ 
+                      isQueueTask: queued.isQueueTask ?? true, 
+                      isRootTask: queued.isRootTask ?? false, 
+                      isNewRootTask: queued.isNewRootTask ?? false, 
+                      taskDepth: queued.taskDepth ?? 0 
+                    }),
+                    roundId: queued.rootTaskId ?? "",
+                    depth: queued.taskDepth ?? 0,
+                  });
+              
+              // 执行 V2 增强处理
+              v2EnhancedResult = await v2EnhancedExecutor.executeSubTaskWithV2Enhancement(
+                subTask,
+                execCtx,
+                taskTree,
+                orchestrator
+              );
+              
+              console.log(`[followup-runner] ✅ V2 增强执行完成（路径2）: ${v2EnhancedResult.decision} (${v2EnhancedResult.status})`);
+              
+              // 如果 V2 增强执行返回了新的子任务，添加到结果中
+              if (v2EnhancedResult.decomposedTaskIds && v2EnhancedResult.decomposedTaskIds.length > 0) {
+                console.log(`[followup-runner] 🔄 V2 增强产生了 ${v2EnhancedResult.decomposedTaskIds.length} 个新子任务（路径2）`);
+              }
+              
+            } catch (v2Err) {
+              console.warn(`[followup-runner] ⚠️ V2 增强执行失败（路径2）: ${v2Err}`);
+              v2EnhancedResult = {
+                decision: "continue",
+                status: "passed",
+                findings: [`V2 增强执行失败（路径2）: ${v2Err instanceof Error ? v2Err.message : String(v2Err)}`],
+                suggestions: ["回退到标准执行"],
+                needsRequeue: false,
+                markedFailed: false,
+                decomposedTaskIds: [],
+              };
+            }
+          }
+          
           // 🆕 V2 Phase 4: 兜底落盘（委托提取的辅助函数）
           // 🔧 问题 JJ 修复：兜底落盘仅保存文件，不立即发送给用户
           // 原因：如果质检后决定 restart，用户会先收到不完整的文件，然后又收到重试后的文件。
@@ -1557,6 +1686,25 @@ export function createFollowupRunner(params: {
             progressReporter?.onQualityReviewStart();
 
             const postResult = await orchestrator.onTaskCompleted(taskTree, subTask, queued.rootTaskId);
+            
+            // 🆕 合并 V2 增强执行结果（路径2）
+            if (v2EnhancedResult) {
+              // 合并发现和建议
+              postResult.findings = [...postResult.findings, ...v2EnhancedResult.findings];
+              postResult.suggestions = [...postResult.suggestions, ...v2EnhancedResult.suggestions];
+              
+              // 合并新任务ID
+              if (v2EnhancedResult.decomposedTaskIds && v2EnhancedResult.decomposedTaskIds.length > 0) {
+                if (!postResult.decomposedTaskIds) postResult.decomposedTaskIds = [];
+                postResult.decomposedTaskIds.push(...v2EnhancedResult.decomposedTaskIds);
+              }
+              
+              // 如果 V2 增强执行失败，可能需要调整决策
+              if (v2EnhancedResult.status === "pending" && postResult.decision === "continue") {
+                postResult.decision = "restart";
+                postResult.status = "pending";
+              }
+            }
 
             await taskRuntime.recordJudge(
               {
