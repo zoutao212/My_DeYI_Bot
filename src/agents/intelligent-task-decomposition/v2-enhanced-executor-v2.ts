@@ -89,10 +89,10 @@ export class V2EnhancedExecutor {
     ];
 
     // 检测是否已配置 ToolCall 2.0
-    const hasV2Config = metadata?.toolCallV2Config?.enabled;
+    const hasV2Config = metadata?.toolCallV2Config?.enabled ?? false;
 
     // 检测是否有动态执行策略
-    const hasDynamicStrategy = metadata?.dynamicExecutionStrategy;
+    const hasDynamicStrategy = !!metadata?.dynamicExecutionStrategy;
 
     // 关键词匹配
     const hasKeywords = v2Keywords.some(keyword => promptLower.includes(keyword));

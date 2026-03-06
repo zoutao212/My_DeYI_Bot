@@ -855,8 +855,7 @@ output = result
       name: 'memory_validation_and_cleanup',
       description: '记忆验证和清理：格式验证 → 数据清洗 → 完整性检查 → 生成报告',
       language: 'javascript',
-      composition_code: `
-// 记忆验证和清理工作流
+      composition_code: `// 记忆验证和清理工作流
 async function memoryValidationAndCleanup(memoryFiles) {
   const validationResults = {
     validated: 0,
@@ -877,70 +876,12 @@ async function memoryValidationAndCleanup(memoryFiles) {
       const validation = await call_tool('memory_enhancer', {
         'action': 'data_validation',
         'language': 'javascript',
-        'operation_code': '''
-// 数据验证代码
-function validateMemoryContent(content) {
-  const issues = [];
-  const warnings = [];
-  
-  // 检查空文件
-  if (!content.trim()) {
-    issues.push('文件内容为空');
-  }
-  
-  // 检查编码问题
-  if (content.includes('')) {
-    issues.push('文件存在编码问题');
-  }
-  
-  // 检查Markdown格式
-  const lines = content.split('\\n');
-  let hasHeaders = false;
-  let hasLists = false;
-  
-  for (const line of lines) {
-    if (line.startsWith('#')) hasHeaders = true;
-    if (line.trim().match(/^[-*+]\\s/)) hasLists = true;
-  }
-  
-  if (!hasHeaders && lines.length > 5) {
-    warnings.push('建议添加标题结构');
-  }
-  
-  // 检查重复行
-  const lineCounts = {};
-  lines.forEach(line => {
-    const trimmed = line.trim();
-    if (trimmed) {
-      lineCounts[trimmed] = (lineCounts[trimmed] || 0) + 1;
-    }
-  });
-  
-  const duplicates = Object.entries(lineCounts)
-    .filter(([_, count]) => count > 1)
-    .map(([line, count]) => ({ line, count }));
-  
-  if (duplicates.length > 0) {
-    warnings.push(\`发现 \${duplicates.length} 个重复行\`);
-  }
-  
-  return {
-    issues,
-    warnings,
-    duplicates,
-    stats: {
-      totalLines: lines.length,
-      hasHeaders,
-      hasLists
-    }
-  };
-}
-''',
+        'operation_code': '// 数据验证代码\\nfunction validateMemoryContent(content) {\\n  const issues = [];\\n  const warnings = [];\\n  \\n  // 检查空文件\\n  if (!content.trim()) {\\n    issues.push(\\'文件内容为空\\');\\n  }\\n  \\n  // 检查编码问题\\n  if (content.includes(\\'\\')) {\\n    issues.push(\\'文件存在编码问题\\');\\n  }\\n  \\n  // 检查Markdown格式\\n  const lines = content.split(\\'\\\\\\\\\\n\\');\\n  let hasHeaders = false;\\n  let hasLists = false;\\n  \\n  for (const line of lines) {\\n    if (line.startsWith(\\'#\\')) hasHeaders = true;\\n    if (line.trim().match(/^[-*+]\\\\\\\\s/)) hasLists = true;\\n  }\\n  \\n  if (!hasHeaders && lines.length > 5) {\\n    warnings.push(\\'建议添加标题结构\\');\\n  }\\n  \\n  // 检查重复行\\n  const lineCounts = {};\\n  lines.forEach(line => {\\n    const trimmed = line.trim();\\n    if (trimmed) {\\n      lineCounts[trimmed] = (lineCounts[trimmed] || 0) + 1;\\n    }\\n  });\\n  \\n  const duplicates = Object.entries(lineCounts)\\n    .filter(([_, count]) => count > 1)\\n    .map(([line, count]) => ({ line, count }));\\n  \\n  if (duplicates.length > 0) {\\n    warnings.push(\\\`发现 \\\\\${duplicates.length} 个重复行\\\`);\\n  }\\n  \\n  return {\\n    issues,\\n    warnings,\\n    duplicates,\\n    stats: {\\n      totalLines: lines.length,\\n      hasHeaders,\\n      hasLists\\n    }\\n  };\\n}',
         'inputs': { 'content': content }
       });
       
       if (!validation.success) {
-        validationResults.errors.push(\`${filePath}: 验证失败\`);
+        validationResults.errors.push(filePath + ': 验证失败');
         continue;
       }
       
@@ -951,13 +892,13 @@ function validateMemoryContent(content) {
       let needsCleaning = false;
       
       // 清理多余空行
-      cleanedContent = cleanedContent.replace(/\\n{3,}/g, '\\n\\n');
+      cleanedContent = cleanedContent.replace(/\\\\n{3,}/g, \\'\\\\\\\\n\\\\\\\\n\\\');
       
       // 清理行尾空格
-      cleanedContent = cleanedContent.replace(/[ \\t]+$/gm, '');
+      cleanedContent = cleanedContent.replace(/[ \\\\t]+$/gm, \\'\\\');
       
       // 标准化换行符
-      cleanedContent = cleanedContent.replace(/\\r\\n/g, '\\n');
+      cleanedContent = cleanedContent.replace(/\\\\r\\\\n/g, \\'\\\\\\\\n\\\');
       
       // 检查是否需要清理
       if (cleanedContent !== content) {
@@ -981,19 +922,19 @@ function validateMemoryContent(content) {
       // 步骤4: 完整性检查
       const integrityCheck = {
         has_content: cleanedContent.trim().length > 0,
-        has_structure: cleanedContent.includes('#') || cleanedContent.includes('##'),
-        line_count: cleanedContent.split('\\n').length,
-        word_count: cleanedContent.split(/\\s+/).filter(w => w).length
+        has_structure: cleanedContent.includes(\\'#\\') || cleanedContent.includes(\\'##\\'),
+        line_count: cleanedContent.split(\\'\\\\\\\\n\\').length,
+        word_count: cleanedContent.split(/\\\\s+/).filter(w => w).length
       };
       
       if (!integrityCheck.has_content) {
-        validationResults.warnings.push(\`${filePath}: 文件内容为空\`);
+        validationResults.warnings.push(filePath + ': 文件内容为空');
       }
       
       validationResults.validated++;
       
     } catch (error) {
-      validationResults.errors.push(\`${filePath}: 处理失败 - \${error.message}\`);
+      validationResults.errors.push(filePath + ': 处理失败 - ' + error.message);
     }
   }
   
@@ -1007,15 +948,15 @@ function validateMemoryContent(content) {
   
   // 生成建议
   if (validationResults.errors.length > 0) {
-    report.recommendations.push('修复文件读取错误和权限问题');
+    report.recommendations.push(\\'修复文件读取错误和权限问题\\');
   }
   
   if (validationResults.warnings.length > 0) {
-    report.recommendations.push('完善文件结构和内容组织');
+    report.recommendations.push(\\'完善文件结构和内容组织\\');
   }
   
   if (validationResults.cleaned > 0) {
-    report.recommendations.push('定期进行数据清理以保持文件质量');
+    report.recommendations.push(\\'定期进行数据清理以保持文件质量\\');
   }
   
   await call_tool('write', {
@@ -1032,9 +973,8 @@ function validateMemoryContent(content) {
 }
 
 // 执行验证和清理
-const result = await memoryValidationAndCleanup(inputs['memory_files']);
-output = result;
-`,
+const result = await memoryValidationAndCleanup(inputs[\\'memory_files\\']);
+output = result;`,
       input_schema: {
         type: 'object',
         properties: {
