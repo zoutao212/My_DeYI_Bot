@@ -9,6 +9,7 @@ import { Orchestrator } from "../intelligent-task-decomposition/orchestrator.js"
 import { deriveExecutionRole, createExecutionContext } from "../intelligent-task-decomposition/execution-context.js";
 import { PERMISSION_MATRIX } from "../intelligent-task-decomposition/types.js";
 import { validateEntryAgainstCP0 } from "../intelligent-task-decomposition/intent-complexity-analyzer.js";
+import { globalAbortManager } from "../global-abort-manager.js"; // 🚨 Bug #3 修复: 全局中断管理器
 
 const EnqueueTaskSchema = Type.Object({
   prompt: Type.String({
@@ -488,6 +489,10 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
         // - taskDepth：记录入队时的深度，drain 时做兜底检查（方案 3）
         // - subTaskId：记录子任务 ID，用于精确匹配（任务系统改进）
         const subTaskDepth = subTask.depth ?? 0;
+        
+        // 🚨 Bug #3 修复: 创建任务专用的 AbortController
+        const taskAbortController = new AbortController();
+        
         const followupRun: FollowupRun = {
           prompt,
           summaryLine: summary,
@@ -508,7 +513,12 @@ export function createEnqueueTaskTool(options?: EnqueueTaskOptions): AnyAgentToo
           // 🆕 V8 P0: 继承模型上下文窗口信息（ContextBudgetManager 用）
           modelContextWindow: currentFollowupRun.modelContextWindow,
           modelMaxOutputTokens: currentFollowupRun.modelMaxOutputTokens,
+          // 🚨 Bug #3 修复: 注册任务到全局中断管理器
+          abortSignal: taskAbortController.signal,
         };
+
+        // 🚨 Bug #3 修复: 注册任务到全局管理器
+        globalAbortManager.registerTask(subTask.id, taskAbortController);
 
         // 解析队列设置
         const resolvedQueue = resolveQueueSettings({

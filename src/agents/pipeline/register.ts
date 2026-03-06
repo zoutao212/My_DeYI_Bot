@@ -15,6 +15,7 @@ import { detectChatRoomIntent, handleChatRoomMessage, closeChatRoom, hasActiveSe
 import { loadConfig } from "../../config/config.js";
 import { analyzeIntentComplexity, buildComplexityGuidance } from "../intelligent-task-decomposition/intent-complexity-analyzer.js";
 import { emitAgentEvent } from "../../infra/agent-events.js";
+import { globalAbortManager } from "../global-abort-manager.js"; // 🚨 Bug #3 修复: 全局中断管理器
 
 const log = createSubsystemLogger("pipeline:register");
 
@@ -55,8 +56,16 @@ const CHATROOM_ABORT_CONTROLLERS = new Map<string, AbortController>();
  *
  * 由 gateway 的 chat.abort 或 /stop 命令触发。
  * 如果该会话当前有正在执行的聊天室轮次，立即中断。
+ * 🚨 Bug #3 修复: 集成全局中断管理器
  */
 export function abortChatRoomSession(sessionKey: string): boolean {
+  // 🚨 Bug #3 修复: 优先使用全局管理器
+  const globalAborted = globalAbortManager.abortSession(sessionKey, "chat room abort");
+  if (globalAborted) {
+    return true;
+  }
+
+  // 回退到原有逻辑
   const controller = CHATROOM_ABORT_CONTROLLERS.get(sessionKey);
   if (!controller) return false;
   controller.abort();
@@ -93,11 +102,11 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
         const systemPromptUpdateHint = hasSystemPromptUpdateIntent
           ? (
               `\n\n[🧩 系统底座更新硬约束]\n` +
-              `- 你被要求“更新/优化系统提示词/底座认知”时，必须实际修改文件并落盘：\n` +
+              `- 你被要求"更新/优化系统提示词/底座认知"时，必须实际修改文件并落盘：\n` +
               `  - ${String.raw`C:\Users\zouta\clawd\system\profile.md`}\n` +
               `  - （可选）${String.raw`C:\Users\zouta\clawd\system\identity.md`}、${String.raw`C:\Users\zouta\clawd\system\config.json`}、${String.raw`C:\Users\zouta\clawd\system\prompts\*.md`}\n` +
               `- 必须调用 write 或 edit 工具完成写入；只输出文本说明但不写文件 = 未完成。\n` +
-              `- 只优化“基础认知/行为契约”，不要堆叠文学性描写要求。`
+              `- 只优化"基础认知/行为契约"，不要堆叠文学性描写要求。`
             )
           : "";
         
@@ -130,8 +139,54 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
           return undefined;
         }
 
+        // ── 🎯 任务树意图优先检测（多角色场景下的任务树保护） ──
+        // 当用户消息中包含明确的任务树/复杂任务关键词时，优先走单角色路径
+        // 避免多角色聊天室误触发，确保任务树功能正常运行
+        const hasTaskTreeIntent = 
+          /任务树|复杂任务|智能任务|任务分解|enqueue_task|长篇.*创作|大规模.*分析|多步骤.*任务|系统性.*处理|项目.*管理/.test(userMessage) ||
+          /(?:写|创作|生成|分析|整理|构建).*(?:万字|长篇|多章|多节|系列|全套|完整)/.test(userMessage) ||
+          /(?:启动|开始|执行|运行).*(?:任务树|复杂任务|大型项目)/.test(userMessage);
+
+        if (hasTaskTreeIntent) {
+          log.info(`🔵 [Pipeline] 🎯 检测到任务树意图，跳过聊天室模式，优先启动任务树功能`);
+          
+          // 检测优先角色（用于能力注入）
+          let detectedCharacter: string | undefined;
+          const msgLower = userMessage.toLowerCase();
+          
+          if (msgLower.includes("栗娜") || msgLower.includes("琳娜") || msgLower.includes("lina")) {
+            detectedCharacter = "lina";
+          } else if (msgLower.includes("德默泽尔") || msgLower.includes("德姨") || msgLower.includes("demerzel") || msgLower.includes("爱姬") || msgLower.includes("机械姬")) {
+            detectedCharacter = "demerzel";
+          } else if (msgLower.includes("德洛丽丝") || msgLower.includes("多莉") || msgLower.includes("dolores") || msgLower.includes("德妹") || msgLower.includes("Dolly")) {
+            detectedCharacter = "dolores";
+          } else if (msgLower.includes("丽丝") || msgLower.includes("lisi")) {
+            detectedCharacter = "lisi";
+          }
+
+          // 系统化身能力注入
+          const SYSTEM_PERSONAS = new Set(["lina", "demerzel", "dolores", "lisi"]);
+          let capabilityNote = "";
+          if (detectedCharacter && SYSTEM_PERSONAS.has(detectedCharacter)) {
+            capabilityNote =
+              `\n\n## 🚀 任务树模式已激活\n` +
+              `检测到复杂任务意图，已为您启用智能任务分解系统：\n` +
+              `- **enqueue_task**：自动分解复杂任务为子任务树，并行执行、质量评估、合并产出\n` +
+              `- **continue_generation**：支持长文本分批输出，突破单次token限制\n` +
+              `- **记忆系统**：完整的memory CRUD能力，支持任务过程记录和结果归档\n` +
+              `- **文件系统**：read/write/edit/exec/process全权限\n` +
+              `- **Web能力**：web_search/web_fetch/browser，支持资料搜集和验证\n` +
+              `\n💡 系统将根据任务复杂度自动选择最优执行策略。`;
+          }
+
+          return {
+            characterName: detectedCharacter,
+            prependContext: `\n\n🎯 [Pipeline] 任务树意图检测通过，角色：${detectedCharacter || "默认"}${capabilityNote}${systemPromptUpdateHint}\n`,
+          };
+        }
+
         // ── 聊天室检测（默认优先级最高） ──
-        // 但“系统底座更新”属于强工具链路（必须 write/edit 落盘），
+        // 但"系统底座更新"属于强工具链路（必须 write/edit 落盘），
         // chatroom 是轻量模式（SystemLLMCaller + MemoryBridge），无法可靠执行 write/edit，
         // 因此此类意图强制跳过聊天室模式，走单 agent 工具流程。
         const characterConfigs = getBuiltinCharacterConfigs();
@@ -163,11 +218,21 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
           let complexityHint = "";
           let collaborativeTaskMode = false;
           let collaborativeContext: import("../chatroom/types.js").CollaborativeTaskContext | undefined;
+          
+          // 🎯 任务树意图二次检测（聊天室模式下的保护）
+          // 如果在聊天室模式下检测到任务树意图，强制切换到任务树协作
+          const hasExplicitTaskTreeIntent = 
+            /任务树|复杂任务|智能任务|任务分解|enqueue_task|长篇.*创作|大规模.*分析|多步骤.*任务|系统性.*处理|项目.*管理/.test(userMessage) ||
+            /(?:写|创作|生成|分析|整理|构建).*(?:万字|长篇|多章|多节|系列|全套|完整)/.test(userMessage) ||
+            /(?:启动|开始|执行|运行).*(?:任务树|复杂任务|大型项目)/.test(userMessage);
+
           try {
             let _crConfig;
             try { _crConfig = loadConfig(); } catch { /* 静默 */ }
             const complexityResult = await analyzeIntentComplexity(userMessage, _crConfig ?? undefined);
-            if (complexityResult.strategy === "force_decompose") {
+            
+            // 🚀 强制任务树模式：当有明确任务树意图时，不管复杂度如何都启用协作模式
+            if (hasExplicitTaskTreeIntent || complexityResult.strategy === "force_decompose") {
               // 高复杂度任务：触发聊天室协作模式（规划→执行→互检）
               collaborativeTaskMode = true;
               collaborativeContext = {
@@ -176,7 +241,9 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
                 agentId: ctx.agentId,
                 messageProvider: ctx.messageProvider,
                 config: _crConfig ?? undefined,
-                complexityReason: complexityResult.reason,
+                complexityReason: hasExplicitTaskTreeIntent 
+                  ? "检测到明确任务树意图，强制启用任务树协作模式"
+                  : complexityResult.reason,
               };
               // 从 config 中提取 provider/model
               if (_crConfig) {
@@ -188,6 +255,10 @@ export function registerPipelinePlugin(api: ClawdbotPluginApi): void {
               log.info(
                 `🔵 [Pipeline] 🤝 复杂任务检测 (complexity=${complexityResult.complexity}): ` +
                 `触发聊天室协作模式（规划→执行→互检）`,
+              );
+            } else if (hasExplicitTaskTreeIntent) {
+              log.info(
+                `🔵 [Pipeline] 🎯 明确任务树意图检测: 强制启用任务树协作模式（规划→执行→互检）`,
               );
             }
             // 中等复杂度：仍进入聊天室，但注入复杂度感知提示

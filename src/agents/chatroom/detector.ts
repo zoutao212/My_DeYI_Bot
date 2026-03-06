@@ -48,6 +48,25 @@ export function detectChatRoomIntent(
     };
   }
 
+  // ── 0.5. 任务树意图优先排除（新增） ──
+  // 当检测到明确的任务树/复杂任务意图时，优先跳过聊天室模式
+  // 确保多角色场景下的任务树功能不被误拦截
+  const taskTreePatterns = [
+    /任务树|复杂任务|智能任务|任务分解|enqueue_task/,
+    /(?:写|创作|生成|分析|整理|构建).*(?:万字|长篇|多章|多节|系列|全套|完整)/,
+    /(?:启动|开始|执行|运行).*(?:任务树|复杂任务|大型项目)/,
+    /长篇.*小说|万字.*创作|多章.*规划|系列.*写作/,
+    /大规模.*分析|系统性.*处理|项目.*管理/,
+  ];
+  
+  if (matchesAny(msg, taskTreePatterns)) {
+    return {
+      isChatRoomMode: false,
+      participants: [],
+      triggerType: "single",
+    };
+  }
+
   // ── 1. 互动模式检测（聊天室已开启时） ──
   if (activeSession) {
     const interactionMode = detectInteractionMode(msg);

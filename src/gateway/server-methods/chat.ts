@@ -38,6 +38,7 @@ import {
   resolveChatRunExpiresAtMs,
 } from "../chat-abort.js";
 import { abortChatRoomSession } from "../../agents/pipeline/register.js";
+import { globalAbortManager } from "../../agents/global-abort-manager.js"; // 🚨 Bug #3 修复: 全局中断管理器
 import { type ChatImageContent, parseMessageWithAttachments } from "../chat-attachments.js";
 import {
   ErrorCodes,
@@ -1217,6 +1218,10 @@ export const chatHandlers: GatewayRequestHandlers = {
     }
 
     if (stopCommand) {
+      // 🚨 Bug #3 修复: 优先使用全局中断管理器
+      const globalAbortResult = globalAbortManager.abortAll("stop command");
+      
+      // 同时调用原有逻辑（兜底）
       const res = abortChatRunsForSessionKey(
         {
           chatAbortControllers: context.chatAbortControllers,
@@ -1230,7 +1235,16 @@ export const chatHandlers: GatewayRequestHandlers = {
         },
         { sessionKey: p.sessionKey, stopReason: "stop" },
       );
-      respond(true, { ok: true, aborted: res.aborted, runIds: res.runIds });
+
+      // 尝试中断聊天室会话
+      abortChatRoomSession(p.sessionKey);
+
+      respond(true, { 
+        ok: true, 
+        aborted: res.aborted || globalAbortResult.tasks > 0,
+        runIds: res.runIds,
+        globalAbortResult // 🚨 Bug #3 修复: 返回全局中断结果
+      });
       return;
     }
 

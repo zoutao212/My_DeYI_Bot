@@ -157,6 +157,10 @@ export type FollowupRun = {
 
   /** 模型最大输出 token 数 */
   modelMaxOutputTokens?: number;
+
+  // 🚨 Bug #2 修复: 全局中断信号
+  /** 用于 /stop 命令能中断子任务的 AbortSignal */
+  abortSignal?: AbortSignal;
 };
 
 export type ResolveQueueSettingsParams = {

@@ -145,6 +145,17 @@ export async function runEmbeddedAttempt(
   const prevCwd = process.cwd();
   const runAbortController = new AbortController();
 
+  // 🚨 Bug #1 修复: LLM 请求超时熔断机制
+  const REQUEST_TIMEOUT_MS = 5 * 60 * 1000; // 5分钟超时
+  const timeoutHandle = setTimeout(() => {
+    if (!runAbortController.signal.aborted) {
+      log.warn(`🚨 LLM 请求超时(${REQUEST_TIMEOUT_MS}ms)，主动中断: runId=${params.runId}`);
+      const timeoutError = new Error("LLM request timeout");
+      timeoutError.name = "TimeoutError";
+      runAbortController.abort(timeoutError);
+    }
+  }, REQUEST_TIMEOUT_MS);
+
   log.debug(
     `embedded run start: runId=${params.runId} sessionId=${params.sessionId} provider=${params.provider} model=${params.modelId} thinking=${params.thinkLevel} messageChannel=${params.messageChannel ?? params.messageProvider ?? "unknown"}`,
   );
@@ -1631,6 +1642,7 @@ export async function runEmbeddedAttempt(
       } finally {
         clearTimeout(abortTimer);
         if (abortWarnTimer) clearTimeout(abortWarnTimer);
+        clearTimeout(timeoutHandle); // 🚨 Bug #1 修复: 清理超时定时器
         unsubscribe();
         clearActiveEmbeddedRun(params.sessionId, queueHandle);
         params.abortSignal?.removeEventListener?.("abort", onAbort);

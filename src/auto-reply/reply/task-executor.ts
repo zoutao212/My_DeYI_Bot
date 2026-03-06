@@ -224,6 +224,8 @@ export async function executeEmbeddedLLM(params: {
         sessionFile: effectiveSessionFile,
         workspaceDir: params.queued.run.workspaceDir,
         config: params.queued.run.config,
+        // 🚨 Bug #2 修复: 传递 abortSignal 到子任务
+        abortSignal: params.queued.abortSignal,
         // 子任务跳过 skills
         skillsSnapshot:
           Boolean(params.queued.subTaskId) && !params.queued.isRootTask && !params.queued.isNewRootTask

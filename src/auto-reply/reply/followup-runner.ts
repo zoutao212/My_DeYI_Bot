@@ -48,6 +48,7 @@ import { TaskRuntime } from "../../agents/intelligent-task-decomposition/task-ru
 import { TaskProgressReporter, getTaskProgressFromTree, formatDetailedProgress } from "../../agents/intelligent-task-decomposition/task-progress-reporter.js";
 import { estimateTokens, allocateBudget, truncateToTokenBudget, type BudgetRequest } from "../../agents/intelligent-task-decomposition/context-budget-manager.js";
 import { localGrepSearch, getDefaultMemoryDirs } from "../../memory/local-search.js";
+import { globalAbortManager } from "../../agents/global-abort-manager.js"; // 🚨 Bug #3 修复: 全局中断管理器
 import { searchNovelAssets, hasNovelAssets, formatNovelSnippetsForPrompt } from "../../memory/novel-assets-searcher.js";
 
 const TOOL_PROGRESS_ENABLED = process.env.CLAWDBOT_TASK_PROGRESS_TOOL_VERBOSE !== "0";
@@ -659,6 +660,12 @@ export function createFollowupRunner(params: {
                     ? { action: "decompose", reason: "post_process_decompose" }
                     : { action: "accept" },
             );
+            
+            // 🚨 Bug #3 修复: 任务成功完成时从全局管理器注销
+            if (queued.subTaskId && (postResult.decision === "continue" || postResult.decision === "adjust")) {
+              globalAbortManager.unregisterTask(queued.subTaskId);
+            }
+            
             if (postResult.roundCompleted && postResult.completedRoundId) {
               console.log(`[followup-runner] 🏁 V8 P2: Round completed via system strategy: ${postResult.completedRoundId}`);
               taskTree = (await orchestrator.loadTaskTree(sessionId)) ?? taskTree;
@@ -1829,6 +1836,12 @@ export function createFollowupRunner(params: {
             }
           }
           clearTracking(subTask.id);
+          
+          // 🚨 Bug #3 修复: 任务完成时从全局管理器注销
+          if (queued.subTaskId) {
+            globalAbortManager.unregisterTask(queued.subTaskId);
+          }
+          
           const failDecision = await orchestrator.onTaskFailed(taskTree, subTask, err);
 
           if (failDecision.needsRequeue) {
