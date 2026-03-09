@@ -12,6 +12,7 @@ import { findParallelGroups } from "../../../agents/intelligent-task-decompositi
 import { runWithTracking } from "../../../agents/intelligent-task-decomposition/file-tracker.js";
 import { getGlobalOrchestrator } from "../../../agents/tools/enqueue-task-tool.js";
 import { flushQueueSnapshot, scheduleSaveQueueSnapshot, writeDeadlockDiagnostic } from "./persistence.js";
+import { buildChildFollowupRun } from "../followup-lifecycle.js";
 
 // ☆新 V3: 并行并发上限，防止同时发射过多 LLM 请求导致 rate limiting 或 token 预算瞬间耗尽
 // 🔧 P21 修复：从 3 降到 2，trace 证明 3 并发就触发上游 429
@@ -77,7 +78,7 @@ export function scheduleFollowupDrain(
               if (sessionId) {
                 const taskTree = await orchestrator.loadTaskTree(sessionId);
                 if (taskTree) {
-                  const schedule = orchestrator.getNextExecutableTasksForDrain(
+                  const schedule = await orchestrator.getNextExecutableTasksForDrain(
                     taskTree,
                     nextPeek.rootTaskId,
                   );
@@ -180,7 +181,7 @@ export function scheduleFollowupDrain(
                           try {
                             const freshTree = await orchestrator.loadTaskTree(sessionId);
                             if (freshTree) {
-                              const freshSchedule = orchestrator.getNextExecutableTasksForDrain(freshTree, nextPeek.rootTaskId);
+                              const freshSchedule = await orchestrator.getNextExecutableTasksForDrain(freshTree, nextPeek.rootTaskId);
                               if (freshSchedule.action === "execute" && freshSchedule.tasks.length > 0) {
                                 // 任务树已更新，有可执行任务了，重置计数器继续正常调度
                                 console.log(`[drain] ✅ Safety valve: fresh tree check found executable tasks, resuming normal scheduling`);
@@ -281,23 +282,7 @@ export function scheduleFollowupDrain(
                       // 🔧 防御性兜底：从任务树构造 FollowupRun 并直接执行
                       if (targetTask && nextPeek) {
                         console.warn(`[drain] ⚠️ Tree says execute ${targetTask.id} but no matching FollowupRun, auto-constructing from tree`);
-                        const syntheticRun: FollowupRun = {
-                          prompt: targetTask.prompt,
-                          summaryLine: targetTask.summary,
-                          enqueuedAt: Date.now(),
-                          run: nextPeek.run,
-                          isQueueTask: true,
-                          isRootTask: false,
-                          isNewRootTask: false,
-                          taskDepth: targetTask.depth ?? 0,
-                          subTaskId: targetTask.id,
-                          rootTaskId: targetTask.rootTaskId ?? nextPeek.rootTaskId,
-                          originatingChannel: nextPeek.originatingChannel,
-                          originatingTo: nextPeek.originatingTo,
-                          originatingAccountId: nextPeek.originatingAccountId,
-                          originatingThreadId: nextPeek.originatingThreadId,
-                          originatingChatType: nextPeek.originatingChatType,
-                        };
+                        const syntheticRun = buildChildFollowupRun(nextPeek, targetTask);
                         // 🔧 问题 V 修复：synthetic run 也用 runWithTracking 包裹
                         await runWithTracking(targetTask.id, () => runFollowup(syntheticRun));
                         console.log(`[drain] ✅ Synthetic run done: ${targetTask.summary}, remaining=${queue.items.length}`);
@@ -531,24 +516,15 @@ export function scheduleFollowupDrain(
                 r => r.status === "active" || !r.status,
               );
               for (const round of activeRounds) {
-                const schedule = orchestrator.getNextExecutableTasksForDrain(taskTree, round.id);
+                const schedule = await orchestrator.getNextExecutableTasksForDrain(taskTree, round.id);
                 if (schedule.action === "execute" && schedule.tasks && schedule.tasks.length > 0) {
                   console.log(
                     `[drain] 🔧 P16: 发现 ${schedule.tasks.length} 个孤儿 pending 任务 (Round ${round.id})，构造 synthetic FollowupRun 入队`,
                   );
                   for (const orphanTask of schedule.tasks) {
-                    const syntheticRun: FollowupRun = {
-                      prompt: orphanTask.prompt,
-                      summaryLine: orphanTask.summary,
-                      enqueuedAt: Date.now(),
-                      run: peekForRecovery.run,
-                      isQueueTask: true,
-                      isRootTask: false,
-                      isNewRootTask: false,
-                      taskDepth: orphanTask.depth ?? 0,
-                      subTaskId: orphanTask.id,
+                    const syntheticRun = buildChildFollowupRun(peekForRecovery, orphanTask, {
                       rootTaskId: orphanTask.rootTaskId ?? round.id,
-                    };
+                    });
                     queue.items.push(syntheticRun);
                   }
                   if (schedule.treeModified) {

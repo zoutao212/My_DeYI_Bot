@@ -42,6 +42,7 @@ import { createReplyToModeFilterForChannel, resolveReplyToMode } from "./reply-t
 import { persistSessionUsageUpdate } from "./session-usage.js";
 import { incrementCompactionCount } from "./session-updates.js";
 import { getActiveContext } from "../../agents/intelligent-task-decomposition/intent-complexity-analyzer.js";
+import { createExecutionContext } from "../../agents/intelligent-task-decomposition/execution-context.js";
 import type { TypingController } from "./typing.js";
 import { createTypingSignaler } from "./typing-mode.js";
 import { emitDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
@@ -313,6 +314,11 @@ export async function runReplyAgent(params: {
     isRootTask: true,  // 🆕 标记为根任务
     modelContextWindow: ctxWindowInfo.tokens,
     modelMaxOutputTokens: 4096,  // 子任务的默认 maxTokens（runEmbeddedPiAgent 内部也默认 4096-8192）
+    executionContext: createExecutionContext({
+      role: "user",
+      roundId: followupRun.rootTaskId ?? "",
+      depth: followupRun.taskDepth ?? 0,
+    }),
   }, agentRunContextId);
 
   activeSessionEntry = await runMemoryFlushIfNeeded({

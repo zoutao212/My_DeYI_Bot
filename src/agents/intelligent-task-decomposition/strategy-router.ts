@@ -119,6 +119,35 @@ const DELIVER_PATTERNS = [
   /交付.*(?:给|到|至)/,
 ];
 
+/**
+ * 系统策略阻断模式
+ *
+ * 命中这些模式说明任务包含真实执行步骤，不能用“系统自动完成”占位跳过。
+ */
+const SYSTEM_STRATEGY_BLOCKERS = [
+  /(?:生成|创建|编写|撰写|读取|搜索|查找|校验|验证|检查|统计|计算|整理|构建|分析|删除|遍历|列出|汇总到)/,
+  /(?:generate|create|write|read|search|find|validate|check|calculate|organize|build|analy[sz]e|delete|scan|list|aggregate|summarize|report)/i,
+  /\b\d+\.\s+/,
+  /(?:step|步骤)\s*\d+/i,
+];
+
+function shouldForceLLMForSystemStrategy(
+  subTask: SubTask,
+  strategy: Extract<ExecutionStrategy, "system_merge" | "system_deliver">,
+): boolean {
+  const text = `${subTask.prompt ?? ""}\n${subTask.summary ?? ""}`;
+  const hasBlocker = SYSTEM_STRATEGY_BLOCKERS.some((pattern) => pattern.test(text));
+  if (!hasBlocker) {
+    return false;
+  }
+
+  console.warn(
+    `[strategy-router] ⚠️ ${strategy} 被阻断，任务包含真实执行步骤，回退 LLM: ` +
+    `"${subTask.summary?.substring(0, 60) ?? subTask.id}"`,
+  );
+  return true;
+}
+
 // ────────────────────────────────────────────────────────────
 // 核心路由逻辑
 // ────────────────────────────────────────────────────────────
@@ -138,15 +167,27 @@ export function routeStrategy(subTask: SubTask): ExecutionStrategy {
   if (subTask.preferredStrategy) {
     const explicit = subTask.preferredStrategy as ExecutionStrategy;
     if (["llm", "llm_light", "system_merge", "system_deliver"].includes(explicit)) {
+      if (
+        (explicit === "system_merge" || explicit === "system_deliver") &&
+        shouldForceLLMForSystemStrategy(subTask, explicit)
+      ) {
+        return "llm";
+      }
       return explicit;
     }
   }
 
   // 2. 基于 taskType 路由
   if (subTask.taskType === "merge") {
+    if (shouldForceLLMForSystemStrategy(subTask, "system_merge")) {
+      return "llm";
+    }
     return "system_merge";
   }
   if (subTask.taskType === "delivery") {
+    if (shouldForceLLMForSystemStrategy(subTask, "system_deliver")) {
+      return "llm";
+    }
     return "system_deliver";
   }
 
@@ -158,6 +199,9 @@ export function routeStrategy(subTask: SubTask): ExecutionStrategy {
 
     for (const pattern of MERGE_PATTERNS) {
       if (pattern.test(text)) {
+        if (shouldForceLLMForSystemStrategy(subTask, "system_merge")) {
+          return "llm";
+        }
         console.log(`[strategy-router] 📋 关键词匹配到合并策略: "${subTask.summary?.substring(0, 40)}"`);
         return "system_merge";
       }
@@ -165,6 +209,9 @@ export function routeStrategy(subTask: SubTask): ExecutionStrategy {
 
     for (const pattern of DELIVER_PATTERNS) {
       if (pattern.test(text)) {
+        if (shouldForceLLMForSystemStrategy(subTask, "system_deliver")) {
+          return "llm";
+        }
         console.log(`[strategy-router] 📬 关键词匹配到交付策略: "${subTask.summary?.substring(0, 40)}"`);
         return "system_deliver";
       }

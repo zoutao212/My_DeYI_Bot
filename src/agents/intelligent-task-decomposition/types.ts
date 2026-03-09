@@ -134,6 +134,16 @@ export interface Round {
   /** 该轮次的质量评审摘要 */
   qualityReview?: RoundQualityReview;
 
+  /** 交付状态（用于 round 完成交付幂等控制） */
+  delivery?: {
+    /** 首次准备交付的时间 */
+    preparedAt?: number;
+    /** 实际完成交付的时间 */
+    deliveredAt?: number;
+    /** 最近一次合并产物路径 */
+    mergedFilePath?: string;
+  };
+
   /** 熔断器状态（Phase 7 扩展） */
   circuitBreaker?: {
     /** 累计失败次数 */
@@ -1259,6 +1269,8 @@ export interface RoundCompletedResult {
   mergedFilePath?: string;
   /** 交付报告 Markdown */
   deliveryReportMarkdown?: string;
+  /** 是否已经完成过交付（幂等短路） */
+  alreadyDelivered?: boolean;
   /** 归档是否成功 */
   archiveSuccess: boolean;
   /** Round 最终状态 */

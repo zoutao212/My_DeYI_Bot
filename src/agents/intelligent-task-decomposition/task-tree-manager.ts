@@ -10,6 +10,22 @@ import crypto from "node:crypto";
 import type { TaskTree, SubTask, Checkpoint, ValidationResult } from "./types.js";
 import { TaskEventLogger } from "./task-event-logger.js";
 
+export type SubTaskPatch = {
+  status?: SubTask["status"];
+  completedAt?: number | null;
+  lastActiveAt?: number | null;
+  output?: string | null;
+  error?: string | null;
+  retryCount?: number;
+  executionRole?: SubTask["executionRole"];
+  metadata?: SubTask["metadata"] | null;
+};
+
+export type SubTaskBatchPatch = {
+  subTaskId: string;
+  patch: SubTaskPatch;
+};
+
 /**
  * 任务树管理器
  */
@@ -431,14 +447,169 @@ export class TaskTreeManager {
     subTaskId: string,
     status: SubTask["status"],
   ): Promise<void> {
+    await this.patchSubTask(taskTree, subTaskId, { status });
+  }
+
+  /**
+   * 原子化更新子任务
+   *
+   * 把状态、输出、错误、重试次数、metadata 等字段在一次 save 中落盘，
+   * 避免 updateSubTaskStatus + 手工赋值 + save 的两阶段写入窗口。
+   */
+  async patchSubTask(
+    taskTree: TaskTree,
+    subTaskId: string,
+    patch: SubTaskPatch,
+  ): Promise<SubTask> {
     const subTask = taskTree.subTasks.find((t) => t.id === subTaskId);
     if (!subTask) {
       throw new Error(`SubTask not found: ${subTaskId}`);
     }
 
-    subTask.status = status;
-    if (status === "completed") {
+    await this.applySubTaskPatch(taskTree, subTask, subTaskId, patch);
+    this.refreshTaskTreeStatus(taskTree, subTask);
+    await this.save(taskTree);
+    return subTask;
+  }
+
+  async patchSubTasks(
+    taskTree: TaskTree,
+    patches: SubTaskBatchPatch[],
+  ): Promise<SubTask[]> {
+    const updated: SubTask[] = [];
+    for (const entry of patches) {
+      const subTask = taskTree.subTasks.find((t) => t.id === entry.subTaskId);
+      if (!subTask) {
+        throw new Error(`SubTask not found: ${entry.subTaskId}`);
+      }
+      await this.applySubTaskPatch(taskTree, subTask, entry.subTaskId, entry.patch);
+      this.refreshTaskTreeStatus(taskTree, subTask);
+      updated.push(subTask);
+    }
+    if (updated.length > 0) {
+      await this.save(taskTree);
+    }
+    return updated;
+  }
+
+  async completeSubTask(
+    taskTree: TaskTree,
+    subTaskId: string,
+    patch: Omit<SubTaskPatch, "status"> = {},
+  ): Promise<SubTask> {
+    return this.patchSubTask(taskTree, subTaskId, {
+      ...patch,
+      status: "completed",
+      completedAt: patch.completedAt ?? Date.now(),
+    });
+  }
+
+  async failSubTask(
+    taskTree: TaskTree,
+    subTaskId: string,
+    patch: Omit<SubTaskPatch, "status"> = {},
+  ): Promise<SubTask> {
+    return this.patchSubTask(taskTree, subTaskId, {
+      ...patch,
+      status: "failed",
+    });
+  }
+
+  async requeueSubTask(
+    taskTree: TaskTree,
+    subTaskId: string,
+    patch: Omit<SubTaskPatch, "status"> = {},
+  ): Promise<SubTask> {
+    return this.patchSubTask(taskTree, subTaskId, {
+      ...patch,
+      status: "pending",
+      completedAt: "completedAt" in patch ? patch.completedAt : null,
+    });
+  }
+
+  async skipSubTask(
+    taskTree: TaskTree,
+    subTaskId: string,
+    patch: Omit<SubTaskPatch, "status"> = {},
+  ): Promise<SubTask> {
+    return this.patchSubTask(taskTree, subTaskId, {
+      ...patch,
+      status: "skipped",
+      completedAt: patch.completedAt ?? Date.now(),
+    });
+  }
+
+  private async applySubTaskPatch(
+    taskTree: TaskTree,
+    subTask: SubTask,
+    subTaskId: string,
+    patch: SubTaskPatch,
+  ): Promise<void> {
+    const nextStatus = patch.status ?? subTask.status;
+
+    if (patch.status !== undefined) {
+      subTask.status = patch.status;
+    }
+    if (patch.retryCount !== undefined) {
+      subTask.retryCount = patch.retryCount;
+    }
+    if ("output" in patch) {
+      if (patch.output == null) {
+        delete subTask.output;
+      } else {
+        subTask.output = patch.output;
+      }
+    }
+    if ("error" in patch) {
+      if (patch.error == null) {
+        delete subTask.error;
+      } else {
+        subTask.error = patch.error;
+      }
+    }
+    if ("metadata" in patch) {
+      if (patch.metadata == null) {
+        delete subTask.metadata;
+      } else {
+        subTask.metadata = patch.metadata;
+      }
+    }
+    if ("completedAt" in patch) {
+      if (patch.completedAt == null) {
+        delete subTask.completedAt;
+      } else {
+        subTask.completedAt = patch.completedAt;
+      }
+    } else if (patch.status === "completed") {
       subTask.completedAt = Date.now();
+    }
+    if ("lastActiveAt" in patch) {
+      if (patch.lastActiveAt == null) {
+        delete subTask.lastActiveAt;
+      } else {
+        subTask.lastActiveAt = patch.lastActiveAt;
+      }
+    }
+    if ("executionRole" in patch) {
+      if (patch.executionRole == null) {
+        delete subTask.executionRole;
+      } else {
+        subTask.executionRole = patch.executionRole;
+      }
+    }
+
+    await this.logSubTaskStatusChange(taskTree, subTask, subTaskId, nextStatus, patch.status !== undefined);
+  }
+
+  private async logSubTaskStatusChange(
+    taskTree: TaskTree,
+    subTask: SubTask,
+    subTaskId: string,
+    status: SubTask["status"],
+    shouldLog: boolean,
+  ): Promise<void> {
+    if (!shouldLog) {
+      return;
     }
 
     // 🆕 方案C C1：旁路事件流（append-only）
@@ -454,7 +625,9 @@ export class TaskTreeManager {
     } catch {
       // ignore
     }
+  }
 
+  private refreshTaskTreeStatus(taskTree: TaskTree, subTask: SubTask): void {
     // 🆕 用 rootTaskId 作用域更新任务树状态（避免多轮累积导致误判）
     // 只看当前子任务所属轮次的子任务，排除 isSummaryTask 占位符
     const roundId = subTask.rootTaskId;
@@ -478,8 +651,6 @@ export class TaskTreeManager {
     } else if (anyActive || anyPending) {
       taskTree.status = "active";
     }
-
-    await this.save(taskTree);
   }
 
   /**

@@ -18,8 +18,11 @@ import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import type { FollowupRun } from "./queue.js";
 import { finalizeWithFollowup } from "./agent-runner-helpers.js";
-import { enqueueFollowupRun } from "./queue/enqueue.js";
-import { resolveQueueSettings } from "./queue/settings.js";
+import {
+  deliverCompletedRound,
+  enqueuePendingSubTasks,
+  mergeV2PostProcessResult,
+} from "./followup-lifecycle.js";
 import {
   applyReplyThreading,
   filterMessagingToolDuplicates,
@@ -42,7 +45,12 @@ import { sendFallbackFile } from "./send-fallback-file.js";
 import { collectTrackedFiles, clearTracking } from "../../agents/intelligent-task-decomposition/file-tracker.js";
 import { deriveExecutionRole, createExecutionContext } from "../../agents/intelligent-task-decomposition/execution-context.js";
 import { getPrompts } from "../../agents/intelligent-task-decomposition/prompts-loader.js";
-import type { SubTask, TaskTree, ExecutionContext } from "../../agents/intelligent-task-decomposition/types.js";
+import type {
+  ExecutionContext,
+  PostProcessResult,
+  SubTask,
+  TaskTree,
+} from "../../agents/intelligent-task-decomposition/types.js";
 import type { Orchestrator } from "../../agents/intelligent-task-decomposition/orchestrator.js";
 import { TaskRuntime } from "../../agents/intelligent-task-decomposition/task-runtime.js";
 import { TaskProgressReporter, getTaskProgressFromTree, formatDetailedProgress } from "../../agents/intelligent-task-decomposition/task-progress-reporter.js";
@@ -276,37 +284,6 @@ function validateSubTaskOutput(
 }
 
 // isRetryableError 已移至 Orchestrator.isRetryableError()（统一错误分类入口）
-
-/**
- * 🔧 P12: FollowupRun 工厂函数
- * 
- * 从 queued（当前执行的 FollowupRun）和 subTask 构造新的 FollowupRun。
- * 替代 followup-runner 和 drain.ts 中 7 处重复的手动构造代码。
- */
-function buildFollowupRun(
-  queued: FollowupRun,
-  subTask: SubTask,
-  overrides?: Partial<FollowupRun>,
-): FollowupRun {
-  return {
-    prompt: subTask.prompt,
-    summaryLine: subTask.summary,
-    enqueuedAt: Date.now(),
-    run: queued.run,
-    isQueueTask: true,
-    isRootTask: false,
-    isNewRootTask: false,
-    taskDepth: subTask.depth ?? queued.taskDepth ?? 0,
-    subTaskId: subTask.id,
-    rootTaskId: subTask.rootTaskId ?? queued.rootTaskId,
-    originatingChannel: queued.originatingChannel,
-    originatingTo: queued.originatingTo,
-    originatingAccountId: queued.originatingAccountId,
-    originatingThreadId: queued.originatingThreadId,
-    originatingChatType: queued.originatingChatType,
-    ...overrides,
-  };
-}
 
 /**
  * 🆕 V2 Phase 4: 兜底落盘（提取自主循环，减少嵌套深度）
@@ -575,7 +552,7 @@ export function createFollowupRunner(params: {
         });
         progressReporter.onTaskStart(subTask.summary ?? queued.summaryLine ?? "子任务");
 
-        const startDecision = orchestrator.onTaskStarting(taskTree, subTask, {
+        const startDecision = await orchestrator.onTaskStarting(taskTree, subTask, {
           isQueueTask: queued.isQueueTask,
           isRootTask: queued.isRootTask ?? queued.isNewRootTask,
           isNewRootTask: queued.isNewRootTask,
@@ -601,26 +578,23 @@ export function createFollowupRunner(params: {
               // 修复前：只调用 finalizeWithFollowup 触发 drain，但队列中没有对应的 FollowupRun
               // 导致分解后的子任务永远不会被执行
               if (queued.run.sessionKey) {
+                enqueuePendingSubTasks({
+                  queued,
+                  taskTree,
+                  taskIds: decomposed.map((newSubTask) => newSubTask.id),
+                  logPrefix: "[followup-runner] 🆕 分解子任务已入队",
+                });
                 for (const newSubTask of decomposed) {
-                  if (newSubTask.status === "pending") {
-                    const decompFollowupRun = buildFollowupRun(queued, newSubTask);
-                    const resolvedQueue = resolveQueueSettings({
-                      cfg: queued.run.config ?? ({} as any),
-                      inlineMode: "followup",
-                    });
-                    enqueueFollowupRun(queued.run.sessionKey, decompFollowupRun, resolvedQueue, "none");
-                    console.log(`[followup-runner] 🆕 分解子任务已入队: ${newSubTask.id} (${newSubTask.summary})`);
-
-                    void taskRuntime.recordJudge(
-                      {
-                        sessionId,
-                        rootTaskId: queued.rootTaskId,
-                        taskTree,
-                        subTask: newSubTask,
-                      },
-                      { action: "accept" },
-                    );
-                  }
+                  if (newSubTask.status !== "pending") continue;
+                  void taskRuntime.recordJudge(
+                    {
+                      sessionId,
+                      rootTaskId: queued.rootTaskId,
+                      taskTree,
+                      subTask: newSubTask,
+                    },
+                    { action: "accept" },
+                  );
                 }
                 finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
               }
@@ -631,7 +605,6 @@ export function createFollowupRunner(params: {
           }
         }
 
-        await orchestrator.saveTaskTree(taskTree);
       }
 
       // ── V8 P2: 执行策略路由 ──
@@ -654,7 +627,7 @@ export function createFollowupRunner(params: {
           await orchestrator.updateSubTaskStatus(taskTree, subTask.id, sysResult.success ? "completed" : "failed");
           
           // 🆕 ToolCall 2.0 增强执行检测和处理
-          let v2EnhancedResult = null;
+          let v2EnhancedResult: PostProcessResult | null = null;
           if (subTask.metadata?.toolCallV2Config?.enabled && subTask.metadata?.dynamicExecutionStrategy) {
             try {
               console.log(`[followup-runner] 🚀 检测到子任务 ${subTask.id} 配置了 ToolCall 2.0，开始增强执行`);
@@ -704,26 +677,10 @@ export function createFollowupRunner(params: {
           
           // 进入统一后处理（质检 + 轮次完成检查）
           try {
-            const postResult = await orchestrator.onTaskCompleted(taskTree, subTask, queued.rootTaskId);
-            
-            // 🆕 合并 V2 增强执行结果
-            if (v2EnhancedResult) {
-              // 合并发现和建议
-              postResult.findings = [...postResult.findings, ...v2EnhancedResult.findings];
-              postResult.suggestions = [...postResult.suggestions, ...v2EnhancedResult.suggestions];
-              
-              // 合并新任务ID
-              if (v2EnhancedResult.decomposedTaskIds && v2EnhancedResult.decomposedTaskIds.length > 0) {
-                if (!postResult.decomposedTaskIds) postResult.decomposedTaskIds = [];
-                postResult.decomposedTaskIds.push(...v2EnhancedResult.decomposedTaskIds);
-              }
-              
-              // 如果 V2 增强执行失败，可能需要调整决策
-              if (v2EnhancedResult.status === "pending" && postResult.decision === "continue") {
-                postResult.decision = "restart";
-                postResult.status = "pending";
-              }
-            }
+            const postResult = mergeV2PostProcessResult(
+              await orchestrator.onTaskCompleted(taskTree, subTask, queued.rootTaskId),
+              v2EnhancedResult,
+            );
 
             await taskRuntime.recordJudge(
               {
@@ -737,29 +694,97 @@ export function createFollowupRunner(params: {
                 : postResult.markedFailed
                   ? { action: "fail", reason: "post_process_overthrow" }
                   : postResult.decision === "decompose"
-                    ? { action: "decompose", reason: "post_process_decompose" }
+                  ? { action: "decompose", reason: "post_process_decompose" }
                     : { action: "accept" },
             );
-            
+
+            if (postResult.needsRequeue) {
+              console.log(
+                `[followup-runner] 🔄 系统策略任务 ${subTask.id} 质检不通过，重新入队: ` +
+                `${JSON.stringify(postResult.findings)}`,
+              );
+              await requeueAndContinue({
+                reason: "post_process_restart",
+                queued,
+                subTask,
+                taskTree,
+                sessionId,
+                taskRuntime,
+                createRunner: () => createFollowupRunner(params),
+              });
+              return;
+            }
+
+            if (postResult.decision === "decompose" && postResult.decomposedTaskIds && postResult.decomposedTaskIds.length > 0) {
+              enqueuePendingSubTasks({
+                queued,
+                taskTree,
+                taskIds: postResult.decomposedTaskIds,
+                logPrefix: "[followup-runner] 🆕 system strategy decompose 子任务已入队",
+              });
+              if (queued.run.sessionKey) {
+                finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
+              }
+              return;
+            }
+
+            if (postResult.decision !== "decompose" && postResult.decomposedTaskIds && postResult.decomposedTaskIds.length > 0) {
+              enqueuePendingSubTasks({
+                queued,
+                taskTree,
+                taskIds: postResult.decomposedTaskIds,
+                logPrefix: "[followup-runner] 🚀 system strategy 后续任务已入队",
+              });
+            }
+
+            if (postResult.newTaskIds && postResult.newTaskIds.length > 0) {
+              enqueuePendingSubTasks({
+                queued,
+                taskTree,
+                taskIds: postResult.newTaskIds,
+                logPrefix: "[followup-runner] 🆕 system strategy adjust 新增子任务已入队",
+              });
+            }
+
+            if (postResult.markedFailed) {
+              console.error(
+                `[followup-runner] ❌ 系统策略任务 ${subTask.id} 质量严重不通过: ` +
+                `${JSON.stringify(postResult.findings)}`,
+              );
+              if (queued.subTaskId) {
+                globalAbortManager.unregisterTask(queued.subTaskId);
+              }
+              if (queued.run.sessionKey) {
+                finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
+              }
+              return;
+            }
+
             // 🚨 Bug #3 修复: 任务成功完成时从全局管理器注销
             if (queued.subTaskId && (postResult.decision === "continue" || postResult.decision === "adjust")) {
               globalAbortManager.unregisterTask(queued.subTaskId);
             }
-            
+
             if (postResult.roundCompleted && postResult.completedRoundId) {
               console.log(`[followup-runner] 🏁 V8 P2: Round completed via system strategy: ${postResult.completedRoundId}`);
-              taskTree = (await orchestrator.loadTaskTree(sessionId)) ?? taskTree;
-              const roundResult = await orchestrator.onRoundCompleted(taskTree, postResult.completedRoundId);
-              if (roundResult.mergedFilePath) {
-                const mergedSendResult = await sendFallbackFile({ filePath: roundResult.mergedFilePath, caption: "📝 完整输出（子任务合并）", queued });
-                if (!mergedSendResult.ok) {
-                  await sendFollowupPayloads([{ text: `📝 子任务输出已合并保存到：\n${roundResult.mergedFilePath}` }], queued);
-                }
+              const refreshedTaskTree = (await orchestrator.loadTaskTree(sessionId)) ?? taskTree;
+              if (!refreshedTaskTree) {
+                throw new Error(`Round completed but task tree missing: ${postResult.completedRoundId}`);
               }
-              if (roundResult.deliveryReportMarkdown) {
-                await sendFollowupPayloads([{ text: roundResult.deliveryReportMarkdown }], queued);
-              }
-              archiveRoundMemory(orchestrator, taskTree, postResult.completedRoundId, queued, sessionId);
+              taskTree = refreshedTaskTree;
+              const roundResult = await orchestrator.onRoundCompleted(refreshedTaskTree, postResult.completedRoundId);
+              await deliverCompletedRound({
+                queued,
+                taskTree: refreshedTaskTree,
+                completedRoundId: postResult.completedRoundId,
+                roundResult,
+                sendFollowupPayloads,
+                onArchive: () => archiveRoundMemory(orchestrator, refreshedTaskTree, postResult.completedRoundId!, queued, sessionId),
+                onDelivered: () => orchestrator.markRoundDeliveryCompleted(refreshedTaskTree, postResult.completedRoundId!, {
+                  mergedFilePath: roundResult.mergedFilePath,
+                }),
+                logPrefix: "[followup-runner]",
+              });
             }
           } catch (ppErr) {
             console.warn(`[followup-runner] ⚠️ V8 P2: 系统策略后处理异常（不阻塞）: ${ppErr}`);
@@ -1300,10 +1325,11 @@ export function createFollowupRunner(params: {
                 },
               );
 
-              subTask.retryCount = (subTask.retryCount ?? 0) + 1;
-              subTask.status = "pending";
-              subTask.error = `AttemptOutcome(${ao.kind}): ${ao.details?.message ?? ""}`.trim();
-              await orchestrator.saveTaskTree(taskTree);
+              await orchestrator.requeueSubTask(taskTree, subTask.id, {
+                retryCount: (subTask.retryCount ?? 0) + 1,
+                error: `AttemptOutcome(${ao.kind}): ${ao.details?.message ?? ""}`.trim(),
+                metadata: subTask.metadata,
+              });
 
               await requeueAndContinue({
                 reason: judgeReason,
@@ -1349,12 +1375,14 @@ export function createFollowupRunner(params: {
             console.warn(
               `[followup-runner] ⚠️ API 错误检测(${localExecResult.apiErrorSource ?? "unknown"}): ${errorSummary}`,
             );
-            subTask.retryCount = (subTask.retryCount ?? 0) + 1;
-            const willRetryApiError = subTask.retryCount < 3;
+            const nextRetryCount = (subTask.retryCount ?? 0) + 1;
+            const willRetryApiError = nextRetryCount < 3;
             if (willRetryApiError) {
-              subTask.status = "pending";
-              subTask.error = `API 错误(${localExecResult.apiErrorSource ?? "unknown"}): ${errorSummary}`;
-              await orchestrator.saveTaskTree(taskTree);
+              await orchestrator.requeueSubTask(taskTree, subTask.id, {
+                retryCount: nextRetryCount,
+                error: `API 错误(${localExecResult.apiErrorSource ?? "unknown"}): ${errorSummary}`,
+                metadata: subTask.metadata,
+              });
               await taskRuntime.recordJudge(
                 {
                   sessionId,
@@ -1376,9 +1404,11 @@ export function createFollowupRunner(params: {
               });
               return;
             }
-            subTask.status = "failed";
-            subTask.error = `API 错误（重试耗尽）(${localExecResult.apiErrorSource ?? "unknown"}): ${errorSummary}`;
-            await orchestrator.saveTaskTree(taskTree);
+            await orchestrator.failSubTask(taskTree, subTask.id, {
+              retryCount: nextRetryCount,
+              error: `API 错误（重试耗尽）(${localExecResult.apiErrorSource ?? "unknown"}): ${errorSummary}`,
+              metadata: subTask.metadata,
+            });
             if (queued.run.sessionKey) {
               finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
             }
@@ -1418,7 +1448,7 @@ export function createFollowupRunner(params: {
               `[followup-runner] ⚠️ OutputValidator 拦截: ${validation.failureCode} — ${validation.failureReason}`,
             );
             subTask.output = localExecResult.outputText;
-            subTask.retryCount = (subTask.retryCount ?? 0) + 1;
+            const nextRetryCount = (subTask.retryCount ?? 0) + 1;
 
             // V8 P3: 记录质量经验（OutputValidator 拦截）
             import("../../agents/intelligent-task-decomposition/experience-pool.js").then(ep =>
@@ -1443,7 +1473,7 @@ export function createFollowupRunner(params: {
             // 第二次 save 的 pending 被磁盘的 failed 静默覆盖。
             // 导致重试入队后 drain 的 isRoundCompleted 看到 failed → 轮次误判完成 → 重试被丢弃。
             // 修复：消除双保存，根据重试决策设置最终状态后只保存一次。
-            const willRetry = validation.suggestedAction === "retry" && subTask.retryCount < 3;
+            const willRetry = validation.suggestedAction === "retry" && nextRetryCount < 3;
 
             if (willRetry) {
               // 🔧 P35 修复：hallucinated_tool_calls 重试时主动标记 provider 降级
@@ -1463,11 +1493,14 @@ export function createFollowupRunner(params: {
               }
 
               // P92: 直接设置 pending 并保存（不经过 failed 中间状态）
-              subTask.status = "pending";
-              subTask.error = `OutputValidator: ${validation.failureReason}`;
-              await orchestrator.saveTaskTree(taskTree);
+              await orchestrator.requeueSubTask(taskTree, subTask.id, {
+                output: subTask.output,
+                retryCount: nextRetryCount,
+                error: `OutputValidator: ${validation.failureReason}`,
+                metadata: subTask.metadata,
+              });
               console.log(
-                `[followup-runner] 🔄 OutputValidator 建议重试 (${subTask.retryCount}/3)`,
+                `[followup-runner] 🔄 OutputValidator 建议重试 (${nextRetryCount}/3)`,
               );
               await requeueAndContinue({
                 reason: judged.reason,
@@ -1482,15 +1515,21 @@ export function createFollowupRunner(params: {
             }
 
             // 不重试：标记失败并保存
-            subTask.status = "failed";
-            subTask.error = `OutputValidator: ${validation.failureReason}`;
-            await orchestrator.saveTaskTree(taskTree);
+            await orchestrator.failSubTask(taskTree, subTask.id, {
+              output: subTask.output,
+              retryCount: nextRetryCount,
+              error: `OutputValidator: ${validation.failureReason}`,
+              metadata: subTask.metadata,
+            });
 
             // 🔧 P105: OutputValidator 最终失败后检查轮次完成
             // 根因：OutputValidator return 跳过 postProcessSubTaskCompletion，
             // 当轮次中所有子任务都通过此路径失败时（如 PROHIBITED_CONTENT），
             // 没有任何代码检查 isRoundCompleted → 轮次永远 stuck "active"。
             const ovFailRoundId = subTask.rootTaskId ?? queued.rootTaskId;
+            if (ovFailRoundId) {
+              await orchestrator.prepareRoundCompletion(taskTree, ovFailRoundId);
+            }
             if (ovFailRoundId && orchestrator.isRoundCompleted(taskTree, ovFailRoundId)) {
               const ovRound = taskTree.rounds?.find((r: any) => r.id === ovFailRoundId);
               if (ovRound && ovRound.status !== "completed" && ovRound.status !== "failed") {
@@ -1617,7 +1656,7 @@ export function createFollowupRunner(params: {
           await orchestrator.updateSubTaskStatus(taskTree, subTask.id, "completed");
           
           // 🆕 ToolCall 2.0 增强执行检测和处理（第二个执行路径）
-          let v2EnhancedResult = null;
+          let v2EnhancedResult: PostProcessResult | null = null;
           if (subTask.metadata?.toolCallV2Config?.enabled && subTask.metadata?.dynamicExecutionStrategy) {
             try {
               console.log(`[followup-runner] 🚀 检测到子任务 ${subTask.id} 配置了 ToolCall 2.0，开始增强执行（路径2）`);
@@ -1685,26 +1724,10 @@ export function createFollowupRunner(params: {
             // 🆕 进度报告：开始质量评估
             progressReporter?.onQualityReviewStart();
 
-            const postResult = await orchestrator.onTaskCompleted(taskTree, subTask, queued.rootTaskId);
-            
-            // 🆕 合并 V2 增强执行结果（路径2）
-            if (v2EnhancedResult) {
-              // 合并发现和建议
-              postResult.findings = [...postResult.findings, ...v2EnhancedResult.findings];
-              postResult.suggestions = [...postResult.suggestions, ...v2EnhancedResult.suggestions];
-              
-              // 合并新任务ID
-              if (v2EnhancedResult.decomposedTaskIds && v2EnhancedResult.decomposedTaskIds.length > 0) {
-                if (!postResult.decomposedTaskIds) postResult.decomposedTaskIds = [];
-                postResult.decomposedTaskIds.push(...v2EnhancedResult.decomposedTaskIds);
-              }
-              
-              // 如果 V2 增强执行失败，可能需要调整决策
-              if (v2EnhancedResult.status === "pending" && postResult.decision === "continue") {
-                postResult.decision = "restart";
-                postResult.status = "pending";
-              }
-            }
+            const postResult = mergeV2PostProcessResult(
+              await orchestrator.onTaskCompleted(taskTree, subTask, queued.rootTaskId),
+              v2EnhancedResult,
+            );
 
             await taskRuntime.recordJudge(
               {
@@ -1747,20 +1770,12 @@ export function createFollowupRunner(params: {
                 `[followup-runner] 🔧 子任务 ${subTask.id} 转为增量分解，` +
                 `${postResult.decomposedTaskIds.length} 个续写子任务需要入队`,
               );
-              for (const newId of postResult.decomposedTaskIds) {
-                const newSubTask = taskTree.subTasks.find(t => t.id === newId);
-                if (newSubTask && newSubTask.status === "pending") {
-                  const newFollowupRun = buildFollowupRun(queued, newSubTask);
-                  if (queued.run.sessionKey) {
-                    const resolvedQueue = resolveQueueSettings({
-                      cfg: queued.run.config ?? ({} as any),
-                      inlineMode: "followup",
-                    });
-                    enqueueFollowupRun(queued.run.sessionKey, newFollowupRun, resolvedQueue, "none");
-                    console.log(`[followup-runner] 🆕 decompose 续写子任务已入队: ${newId} (${newSubTask.summary})`);
-                  }
-                }
-              }
+              enqueuePendingSubTasks({
+                queued,
+                taskTree,
+                taskIds: postResult.decomposedTaskIds,
+                logPrefix: "[followup-runner] 🆕 decompose 续写子任务已入队",
+              });
               if (queued.run.sessionKey) {
                 finalizeWithFollowup(undefined, queued.run.sessionKey, createFollowupRunner(params));
               }
@@ -1778,20 +1793,12 @@ export function createFollowupRunner(params: {
               console.log(
                 `[followup-runner] 🚀 P88: ${postResult.decomposedTaskIds.length} 个后续任务需要调度（decision=${postResult.decision}）`,
               );
-              for (const newId of postResult.decomposedTaskIds) {
-                const newSubTask = taskTree.subTasks.find(t => t.id === newId);
-                if (newSubTask && newSubTask.status === "pending") {
-                  const newFollowupRun = buildFollowupRun(queued, newSubTask);
-                  if (queued.run.sessionKey) {
-                    const resolvedQueue = resolveQueueSettings({
-                      cfg: queued.run.config ?? ({} as any),
-                      inlineMode: "followup",
-                    });
-                    enqueueFollowupRun(queued.run.sessionKey, newFollowupRun, resolvedQueue, "none");
-                    console.log(`[followup-runner] 🚀 P88: 后续任务已入队: ${newId} (${newSubTask.summary})`);
-                  }
-                }
-              }
+              enqueuePendingSubTasks({
+                queued,
+                taskTree,
+                taskIds: postResult.decomposedTaskIds,
+                logPrefix: "[followup-runner] 🚀 P88: 后续任务已入队",
+              });
               // 不 return — 当前任务已正常完成，继续后续流程（进度报告、轮次检查等）
             }
 
@@ -1863,106 +1870,38 @@ export function createFollowupRunner(params: {
 
             // 🆕 BUG3 修复：质检 adjust 新增的子任务需要入队到 drain 队列
             if (postResult.newTaskIds && postResult.newTaskIds.length > 0 && taskTree) {
-              for (const newId of postResult.newTaskIds) {
-                const newSubTask = taskTree.subTasks.find(t => t.id === newId);
-                if (newSubTask && newSubTask.status === "pending") {
-                  const newFollowupRun = buildFollowupRun(queued, newSubTask);
-                  if (queued.run.sessionKey) {
-                    const resolvedQueue = resolveQueueSettings({
-                      cfg: queued.run.config ?? ({} as any),
-                      inlineMode: "followup",
-                    });
-                    enqueueFollowupRun(queued.run.sessionKey, newFollowupRun, resolvedQueue, "none");
-                    console.log(`[followup-runner] 🆕 adjust 新增子任务已入队: ${newId} (${newSubTask.summary})`);
-                  }
-                }
-              }
+              enqueuePendingSubTasks({
+                queued,
+                taskTree,
+                taskIds: postResult.newTaskIds,
+                logPrefix: "[followup-runner] 🆕 adjust 新增子任务已入队",
+              });
             }
 
             // 轮次完成后续处理（由 onTaskCompleted 内部判定并设置标志）
             if (postResult.roundCompleted && postResult.completedRoundId) {
               console.log(`[followup-runner] 🏁 Round completed: ${postResult.completedRoundId} (tree: ${taskTree.id})`);
-              taskTree = (await orchestrator.loadTaskTree(sessionId)) ?? taskTree;
+              const refreshedTaskTree = (await orchestrator.loadTaskTree(sessionId)) ?? taskTree;
+              if (!refreshedTaskTree) {
+                throw new Error(`Round completed but task tree missing: ${postResult.completedRoundId}`);
+              }
+              taskTree = refreshedTaskTree;
 
               // 委托 onRoundCompleted 钩子：合并输出 + 交付报告
-              const roundResult = await orchestrator.onRoundCompleted(taskTree, postResult.completedRoundId);
-
-              // 发送合并文件 + 复制到用户工作目录
-              if (roundResult.mergedFilePath) {
-                // 🔧 将系统合并文件复制到用户工作目录 workspace/{rootTaskId}/
-                let userCopyPath: string | undefined;
-                try {
-                  const wsDir = queued.run.workspaceDir;
-                  if (wsDir) {
-                    const taskOutputDir = queued.rootTaskId
-                      ? path.join(wsDir, "workspace", queued.rootTaskId)
-                      : path.join(wsDir, "workspace");
-                    await fs.mkdir(taskOutputDir, { recursive: true });
-                    // 🔧 P38+P83: 多层回退提取合理的完整版文件名
-                    const rootTaskStr = taskTree.rootTask ?? "";
-                    const sanitize = (s: string) => s.replace(/[\\/:*?"<>|\n\r\s]+/g, "_").replace(/^_+|_+$/g, "");
-                    let rootGoal = "";
-                    // 层1：《》书名号
-                    const bookMatch = rootTaskStr.match(/[《\u300A]([^》\u300B]+)[》\u300B]/);
-                    if (bookMatch) {
-                      rootGoal = sanitize(bookMatch[1]);
-                    }
-                    // 层2：子任务 summary 中提取核心名词（取最短且有意义的 summary）
-                    if (!rootGoal && taskTree.subTasks) {
-                      const summaries = taskTree.subTasks
-                        .filter(t => t.summary && t.summary.length > 4 && t.summary.length < 60 && !t.metadata?.isRootTask)
-                        .map(t => t.summary!);
-                      if (summaries.length > 0) {
-                        // 从 summary 中提取《》或引号中的名称
-                        for (const s of summaries) {
-                          const m = s.match(/[《\u300A]([^》\u300B]+)[》\u300B]/) || s.match(/[「""]([^」""]+)[」""]/);
-                          if (m) { rootGoal = sanitize(m[1]); break; }
-                        }
-                        // 回退：取第一个 summary 的前20字
-                        if (!rootGoal) {
-                          rootGoal = sanitize(summaries[0].substring(0, 20));
-                        }
-                      }
-                    }
-                    // 层3：rootTask 中提取文件路径里的文件名
-                    if (!rootGoal) {
-                      const fileMatch = rootTaskStr.match(/[\\\/]([^\s\\\/]+?)\.(?:txt|md)\b/);
-                      if (fileMatch) rootGoal = sanitize(fileMatch[1]);
-                    }
-                    // 层4：rootTask 前20字清洗
-                    if (!rootGoal) {
-                      rootGoal = sanitize(rootTaskStr.substring(0, 20)) || "output";
-                    }
-                    const copyName = `${rootGoal}_完整版.txt`;
-                    userCopyPath = path.join(taskOutputDir, copyName);
-                    await fs.copyFile(roundResult.mergedFilePath, userCopyPath);
-                    console.log(`[followup-runner] 📄 合并文件已复制到用户工作目录: ${userCopyPath}`);
-                  }
-                } catch (copyErr) {
-                  console.warn(`[followup-runner] ⚠️ 复制合并文件到工作目录失败（不阻塞）: ${copyErr}`);
-                }
-
-                const mergedSendResult = await sendFallbackFile({
-                  filePath: roundResult.mergedFilePath,
-                  caption: `📝 完整输出（子任务合并）`,
-                  queued,
-                });
-                if (!mergedSendResult.ok) {
-                  const displayPath = userCopyPath ?? roundResult.mergedFilePath;
-                  await sendFollowupPayloads([{
-                    text: `📝 子任务输出已合并保存到：\n${displayPath}`,
-                  }], queued);
-                }
-              }
-
-              // 发送交付报告
-              if (roundResult.deliveryReportMarkdown) {
-                await sendFollowupPayloads([{ text: roundResult.deliveryReportMarkdown }], queued);
-                console.log(`[followup-runner] 📦 Delivery report sent`);
-              }
-
-              // 异步归档（fire-and-forget，委托辅助函数）
-              archiveRoundMemory(orchestrator, taskTree, postResult.completedRoundId, queued, sessionId);
+              const roundResult = await orchestrator.onRoundCompleted(refreshedTaskTree, postResult.completedRoundId);
+              await deliverCompletedRound({
+                queued,
+                taskTree: refreshedTaskTree,
+                completedRoundId: postResult.completedRoundId,
+                roundResult,
+                sendFollowupPayloads,
+                copyMergedOutputToWorkspace: true,
+                onArchive: () => archiveRoundMemory(orchestrator, refreshedTaskTree, postResult.completedRoundId!, queued, sessionId),
+                onDelivered: () => orchestrator.markRoundDeliveryCompleted(refreshedTaskTree, postResult.completedRoundId!, {
+                  mergedFilePath: roundResult.mergedFilePath,
+                }),
+                logPrefix: "[followup-runner]",
+              });
             }
           } catch (ppErr) {
             console.warn(`[followup-runner] ⚠️ 子任务后处理异常（不阻塞）: ${ppErr}`);
@@ -1994,8 +1933,6 @@ export function createFollowupRunner(params: {
 
           if (failDecision.needsRequeue) {
             console.warn(`[followup-runner] ⚠️ ${failDecision.reason}`);
-            subTask.status = "pending";
-            await orchestrator.saveTaskTree(taskTree);
             await taskRuntime.recordJudge(
               {
                 sessionId,

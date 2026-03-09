@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { TaskEventLogger } from "./task-event-logger.js";
 import type { TaskTree, SubTask, TaskTreeChange, QualityReviewResult, TaskBatch, BatchExecutionResult, BatchExecutionOptions, PostProcessResult, Round, RoundStatus, ExecutionContext, CreateDecision, StartDecision, FailureDecision, RoundCompletedResult, DrainScheduleResult } from "./types.js";
-import { TaskTreeManager } from "./task-tree-manager.js";
+import { TaskTreeManager, type SubTaskPatch, type SubTaskBatchPatch } from "./task-tree-manager.js";
 import { RetryManager } from "./retry-manager.js";
 import { ErrorHandler } from "./error-handler.js";
 import { RecoveryManager } from "./recovery-manager.js";
@@ -714,20 +714,23 @@ export class Orchestrator {
                 }
                 delete subTask.metadata.producedFilePaths;
                 delete subTask.metadata.producedFiles;
-                await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
-                subTask.retryCount = currentRetry + 1;
+                await this.requeueSubTask(taskTree, subTask.id, {
+                  retryCount: currentRetry + 1,
+                  metadata: subTask.metadata,
+                  error: null,
+                });
                 result.decision = "restart";
                 result.needsRequeue = true;
                 result.findings = [`精确字数前置检查不达标：要求 ${wordCountReq} 字，实际 ${actualLength} 字（${Math.round(actualLength / wordCountReq * 100)}%）`];
-                await this.taskTreeManager.save(taskTree);
                 return result;
               }
               // 重试耗尽且 decompose 也失败了，降级为 overthrow
-              await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
-              subTask.error = `字数前置检查重试耗尽：要求 ${wordCountReq} 字，实际 ${actualLength} 字`;
+              await this.failSubTask(taskTree, subTask.id, {
+                error: `字数前置检查重试耗尽：要求 ${wordCountReq} 字，实际 ${actualLength} 字`,
+                metadata: subTask.metadata,
+              });
               result.decision = "overthrow";
               result.markedFailed = true;
-              await this.taskTreeManager.save(taskTree);
               return result;
             } catch (restartErr) {
               // 🔧 P15 修复：即使 restart 操作异常，也强制返回 restart 决策
@@ -801,21 +804,24 @@ export class Orchestrator {
                   console.warn(`[Orchestrator] ⚠️ V6 前置验证: critical 失败，restart (${currentRetry + 1}/${maxRetries}) → ${failedDetails}`);
                   if (!subTask.metadata) subTask.metadata = {};
                   subTask.metadata.lastFailureFindings = [`V6验证失败: ${failedDetails}`];
-                  await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
-                  subTask.retryCount = currentRetry + 1;
+                  await this.requeueSubTask(taskTree, subTask.id, {
+                    retryCount: currentRetry + 1,
+                    metadata: subTask.metadata,
+                    error: null,
+                  });
                   result.decision = "restart";
                   result.needsRequeue = true;
                   result.findings = [`V6 前置验证失败(${taskType}): ${failedDetails}`];
-                  await this.taskTreeManager.save(taskTree);
                   return result;
                 }
                 // 重试耗尽
                 console.warn(`[Orchestrator] ❌ V6 前置验证: 重试耗尽 (${currentRetry}/${maxRetries})，标记失败`);
-                await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
-                subTask.error = `V6 前置验证重试耗尽: ${failedDetails}`;
+                await this.failSubTask(taskTree, subTask.id, {
+                  error: `V6 前置验证重试耗尽: ${failedDetails}`,
+                  metadata: subTask.metadata,
+                });
                 result.decision = "overthrow";
                 result.markedFailed = true;
-                await this.taskTreeManager.save(taskTree);
                 return result;
               }
             } catch (validatorErr) {
@@ -909,8 +915,10 @@ export class Orchestrator {
                 }
               }
               // decompose 也失败了，标记 failed 停止循环
-              await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
-              subTask.error = `内容混乱重复 ${currentRetry} 次，结构性问题无法通过重试解决：${review.findings.join("; ")}`;
+              await this.failSubTask(taskTree, subTask.id, {
+                error: `内容混乱重复 ${currentRetry} 次，结构性问题无法通过重试解决：${review.findings.join("; ")}`,
+                metadata: subTask.metadata,
+              });
               result.decision = "overthrow";
               result.markedFailed = true;
               break;
@@ -966,8 +974,10 @@ export class Orchestrator {
               console.warn(
                 `[Orchestrator] ⚠️ 子任务 ${subTask.id} 已重试 ${currentRetry} 次（上限 ${maxQualityRestarts}），降级为 overthrow`,
               );
-              await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
-              subTask.error = `质量重试超限 (${currentRetry}/${maxQualityRestarts})：${review.findings.join("; ")}`;
+              await this.failSubTask(taskTree, subTask.id, {
+                error: `质量重试超限 (${currentRetry}/${maxQualityRestarts})：${review.findings.join("; ")}`,
+                metadata: subTask.metadata,
+              });
               result.decision = "overthrow";
               result.markedFailed = true;
             } else {
@@ -1014,8 +1024,11 @@ export class Orchestrator {
               }
               delete subTask.metadata.producedFilePaths;
               delete subTask.metadata.producedFiles;
-              await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
-              subTask.retryCount = currentRetry + 1;
+              await this.requeueSubTask(taskTree, subTask.id, {
+                retryCount: currentRetry + 1,
+                metadata: subTask.metadata,
+                error: null,
+              });
               result.needsRequeue = true;
               // V8 P3: 记录质检 restart 经验
               import("./experience-pool.js").then(ep =>
@@ -1040,9 +1053,11 @@ export class Orchestrator {
               console.log(
                 `[Orchestrator] ⚠️ 质量严重不满意（第 ${overthrowCount} 次），降级为 restart`,
               );
-              await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
-              subTask.retryCount = (subTask.retryCount ?? 0) + 1;
-              subTask.error = `质量评估 overthrow → 降级 restart (${overthrowCount}/2)：${review.findings.join("; ")}`;
+              await this.requeueSubTask(taskTree, subTask.id, {
+                retryCount: (subTask.retryCount ?? 0) + 1,
+                metadata: subTask.metadata,
+                error: `质量评估 overthrow → 降级 restart (${overthrowCount}/2)：${review.findings.join("; ")}`,
+              });
               result.decision = "restart";
               result.needsRequeue = true;
               // V8 P3: 记录 overthrow 经验（严重质量问题）
@@ -1057,8 +1072,10 @@ export class Orchestrator {
               ).catch(() => {});
             } else {
               console.log(`[Orchestrator] ❌ 质量连续 ${overthrowCount} 次严重不满意，标记失败`);
-              await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
-              subTask.error = `质量评估连续 overthrow (${overthrowCount} 次)：${review.findings.join("; ")}`;
+              await this.failSubTask(taskTree, subTask.id, {
+                error: `质量评估连续 overthrow (${overthrowCount} 次)：${review.findings.join("; ")}`,
+                metadata: subTask.metadata,
+              });
               result.markedFailed = true;
             }
             break;
@@ -1082,8 +1099,11 @@ export class Orchestrator {
           console.warn(`[Orchestrator] ⚠️ P57: 质检临时性错误（${errMsg.substring(0, 80)}），restart 重试`);
           if (!subTask.metadata) subTask.metadata = {};
           subTask.metadata.lastFailureFindings = [`质检临时性失败: ${errMsg.substring(0, 100)}`];
-          await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
-          subTask.retryCount = (subTask.retryCount ?? 0) + 1;
+          await this.requeueSubTask(taskTree, subTask.id, {
+            retryCount: (subTask.retryCount ?? 0) + 1,
+            metadata: subTask.metadata,
+            error: null,
+          });
           result.decision = "restart";
           result.needsRequeue = true;
           result.findings = [`P57: 质检临时性异常，重试 (${subTask.retryCount}/${this.getDefaultMaxRetries()})`];
@@ -1103,8 +1123,11 @@ export class Orchestrator {
               if (effectiveReview.decision === "restart") {
                 if (!subTask.metadata) subTask.metadata = {};
                 subTask.metadata.lastFailureFindings = effectiveReview.findings ?? [];
-                await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "pending");
-                subTask.retryCount = (subTask.retryCount ?? 0) + 1;
+                await this.requeueSubTask(taskTree, subTask.id, {
+                  retryCount: (subTask.retryCount ?? 0) + 1,
+                  metadata: subTask.metadata,
+                  error: null,
+                });
                 result.needsRequeue = true;
               }
             } else {
@@ -1116,8 +1139,10 @@ export class Orchestrator {
         } else if (isConfigError) {
           // 配置错误 → 标记失败，不继续浪费资源
           console.error(`[Orchestrator] ❌ P57: 质检配置错误（${errMsg.substring(0, 100)}），标记任务失败`);
-          await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
-          subTask.error = `质检配置错误: ${errMsg.substring(0, 200)}`;
+          await this.failSubTask(taskTree, subTask.id, {
+            error: `质检配置错误: ${errMsg.substring(0, 200)}`,
+            metadata: subTask.metadata,
+          });
           result.markedFailed = true;
         } else {
           // 其他错误或重试耗尽 → 降级通过
@@ -1152,12 +1177,22 @@ export class Orchestrator {
           }
         };
         findDependents(failedId);
-        for (const t of taskTree.subTasks) {
-          if (toCascade.has(t.id)) {
-            t.status = "skipped" as SubTask["status"];
-            t.error = `级联跳过：依赖的任务 ${failedId} 被 overthrow`;
-            cascadedCount++;
-          }
+        const cascadeTargets = taskTree.subTasks.filter((t) => toCascade.has(t.id));
+        if (cascadeTargets.length > 0) {
+          await this.patchSubTasks(
+            taskTree,
+            cascadeTargets.map((t) => ({
+              subTaskId: t.id,
+              patch: {
+                status: "skipped",
+                error: `级联跳过：依赖的任务 ${failedId} 被 overthrow`,
+                completedAt: Date.now(),
+                metadata: t.metadata,
+                executionRole: t.executionRole,
+              },
+            })),
+          );
+          cascadedCount = cascadeTargets.length;
         }
         if (cascadedCount > 0) {
           console.log(
@@ -1383,7 +1418,13 @@ export class Orchestrator {
   ): Promise<void> {
     try {
       // 更新状态为 "active"
-      await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "active");
+      await this.patchSubTask(taskTree, subTask.id, {
+        status: "active",
+        error: null,
+        lastActiveAt: Date.now(),
+        executionRole: subTask.executionRole,
+        metadata: subTask.metadata,
+      });
 
       // 创建检查点
       await this.taskTreeManager.createCheckpoint(taskTree);
@@ -1400,7 +1441,6 @@ export class Orchestrator {
 
       // 更新输出和状态
       subTask.output = output;
-      subTask.completedAt = Date.now();
 
       // 🔧 收集文件追踪结果，写入 metadata.producedFiles
       const trackedFiles = collectTrackedFiles(subTask.id);
@@ -1417,7 +1457,13 @@ export class Orchestrator {
         );
       }
 
-      await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "completed");
+      await this.completeSubTask(taskTree, subTask.id, {
+        output,
+        completedAt: Date.now(),
+        metadata: subTask.metadata,
+        executionRole: subTask.executionRole,
+        error: null,
+      });
 
       // 🔧 P0: 统一后处理（质量评估 + 文件验证 + 交付产物 + 持久化）
       const postResult = await this.postProcessSubTaskCompletion(taskTree, subTask);
@@ -1435,9 +1481,12 @@ export class Orchestrator {
       const error = err instanceof Error ? err : new Error(String(err));
 
       // 更新错误信息和状态
-      subTask.error = error.message;
-      subTask.retryCount = (subTask.retryCount ?? 0) + 1;
-      await this.taskTreeManager.updateSubTaskStatus(taskTree, subTask.id, "failed");
+      await this.failSubTask(taskTree, subTask.id, {
+        error: error.message,
+        retryCount: (subTask.retryCount ?? 0) + 1,
+        metadata: subTask.metadata,
+        executionRole: subTask.executionRole,
+      });
 
       // 🆕 记录失败到文件系统
       if (this.fileManager) {
@@ -1574,6 +1623,56 @@ export class Orchestrator {
     status: SubTask["status"],
   ): Promise<void> {
     await this.taskTreeManager.updateSubTaskStatus(taskTree, subTaskId, status);
+  }
+
+  /**
+   * 原子化更新子任务，避免状态更新后再二次 save。
+   */
+  async patchSubTask(
+    taskTree: TaskTree,
+    subTaskId: string,
+    patch: SubTaskPatch,
+  ): Promise<SubTask> {
+    return await this.taskTreeManager.patchSubTask(taskTree, subTaskId, patch);
+  }
+
+  async patchSubTasks(
+    taskTree: TaskTree,
+    patches: SubTaskBatchPatch[],
+  ): Promise<SubTask[]> {
+    return await this.taskTreeManager.patchSubTasks(taskTree, patches);
+  }
+
+  async completeSubTask(
+    taskTree: TaskTree,
+    subTaskId: string,
+    patch: Omit<SubTaskPatch, "status"> = {},
+  ): Promise<SubTask> {
+    return await this.taskTreeManager.completeSubTask(taskTree, subTaskId, patch);
+  }
+
+  async failSubTask(
+    taskTree: TaskTree,
+    subTaskId: string,
+    patch: Omit<SubTaskPatch, "status"> = {},
+  ): Promise<SubTask> {
+    return await this.taskTreeManager.failSubTask(taskTree, subTaskId, patch);
+  }
+
+  async skipSubTask(
+    taskTree: TaskTree,
+    subTaskId: string,
+    patch: Omit<SubTaskPatch, "status"> = {},
+  ): Promise<SubTask> {
+    return await this.taskTreeManager.skipSubTask(taskTree, subTaskId, patch);
+  }
+
+  async requeueSubTask(
+    taskTree: TaskTree,
+    subTaskId: string,
+    patch: Omit<SubTaskPatch, "status"> = {},
+  ): Promise<SubTask> {
+    return await this.taskTreeManager.requeueSubTask(taskTree, subTaskId, patch);
   }
 
   /**
@@ -2083,86 +2182,68 @@ export class Orchestrator {
   }
 
   /**
-   * 检查指定轮次是否已完成
-   * 
-   * 只检查 rootTaskId 匹配的子任务（排除 isSummaryTask 占位符）。
-   * 当该轮次所有子任务都是 completed/failed 时返回 true。
-   * 
-   * @param taskTree 任务树
-   * @param rootTaskId 轮次 ID
-   * @returns 该轮次是否已完成
+   * 在轮次完成判定前，统一修复会阻塞完成态的脏状态。
+   *
+   * 只负责状态收敛，不负责真正的 round 完成判定。
    */
-  isRoundCompleted(taskTree: TaskTree, rootTaskId: string): boolean {
+  async prepareRoundCompletion(
+    taskTree: TaskTree,
+    rootTaskId: string,
+  ): Promise<boolean> {
     const roundTasks = taskTree.subTasks.filter(
       (t) => t.rootTaskId === rootTaskId && !t.metadata?.isSummaryTask,
     );
     if (roundTasks.length === 0) return false;
 
-    // 🔧 P1 修复：检测僵尸 active 任务（active 超过动态阈值无进展）
-    // 根因：如果 retry 执行被中断（进程退出、API 异常），任务停在 active 状态，
-    // isRoundCompleted 永远返回 false，导致轮次无法终结、drain 无法清理。
-    // 修复：将超时的 active 任务自动标记为 failed，附带诊断信息。
-    // 🔧 P42: 超时阈值从固定 5 分钟改为根据任务类型动态计算
-    // 原因：不同任务执行时间差异巨大——简单编码 1-2 分钟，大章节写作 5-10 分钟，
-    // 遇到 429 限流时等待更久。固定 5 分钟对简单任务延迟发现问题，对复杂任务误杀。
     const ZOMBIE_BASE_MS = 5 * 60 * 1000; // 基线 5 分钟
     const now = Date.now();
+    const patchMap = new Map<string, SubTaskBatchPatch>();
+    const queuePatch = (subTaskId: string, patch: SubTaskPatch) => {
+      patchMap.set(subTaskId, { subTaskId, patch });
+    };
+
     for (const t of roundTasks) {
       if (t.status === "active") {
-        // 🔧 P107 修复：跳过已有 completedAt 的任务（merge-on-save 竞态保护）
-        // 根因：followup-runner 已完成任务（设置了 completedAt + output），但由于
-        // merge-on-save 竞态，磁盘上的 status 仍为 "active"。另一个并发任务的
-        // isRoundCompleted() 读取到 stale 状态，会误将已完成任务标记为僵尸失败。
-        // 修复：completedAt 存在说明执行侧已确认完成，不应被僵尸检测覆盖。
         if (t.completedAt) {
-          // 同时修正 status 为 completed（弥合 merge-on-save 竞态造成的不一致）
-          t.status = "completed";
+          queuePatch(t.id, {
+            status: "completed",
+            completedAt: t.completedAt,
+            error: null,
+            metadata: t.metadata,
+            executionRole: t.executionRole,
+          });
           continue;
         }
 
-        // 🔧 P33 修复：跳过 waitForChildren 且有实际子任务的父任务
-        // 根因：父任务在分解后被设为 active，合法等待子任务完成（可能超过 5 分钟）。
-        // 僵尸检测不应误杀这些正在等待子任务的父任务。
         const hasRealChildren = t.waitForChildren && t.children && t.children.length > 0;
         if (hasRealChildren) {
-          continue; // 跳过：父任务等待子任务完成是正常行为
+          continue;
         }
 
-        // 🔧 P42: 根据任务类型动态计算超时阈值
         let zombieThresholdMs = ZOMBIE_BASE_MS;
         if (t.metadata?.isChunkTask) {
-          // Map-Reduce chunk 任务：读取大文件+分析，需要更长时间
-          zombieThresholdMs = 15 * 60 * 1000; // 15 分钟
+          zombieThresholdMs = 15 * 60 * 1000;
         } else if (t.metadata?.isSegment) {
-          // 分段写作子任务：可能遇到限流重试
-          zombieThresholdMs = 10 * 60 * 1000; // 10 分钟
+          zombieThresholdMs = 10 * 60 * 1000;
         } else if (t.taskType === "writing" || t.taskType === "coding") {
-          // 写作/编码任务：产出较多，需要更长时间
-          zombieThresholdMs = 10 * 60 * 1000; // 10 分钟
+          zombieThresholdMs = 10 * 60 * 1000;
         }
-        // 其他类型保持基线 5 分钟
 
-        // 🔧 P10+GAP-1 修复：使用 lastActiveAt（进入 active 的时间）替代 createdAt
-        // P10 根因：并行执行时 taskTree.updatedAt 被频繁更新，所有 active 任务共享同一时间。
-        // GAP-1 根因：createdAt 在重试时不更新，重试任务的 now-createdAt 远大于实际 active 时间，
-        // 导致刚开始重试的任务就被僵尸检测误杀。lastActiveAt 在每次 onTaskStarting 中更新。
         const activeStart = t.lastActiveAt ?? t.createdAt ?? 0;
         if (now - activeStart > zombieThresholdMs) {
           console.warn(
             `[Orchestrator] 🧟 检测到僵尸 active 任务: ${t.id} (active 超过 ${Math.round((now - activeStart) / 60000)} 分钟, 阈值=${Math.round(zombieThresholdMs / 60000)}分钟)`,
           );
-          t.status = "failed";
-          t.error = `僵尸任务：active 状态超过 ${Math.round((now - activeStart) / 60000)} 分钟无响应（阈值=${Math.round(zombieThresholdMs / 60000)}分钟），自动标记失败`;
+          queuePatch(t.id, {
+            status: "failed",
+            error: `僵尸任务：active 状态超过 ${Math.round((now - activeStart) / 60000)} 分钟无响应（阈值=${Math.round(zombieThresholdMs / 60000)}分钟），自动标记失败`,
+            metadata: t.metadata,
+            executionRole: t.executionRole,
+          });
         }
       }
     }
 
-    // 🔧 P8 修复：自动处理 waitForChildren 但 children 为空的"幽灵守门任务"
-    // 场景：LLM 在分解时创建了"合并并发送完整版文件"任务并设置 waitForChildren=true，
-    // 但它没有通过 orchestrator.addSubTask() 注册 children，导致 children=[] 永远为空。
-    // 这种任务永远 pending，不会被 drain 调度（因为它等待不存在的子任务），阻塞轮次完成。
-    // 修复策略：当同轮次所有其他实际工作任务（非 waitForChildren）都已完成/失败时，
-    // 自动将这种空守门任务标记为 skipped，让轮次可以正常终结。
     const nonGateTasks = roundTasks.filter(t => !t.waitForChildren || (t.children && t.children.length > 0));
     const gateTasks = roundTasks.filter(
       t => t.waitForChildren && (!t.children || t.children.length === 0) && t.status === "pending",
@@ -2176,29 +2257,54 @@ export class Orchestrator {
           console.log(
             `[Orchestrator] 🔧 P8: 自动跳过空 waitForChildren 任务: ${gate.id} (${gate.summary})`,
           );
-          gate.status = "skipped";
-          gate.error = "自动跳过：waitForChildren=true 但无实际子任务（children=[]），所有兄弟任务已完成";
-          gate.completedAt = now;
+          queuePatch(gate.id, {
+            status: "skipped",
+            error: "自动跳过：waitForChildren=true 但无实际子任务（children=[]），所有兄弟任务已完成",
+            completedAt: now,
+            metadata: gate.metadata,
+            executionRole: gate.executionRole,
+          });
         }
       }
     }
 
-    // 🔧 P90 修复：自动跳过 chunk 任务的无意义续写
-    // 根因：P84 修复前，chunk map 任务的字数检查误触发 decomposeFailedTask，
-    // 每个 chunk 创建 5 个续写任务（7 chunks × 5 = 35 个），这些续写 pending 永远阻塞轮次完成。
-    // 修复：当 chunk 父任务已完成时，其续写任务自动标记 skipped。
     for (const t of roundTasks) {
       if (t.status === "pending" && t.metadata?.isContinuation && t.metadata.continuationOf) {
         const contParent = taskTree.subTasks.find(st => st.id === t.metadata!.continuationOf);
-        // 父任务是 chunk 任务且已完成 → 续写无意义
         if (contParent?.metadata?.isChunkTask && contParent.status === "completed") {
-          t.status = "skipped";
-          t.error = "P90: chunk 任务的续写自动跳过（chunk 已完成，续写无意义）";
-          t.completedAt = now;
+          queuePatch(t.id, {
+            status: "skipped",
+            error: "P90: chunk 任务的续写自动跳过（chunk 已完成，续写无意义）",
+            completedAt: now,
+            metadata: t.metadata,
+            executionRole: t.executionRole,
+          });
           console.log(`[Orchestrator] 🗺️ P90: 自动跳过 chunk 续写: ${t.id}`);
         }
       }
     }
+
+    const patches = [...patchMap.values()];
+    if (patches.length > 0) {
+      await this.patchSubTasks(taskTree, patches);
+      console.log(`[Orchestrator] 🔧 Round ${rootTaskId} completion preparation applied ${patches.length} state fixes`);
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * 检查指定轮次是否已完成
+   * 
+   * 只检查 rootTaskId 匹配的子任务（排除 isSummaryTask 占位符）。
+   * 当该轮次所有子任务都是 completed/failed/skipped 时返回 true。
+   */
+  isRoundCompleted(taskTree: TaskTree, rootTaskId: string): boolean {
+    const roundTasks = taskTree.subTasks.filter(
+      (t) => t.rootTaskId === rootTaskId && !t.metadata?.isSummaryTask,
+    );
+    if (roundTasks.length === 0) return false;
 
     const allDone = roundTasks.every(
       (t) => t.status === "completed" || t.status === "failed" || t.status === "skipped",
@@ -2300,6 +2406,33 @@ export class Orchestrator {
       console.warn(`[Orchestrator] ⚠️ UTIL CP4: 回顾学习失败: ${_cp4Err}`);
     }
 
+    await this.taskTreeManager.save(taskTree);
+  }
+
+  isRoundDeliveryCompleted(taskTree: TaskTree, rootTaskId: string): boolean {
+    const round = this.findRound(taskTree, rootTaskId);
+    return Boolean(round?.delivery?.deliveredAt);
+  }
+
+  async markRoundDeliveryCompleted(
+    taskTree: TaskTree,
+    rootTaskId: string,
+    params: {
+      mergedFilePath?: string;
+    } = {},
+  ): Promise<void> {
+    const round = this.findRound(taskTree, rootTaskId);
+    if (!round) {
+      return;
+    }
+    if (!round.delivery) {
+      round.delivery = {};
+    }
+    round.delivery.preparedAt ??= Date.now();
+    round.delivery.deliveredAt = Date.now();
+    if (params.mergedFilePath) {
+      round.delivery.mergedFilePath = params.mergedFilePath;
+    }
     await this.taskTreeManager.save(taskTree);
   }
 
@@ -4287,8 +4420,13 @@ export class Orchestrator {
             const task = taskTree.subTasks.find(t => t.id === taskId);
             if (task) {
               task.output = output;
-              task.completedAt = Date.now();
-              await this.taskTreeManager.updateSubTaskStatus(taskTree, taskId, "completed");
+              await this.completeSubTask(taskTree, taskId, {
+                output,
+                completedAt: Date.now(),
+                metadata: task.metadata,
+                executionRole: task.executionRole,
+                error: null,
+              });
 
               // 🆕 保存任务输出到文件系统
               if (this.fileManager) {
@@ -4314,8 +4452,11 @@ export class Orchestrator {
 
           // 标记批次中的所有任务为失败
           for (const task of batch.tasks) {
-            task.error = `批次执行失败: ${result.error}`;
-            await this.taskTreeManager.updateSubTaskStatus(taskTree, task.id, "failed");
+            await this.failSubTask(taskTree, task.id, {
+              error: `批次执行失败: ${result.error}`,
+              metadata: task.metadata,
+              executionRole: task.executionRole,
+            });
 
             // 🆕 记录失败到文件系统
             if (this.fileManager) {
@@ -4340,8 +4481,11 @@ export class Orchestrator {
 
         // 标记批次中的所有任务为失败
         for (const task of batch.tasks) {
-          task.error = `批次执行异常: ${errorMessage}`;
-          await this.taskTreeManager.updateSubTaskStatus(taskTree, task.id, "failed");
+          await this.failSubTask(taskTree, task.id, {
+            error: `批次执行异常: ${errorMessage}`,
+            metadata: task.metadata,
+            executionRole: task.executionRole,
+          });
         }
 
         console.error(`[Orchestrator] ❌ 批次 ${batch.id} 执行异常: ${errorMessage}`);
@@ -4628,10 +4772,14 @@ ${childOutputs.join("\n\n---\n\n")}
    * @param roundId 当前轮次 ID（可选，用于轮次隔离）
    * @returns DrainScheduleResult
    */
-  getNextExecutableTasksForDrain(
+  async getNextExecutableTasksForDrain(
     taskTree: TaskTree,
     roundId?: string,
-  ): DrainScheduleResult {
+  ): Promise<DrainScheduleResult> {
+    if (roundId) {
+      await this.prepareRoundCompletion(taskTree, roundId);
+    }
+
     // 1. 任务树全局终结检查
     if (taskTree.status === "completed" || taskTree.status === "failed") {
       const hasPending = taskTree.subTasks.some(
@@ -4667,15 +4815,27 @@ ${childOutputs.join("\n\n---\n\n")}
     if (roundId) {
       const round = this.findRound(taskTree, roundId);
       if (round?.circuitBreaker?.tripped) {
+        const tripReason = round.circuitBreaker.tripReason ?? "预算耗尽";
         // 熔断已触发，将同轮次 pending 任务标记为 skipped
-        let skippedCount = 0;
-        for (const t of taskTree.subTasks) {
-          if (t.rootTaskId === roundId && t.status === "pending") {
-            t.status = "skipped";
-            t.error = `熔断器触发：${round.circuitBreaker.tripReason}`;
-            skippedCount++;
-          }
+        const pendingRoundTasks = taskTree.subTasks.filter(
+          (t) => t.rootTaskId === roundId && t.status === "pending",
+        );
+        if (pendingRoundTasks.length > 0) {
+          await this.patchSubTasks(
+            taskTree,
+            pendingRoundTasks.map((t) => ({
+              subTaskId: t.id,
+              patch: {
+                status: "skipped",
+                error: `熔断器触发：${tripReason}`,
+                completedAt: Date.now(),
+                metadata: t.metadata,
+                executionRole: t.executionRole,
+              },
+            })),
+          );
         }
+        const skippedCount = pendingRoundTasks.length;
         if (skippedCount > 0) {
           console.warn(
             `[Orchestrator] 🔌 熔断器已触发，跳过 ${skippedCount} 个 pending 任务 (Round ${roundId})`,
@@ -4683,9 +4843,9 @@ ${childOutputs.join("\n\n---\n\n")}
         }
         return {
           action: "discard_round",
-          reason: `熔断器已触发：${round.circuitBreaker.tripReason}，跳过 ${skippedCount} 个任务`,
+          reason: `熔断器已触发：${tripReason}，跳过 ${skippedCount} 个任务`,
           roundId,
-          treeModified: skippedCount > 0,
+          treeModified: false,
         };
       }
     }
@@ -4814,25 +4974,37 @@ ${childOutputs.join("\n\n---\n\n")}
 
             if (recoverableDeps.length > 0) {
               // 尝试恢复：重置失败的依赖为 pending
+              await this.patchSubTasks(
+                taskTree,
+                recoverableDeps.map((dep) => ({
+                  subTaskId: dep.id,
+                  patch: {
+                    status: "pending",
+                    retryCount: (dep.retryCount ?? 0) + 1,
+                    error: null,
+                    completedAt: null,
+                    metadata: dep.metadata,
+                    executionRole: dep.executionRole,
+                  },
+                })),
+              );
               for (const dep of recoverableDeps) {
-                dep.status = "pending";
-                dep.retryCount = (dep.retryCount ?? 0) + 1;
-                dep.error = undefined;
                 console.log(
                   `[Orchestrator] 🔧 S3: 智能恢复失败依赖 ${dep.id} (retry ${dep.retryCount}/${MAX_CASCADE_RETRY})，` +
                   `避免级联跳过 ${task.id}`,
                 );
               }
-              treeModifiedBySkip = true;
               continue; // 跳过当前任务，等依赖重试完成
             }
 
             // 不可恢复：cascade-skip
-            task.status = "skipped";
-            task.error = isSequentialSegment
-              ? "分段依赖的前序分段失败，级联跳过"
-              : "续写依赖的前序任务失败，级联跳过";
-            treeModifiedBySkip = true;
+            await this.skipSubTask(taskTree, task.id, {
+              error: isSequentialSegment
+                ? "分段依赖的前序分段失败，级联跳过"
+                : "续写依赖的前序任务失败，级联跳过",
+              metadata: task.metadata,
+              executionRole: task.executionRole,
+            });
             console.log(`[Orchestrator] ⏭️ ${isSequentialSegment ? "分段" : "续写"}任务 ${task.id} 级联跳过（依赖失败且不可恢复）`);
             continue;
           }
@@ -5737,7 +5909,7 @@ ${childOutputs.join("\n\n---\n\n")}
    * @param legacyFlags 旧布尔标记（过渡期兼容）
    * @returns StartDecision
    */
-  onTaskStarting(
+  async onTaskStarting(
     taskTree: TaskTree,
     subTask: SubTask,
     legacyFlags?: {
@@ -5747,7 +5919,7 @@ ${childOutputs.join("\n\n---\n\n")}
       taskDepth?: number;
       rootTaskId?: string;
     },
-  ): StartDecision {
+  ): Promise<StartDecision> {
     // 1. 构建 ExecutionContext
     const role = deriveExecutionRole({
       isQueueTask: legacyFlags?.isQueueTask,
@@ -5772,15 +5944,13 @@ ${childOutputs.join("\n\n---\n\n")}
     // 根因：首次执行失败后 error 被设置，retry 时 onTaskStarting 只改 status 不清 error，
     // 如果 retry 执行中途被 abort（如进程退出），任务停在 active + 旧 error，
     // 导致 isRoundCompleted 永远返回 false（有 active 任务），轮次无法终结。
-    subTask.status = "active";
-    subTask.error = undefined;
-    // 🔧 GAP-1: 记录进入 active 状态的时间戳（用于僵尸检测，替代 createdAt）
-    // 根因：createdAt 在重试时不更新，导致僵尸检测用原始创建时间判断超时，
-    // 重试的任务可能因为"创建时间过早"被误杀。
-    subTask.lastActiveAt = Date.now();
-
-    // 5. 记录执行角色到子任务元数据
-    subTask.executionRole = execCtx.role;
+    await this.patchSubTask(taskTree, subTask.id, {
+      status: "active",
+      error: null,
+      lastActiveAt: Date.now(),
+      executionRole: execCtx.role,
+      metadata: subTask.metadata,
+    });
 
     console.log(
       `[Orchestrator] 🚀 onTaskStarting: ${subTask.id} role=${execCtx.role} depth=${execCtx.depth} shouldDecompose=${shouldDecompose}`,
@@ -5841,6 +6011,9 @@ ${childOutputs.join("\n\n---\n\n")}
         };
         // 仍然检查轮次完成
         // 🔧 问题 EE 修复：防止并行执行时重复触发
+        if (effectiveRoundId) {
+          await this.prepareRoundCompletion(taskTree, effectiveRoundId);
+        }
         if (effectiveRoundId && this.isRoundCompleted(taskTree, effectiveRoundId)) {
           const round = this.findRound(taskTree, effectiveRoundId);
           if (!round || (round.status !== "completed" && round.status !== "failed")) {
@@ -5868,6 +6041,9 @@ ${childOutputs.join("\n\n---\n\n")}
     // 两个都可能看到 isRoundCompleted === true，导致 markRoundCompleted 和
     // onRoundCompleted 被调用两次（合并文件生成两次、交付报告发送两次）。
     // 修复：检查 Round 是否已被标记为 completed/failed，如果是则跳过。
+    if (effectiveRoundId) {
+      await this.prepareRoundCompletion(taskTree, effectiveRoundId);
+    }
     if (effectiveRoundId && this.isRoundCompleted(taskTree, effectiveRoundId)) {
       const round = this.findRound(taskTree, effectiveRoundId);
       if (round && (round.status === "completed" || round.status === "failed")) {
@@ -5933,10 +6109,11 @@ ${childOutputs.join("\n\n---\n\n")}
       const shouldRetry = wantsRetry && currentRetry < maxRetries && (ao.retryable === true || allowShrinkRetry);
 
       if (shouldRetry) {
-        subTask.status = "pending";
-        subTask.error = `AttemptOutcome(${ao.kind}): ${ao.details?.message ?? message}`.trim();
-        subTask.retryCount = currentRetry + 1;
-        await this.taskTreeManager.save(taskTree);
+        await this.requeueSubTask(taskTree, subTask.id, {
+          retryCount: currentRetry + 1,
+          error: `AttemptOutcome(${ao.kind}): ${ao.details?.message ?? message}`.trim(),
+          metadata: subTask.metadata,
+        });
         console.log(
           `[Orchestrator] 🔄 onTaskFailed(AttemptOutcome): ${subTask.id} kind=${ao.kind}, ` +
             `action=${ao.suggestedAction}, attempt ${subTask.retryCount}/${maxRetries}, ` +
@@ -5957,10 +6134,11 @@ ${childOutputs.join("\n\n---\n\n")}
 
     if (isRetryable && (subTask.retryCount ?? 0) < maxRetries) {
       // 可重试：标记 pending + retryCount++
-      subTask.status = "pending";
-      subTask.error = message;
-      subTask.retryCount = (subTask.retryCount ?? 0) + 1;
-      await this.taskTreeManager.save(taskTree);
+      await this.requeueSubTask(taskTree, subTask.id, {
+        retryCount: (subTask.retryCount ?? 0) + 1,
+        error: message,
+        metadata: subTask.metadata,
+      });
       console.log(
         `[Orchestrator] 🔄 onTaskFailed: ${subTask.id} retryable, attempt ${subTask.retryCount}/${maxRetries}`,
       );
@@ -6006,9 +6184,10 @@ ${childOutputs.join("\n\n---\n\n")}
     }
 
     // decompose 失败或无部分输出：标记 failed
-    subTask.status = "failed";
-    subTask.error = message;
-    await this.taskTreeManager.save(taskTree);
+    await this.failSubTask(taskTree, subTask.id, {
+      error: message,
+      metadata: subTask.metadata,
+    });
 
     // 3. 级联检查：只跳过依赖失败任务的下游任务，无依赖的兄弟任务继续执行
     if (roundId) {
@@ -6032,13 +6211,23 @@ ${childOutputs.join("\n\n---\n\n")}
           }
         };
         findDependents(failedId);
-        
-        for (const t of taskTree.subTasks) {
-          if (toCascade.has(t.id)) {
-            t.status = "skipped" as SubTask["status"];
-            t.error = `级联跳过：依赖的任务 ${failedId} 失败`;
-            cascadedCount++;
-          }
+
+        const cascadeTargets = taskTree.subTasks.filter((t) => toCascade.has(t.id));
+        if (cascadeTargets.length > 0) {
+          await this.patchSubTasks(
+            taskTree,
+            cascadeTargets.map((t) => ({
+              subTaskId: t.id,
+              patch: {
+                status: "skipped",
+                error: `级联跳过：依赖的任务 ${failedId} 失败`,
+                completedAt: Date.now(),
+                metadata: t.metadata,
+                executionRole: t.executionRole,
+              },
+            })),
+          );
+          cascadedCount = cascadeTargets.length;
         }
         
         // 检查是否还有可执行的任务（无依赖的兄弟任务可以继续）
@@ -6117,6 +6306,19 @@ ${childOutputs.join("\n\n---\n\n")}
     // 确定 Round 状态
     const round = this.findRound(taskTree, rootTaskId);
     result.roundStatus = round?.status ?? "completed";
+    if (round?.delivery?.deliveredAt) {
+      result.archiveSuccess = true;
+      result.alreadyDelivered = true;
+      result.mergedFilePath = round.delivery.mergedFilePath;
+      console.log(`[Orchestrator] ℹ️ onRoundCompleted: round ${rootTaskId} 已完成过交付，跳过重复生成/发送`);
+      return result;
+    }
+    if (round) {
+      if (!round.delivery) {
+        round.delivery = {};
+      }
+      round.delivery.preparedAt ??= Date.now();
+    }
 
     // 🔧 问题 R 修复：如果有被熔断器跳过的任务，在交付报告中标注
     const skippedByCircuitBreaker = taskTree.subTasks.filter(
@@ -6222,6 +6424,13 @@ ${childOutputs.join("\n\n---\n\n")}
 
     // 3. 归档标记（实际归档由调用方执行，因为需要 config/sessionId 等上下文）
     result.archiveSuccess = true;
+
+    if (round?.delivery) {
+      if (result.mergedFilePath) {
+        round.delivery.mergedFilePath = result.mergedFilePath;
+      }
+      await this.taskTreeManager.save(taskTree);
+    }
 
     return result;
   }
