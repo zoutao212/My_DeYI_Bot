@@ -27,7 +27,9 @@ function createProps(overrides: Partial<ChatProps> = {}): ChatProps {
     messages: [],
     toolMessages: [],
     stream: null,
+    reasoningStream: null,
     streamStartedAt: null,
+    waitElapsedSeconds: 0,
     assistantAvatarUrl: null,
     draft: "",
     queue: [],
@@ -101,5 +103,27 @@ describe("chat view", () => {
     expect(noSummaryButton).not.toBeUndefined();
     noSummaryButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(onNewSessionNoSummary).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders streaming reasoning when enabled for the active session", () => {
+    const container = document.createElement("div");
+    render(
+      renderChat(
+        createProps({
+          showThinking: true,
+          stream: "",
+          reasoningStream: "先检查格式",
+          streamStartedAt: Date.now(),
+          sessions: {
+            ...createSessions(),
+            sessions: [{ key: "main", reasoningLevel: "stream" } as never],
+          },
+        }),
+      ),
+      container,
+    );
+
+    expect(container.textContent).toContain("Reasoning");
+    expect(container.textContent).toContain("先检查格式");
   });
 });

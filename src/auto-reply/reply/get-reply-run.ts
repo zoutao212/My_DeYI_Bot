@@ -22,6 +22,7 @@ import { hasControlCommand } from "../command-detection.js";
 import { buildMemoryWriteHint } from "../../agents/system-prompt.js";
 import { SYSTEM_PROMPT_L10N_EN } from "../../agents/system-prompt.l10n.en.js";
 import { SYSTEM_PROMPT_L10N_ZH } from "../../agents/system-prompt.l10n.zh.js";
+import { hasNovelAssets, searchNovelAssets, formatNovelSnippetsForPromptBlocks } from "../../memory/novel-assets-searcher.js";
 import { buildInboundMediaNote } from "../media-note.js";
 import type { MsgContext, TemplateContext } from "../templating.js";
 import {
@@ -227,7 +228,84 @@ export async function runPreparedReply(
     memoryWriteHint = buildMemoryWriteHint(_p89L10n, workspaceDir);
   }
 
-  const extraSystemPrompt = [groupIntro, groupSystemPrompt, memoryWriteHint, complexityGuidance].filter(Boolean).join("\n\n");
+  const _novelBody = (ctx.CommandBody ?? ctx.RawBody ?? ctx.Body ?? "").trim();
+  const _hasNovelStyleIntent =
+    /(?:文笔|文风|写作|创作|小说|续写|描写|叙事|剧情|段落|台词|对话|视角|节奏|氛围|意象|修辞|高级作家)/i.test(
+      _novelBody,
+    );
+  let novelReferenceHintA = "";
+  let novelReferenceHintB = "";
+  let novelReferenceHintC = "";
+  if (_hasNovelStyleIntent && workspaceDir) {
+    try {
+      const available = await hasNovelAssets(workspaceDir);
+      if (available) {
+        const query = _novelBody.length > 0 ? _novelBody : (sessionCtx.BodyStripped ?? sessionCtx.Body ?? "");
+
+        const maxSnippets = Number.parseInt(process.env.CLAWDBOT_NOVEL_REF_MAX_SNIPPETS ?? "", 10);
+        const maxSnippetsPerFile = Number.parseInt(process.env.CLAWDBOT_NOVEL_REF_MAX_SNIPPETS_PER_FILE ?? "", 10);
+        const snippetTargetChars = Number.parseInt(process.env.CLAWDBOT_NOVEL_REF_SNIPPET_TARGET_CHARS ?? "", 10);
+        const maxTotalChars = Number.parseInt(process.env.CLAWDBOT_NOVEL_REF_MAX_TOTAL_CHARS ?? "", 10);
+        const blocks = Number.parseInt(process.env.CLAWDBOT_NOVEL_REF_BLOCKS ?? "", 10);
+
+        const effectiveMaxSnippets = Number.isFinite(maxSnippets) ? Math.min(12, Math.max(2, maxSnippets)) : 8;
+        const effectiveMaxSnippetsPerFile = Number.isFinite(maxSnippetsPerFile)
+          ? Math.min(6, Math.max(1, maxSnippetsPerFile))
+          : 3;
+        const effectiveSnippetTarget = Number.isFinite(snippetTargetChars)
+          ? Math.min(600, Math.max(120, snippetTargetChars))
+          : 260;
+        const effectiveMaxTotalChars = Number.isFinite(maxTotalChars) ? Math.min(12000, Math.max(2500, maxTotalChars)) : 7000;
+        const effectiveBlocks = Number.isFinite(blocks) ? Math.min(6, Math.max(1, blocks)) : 3;
+
+        const result = await searchNovelAssets(query.substring(0, 500), workspaceDir, {
+          maxSnippets: effectiveMaxSnippets,
+          snippetTargetChars: effectiveSnippetTarget,
+          snippetMaxChars: Math.min(800, effectiveSnippetTarget + 120),
+          maxSnippetsPerFile: effectiveMaxSnippetsPerFile,
+          minScore: 0.12,
+          autoExtractKeywords: true,
+        });
+        if (result.snippets.length > 0) {
+          const formattedBlocks = formatNovelSnippetsForPromptBlocks(result, {
+            maxTotalChars: effectiveMaxTotalChars,
+            blocks: effectiveBlocks,
+          });
+          if (formattedBlocks.length > 0) {
+             // W13+W14: 块级指令已内嵌到 formattedBlocks 中，外层只做身份标签
+             const blockRoles = ["叙事教练·节奏与视角", "风格参照·意象与质感", "技法示范·结构与张力"];
+             const mk = (idx: number, body: string) =>
+               `\n\n[📖 风格化学习样本｜${blockRoles[idx] ?? `样本块 ${idx + 1}`}]\n⚠️ 以下是 few-shot 写作样本，严禁照抄情节与专有名词，只学习写法。\n${body}`;
+            const blockA = formattedBlocks[0] ?? "";
+            const blockB = formattedBlocks[1] ?? "";
+            // 超过 3 块时不浪费：把剩余块合并进 C 槽位，仍保持 A/B/C 分散注入。
+            const blockC = formattedBlocks.slice(2).join("\n\n");
+            novelReferenceHintA = blockA ? mk(0, blockA) : "";
+            novelReferenceHintB = blockB ? mk(1, blockB) : "";
+            novelReferenceHintC = blockC ? mk(2, blockC) : "";
+            console.log(
+              `[get-reply-run] 📖 NovelsAssets 参考注入(分块): snippets=${result.snippets.length}, blocks=${formattedBlocks.length}, ` +
+              `perFile=${effectiveMaxSnippetsPerFile}, charsA=${novelReferenceHintA.length}, charsB=${novelReferenceHintB.length}, charsC=${novelReferenceHintC.length}, ${result.durationMs}ms`,
+            );
+          }
+        }
+      }
+    } catch {
+      // 静默降级，不阻塞主流程
+    }
+  }
+
+  const extraSystemPrompt = [
+    groupIntro,
+    groupSystemPrompt,
+    novelReferenceHintA,
+    memoryWriteHint,
+    novelReferenceHintB,
+    complexityGuidance,
+    novelReferenceHintC,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
   const baseBody = sessionCtx.BodyStripped ?? sessionCtx.Body ?? "";
   // Use CommandBody/RawBody for bare reset detection (clean message without structural context).
   const rawBodyTrimmed = (ctx.CommandBody ?? ctx.RawBody ?? ctx.Body ?? "").trim();

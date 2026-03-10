@@ -84,4 +84,43 @@ describe("agent event handler", () => {
     expect(payload.message?.content?.[0]?.text).toBe("累计文本");
     nowSpy.mockRestore();
   });
+  it("emits chat delta with structured thinking for reasoning events", () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(3_000);
+    const broadcast = vi.fn();
+    const nodeSendToSession = vi.fn();
+    const agentRunSeq = new Map<string, number>();
+    const chatRunState = createChatRunState();
+    chatRunState.registry.add("run-3", { sessionKey: "session-3", clientRunId: "client-3" });
+
+    const handler = createAgentEventHandler({
+      broadcast,
+      nodeSendToSession,
+      agentRunSeq,
+      chatRunState,
+      resolveSessionKeyForRun: () => undefined,
+      clearAgentRunContext: vi.fn(),
+    });
+
+    handler({
+      runId: "run-3",
+      seq: 1,
+      stream: "reasoning",
+      ts: Date.now(),
+      data: {
+        text: "Reasoning:\n_step_",
+        thinking: "step",
+      },
+    });
+
+    const chatCalls = broadcast.mock.calls.filter(([event]) => event === "chat");
+    expect(chatCalls).toHaveLength(1);
+    const payload = chatCalls[0]?.[1] as {
+      state?: string;
+      message?: { content?: Array<{ type?: string; text?: string; thinking?: string }> };
+    };
+    expect(payload.state).toBe("delta");
+    expect(payload.message?.content?.[0]?.type).toBe("thinking");
+    expect(payload.message?.content?.[0]?.thinking).toBe("step");
+    nowSpy.mockRestore();
+  });
 });

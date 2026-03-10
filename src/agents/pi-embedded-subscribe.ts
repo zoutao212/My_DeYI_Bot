@@ -1,6 +1,7 @@
 import { parseReplyDirectives } from "../auto-reply/reply/reply-directives.js";
 import { createStreamingDirectiveAccumulator } from "../auto-reply/reply/streaming-directives.js";
 import { formatToolAggregate } from "../auto-reply/tool-meta.js";
+import { emitAgentEvent } from "../infra/agent-events.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import type { InlineCodeState } from "../markdown/code-spans.js";
 import { buildCodeSpanIndex, createInlineCodeState } from "../markdown/code-spans.js";
@@ -41,7 +42,10 @@ export function subscribeEmbeddedPiSession(params: SubscribeEmbeddedPiSessionPar
     reasoningMode,
     includeReasoning: reasoningMode === "on",
     shouldEmitPartialReplies: !(reasoningMode === "on" && !params.onBlockReply),
-    streamReasoning: reasoningMode === "stream" && typeof params.onReasoningStream === "function",
+    streamReasoning:
+      reasoningMode === "stream" &&
+      (typeof params.onReasoningStream === "function" ||
+        typeof params.onAgentEvent === "function"),
     deltaBuffer: "",
     blockBuffer: "",
     // Track if a streamed chunk opened a <think> block (stateful across chunks).
@@ -425,12 +429,27 @@ export function subscribeEmbeddedPiSession(params: SubscribeEmbeddedPiSessionPar
   };
 
   const emitReasoningStream = (text: string) => {
-    if (!state.streamReasoning || !params.onReasoningStream) return;
+    if (!state.streamReasoning) return;
     const formatted = formatReasoningMessage(text);
     if (!formatted) return;
     if (formatted === state.lastStreamedReasoning) return;
     state.lastStreamedReasoning = formatted;
-    void params.onReasoningStream({
+    emitAgentEvent({
+      runId: params.runId,
+      stream: "reasoning",
+      data: {
+        text: formatted,
+        thinking: text.trim(),
+      },
+    });
+    void params.onAgentEvent?.({
+      stream: "reasoning",
+      data: {
+        text: formatted,
+        thinking: text.trim(),
+      },
+    });
+    void params.onReasoningStream?.({
       text: formatted,
     });
   };

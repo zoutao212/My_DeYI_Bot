@@ -15,6 +15,7 @@ function createState(overrides?: Partial<ChatState>): ChatState {
     chatMessage: "",
     chatRunId: "run-1",
     chatStream: "",
+    chatReasoningStream: null,
     chatStreamStartedAt: Date.now(),
     lastError: null,
     ...overrides,
@@ -110,5 +111,59 @@ describe("handleChatEvent session fallback", () => {
 
     expect(nextState).toBeNull();
     expect(state.chatMessages).toHaveLength(0);
+  });
+
+  it("upgrades the last assistant message when a richer final payload arrives", () => {
+    const state = createState({
+      chatRunId: null,
+      chatMessages: [
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "最终答案" }],
+          timestamp: 1,
+        },
+      ],
+    });
+
+    const nextState = handleChatEvent(state, {
+      runId: "run-1",
+      sessionKey: "agent:main:session-a",
+      state: "final",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "先检查 transcript，再升级消息。" },
+          { type: "text", text: "最终答案" },
+        ],
+        timestamp: 2,
+      },
+    });
+
+    expect(nextState).toBe("final");
+    expect(state.chatMessages).toHaveLength(1);
+    const upgraded = state.chatMessages[0] as Record<string, unknown>;
+    const content = upgraded.content as Array<Record<string, unknown>>;
+    expect(content[0]?.type).toBe("thinking");
+    expect(content[1]?.text).toBe("最终答案");
+  });
+  it("tracks reasoning during delta streaming", () => {
+    const state = createState();
+
+    const nextState = handleChatEvent(state, {
+      runId: "run-1",
+      sessionKey: "agent:main:session-a",
+      state: "delta",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "先检查消息格式" },
+          { type: "text", text: "正在处理" },
+        ],
+      },
+    });
+
+    expect(nextState).toBe("delta");
+    expect(state.chatStream).toBe("正在处理");
+    expect(state.chatReasoningStream).toBe("先检查消息格式");
   });
 });

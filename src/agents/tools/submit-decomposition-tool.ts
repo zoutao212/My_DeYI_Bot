@@ -1,5 +1,9 @@
+import crypto from "node:crypto";
 import { Type } from "@sinclair/typebox";
 import type { AnyAgentTool } from "./common.js";
+import { enqueueFollowupRun, type FollowupRun } from "../../auto-reply/reply/queue.js";
+import { resolveQueueSettings } from "../../auto-reply/reply/queue/settings.js";
+import { getCurrentFollowupRunContext, getGlobalOrchestrator } from "./enqueue-task-tool.js";
 
 const SubTaskSchema = Type.Object({
   id: Type.Optional(
@@ -101,6 +105,109 @@ export function createSubmitDecompositionTool(): AnyAgentTool {
         warnings,
         subTasks: normalized,
       };
+
+      try {
+        const currentFollowupRun = getCurrentFollowupRunContext();
+        const isQueueTask = currentFollowupRun?.isQueueTask ?? false;
+        if (currentFollowupRun && !isQueueTask) {
+          const sessionId = currentFollowupRun.run.sessionId;
+          const orchestrator = getGlobalOrchestrator();
+
+          let rootTaskId = currentFollowupRun.rootTaskId;
+          if (!rootTaskId) {
+            rootTaskId = crypto.randomUUID();
+            currentFollowupRun.rootTaskId = rootTaskId;
+            console.log(`[submit_decomposition] 🆕 New rootTaskId: ${rootTaskId}`);
+          }
+
+          let taskTree = await orchestrator.loadTaskTree(sessionId);
+          if (!taskTree) {
+            taskTree = await orchestrator.initializeTaskTree(
+              currentFollowupRun.prompt,
+              sessionId,
+            );
+            console.log(`[submit_decomposition] ✅ Task tree initialized: sessionId=${sessionId}`);
+          }
+
+          const agentSessionKey = currentFollowupRun.run.sessionKey ?? sessionId;
+          const resolvedQueue = resolveQueueSettings({
+            cfg: currentFollowupRun.run.config ?? ({} as any),
+            inlineMode: "followup",
+          });
+
+          let enqueuedCount = 0;
+          for (const t of normalized) {
+            const prompt = typeof (t as any)?.prompt === "string" ? String((t as any).prompt) : "";
+            const summary = typeof (t as any)?.summary === "string" ? String((t as any).summary) : prompt;
+            const waitForChildren = typeof (t as any)?.waitForChildren === "boolean" ? Boolean((t as any).waitForChildren) : false;
+            const taskType = typeof (t as any)?.taskType === "string" ? String((t as any).taskType) : undefined;
+
+            const subTask = await orchestrator.addSubTask(
+              taskTree,
+              prompt,
+              summary,
+              undefined,
+              waitForChildren,
+              rootTaskId,
+            );
+
+            if (taskType) {
+              subTask.taskType = taskType as any;
+            }
+
+            const subTaskDepth = subTask.depth ?? 0;
+            const followupRun: FollowupRun = {
+              prompt,
+              summaryLine: summary,
+              enqueuedAt: Date.now(),
+              run: currentFollowupRun.run,
+              isQueueTask: true,
+              isRootTask: false,
+              isNewRootTask: false,
+              taskDepth: subTaskDepth,
+              subTaskId: subTask.id,
+              rootTaskId,
+              originatingChannel: currentFollowupRun.originatingChannel,
+              originatingTo: currentFollowupRun.originatingTo,
+              originatingAccountId: currentFollowupRun.originatingAccountId,
+              originatingThreadId: currentFollowupRun.originatingThreadId,
+              originatingChatType: currentFollowupRun.originatingChatType,
+              modelContextWindow: currentFollowupRun.modelContextWindow,
+              modelMaxOutputTokens: currentFollowupRun.modelMaxOutputTokens,
+              abortSignal: currentFollowupRun.abortSignal,
+              executionContext: currentFollowupRun.executionContext,
+            };
+
+            const enqueued = enqueueFollowupRun(
+              agentSessionKey,
+              followupRun,
+              resolvedQueue,
+              "none",
+            );
+
+            if (enqueued) {
+              enqueuedCount++;
+            }
+          }
+
+          await orchestrator.saveTaskTree(taskTree);
+
+          (payload as any).autoEnqueue = {
+            success: true,
+            sessionId,
+            rootTaskId,
+            enqueuedCount,
+            totalCount: normalized.length,
+            taskTreePath: `~/.clawdbot/tasks/${sessionId}/TASK_TREE.json`,
+          };
+        }
+      } catch (err) {
+        console.error(`[submit_decomposition] ❌ autoEnqueue failed:`, err);
+        (payload as any).autoEnqueue = {
+          success: false,
+          error: String(err),
+        };
+      }
 
       const text = JSON.stringify(payload);
       // 控制在 480 左右，留出日志前缀空间，确保进入 toolMetas.meta 的 500 字符截断窗口

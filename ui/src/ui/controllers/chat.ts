@@ -1,5 +1,5 @@
 import type { GatewayBrowserClient } from "../gateway";
-import { extractText } from "../chat/message-extract";
+import { extractText, extractThinking } from "../chat/message-extract";
 import { generateUUID } from "../uuid";
 
 export type ChatState = {
@@ -14,6 +14,7 @@ export type ChatState = {
   chatMessage: string;
   chatRunId: string | null;
   chatStream: string | null;
+  chatReasoningStream?: string | null;
   chatStreamStartedAt: number | null;
   lastError: string | null;
 };
@@ -81,6 +82,7 @@ export async function sendChatMessage(
   const runId = generateUUID();
   state.chatRunId = runId;
   state.chatStream = "";
+  state.chatReasoningStream = null;
   state.chatStreamStartedAt = now;
   try {
     const payload: Record<string, unknown> = {
@@ -104,6 +106,7 @@ export async function sendChatMessage(
     const error = String(err);
     state.chatRunId = null;
     state.chatStream = null;
+    state.chatReasoningStream = null;
     state.chatStreamStartedAt = null;
     state.lastError = error;
     state.chatMessages = [
@@ -202,6 +205,7 @@ export function handleChatEvent(
       }
       // 聊天室分条推送时，优先展示落地气泡，不再额外显示累计 stream 气泡。
       state.chatStream = null;
+      state.chatReasoningStream = null;
       return payload.state;
     }
 
@@ -212,8 +216,17 @@ export function handleChatEvent(
         state.chatStream = next;
       }
     }
+    const nextThinking = extractThinking(payload.message);
+    state.chatReasoningStream =
+      typeof nextThinking === "string" && nextThinking.trim().length > 0
+        ? nextThinking
+        : null;
   } else if (payload.state === "final") {
     const finalText = extractText(payload.message);
+    const finalMessage =
+      payload.message && typeof payload.message === "object"
+        ? (payload.message as Record<string, unknown>)
+        : null;
     const msgs = state.chatMessages as Array<Record<string, unknown>>;
     const hasMatchingTempMessage = msgs.some(
       (m) => typeof m._chatroomRunId === "string" && m._chatroomRunId === payload.runId,
@@ -252,33 +265,60 @@ export function handleChatEvent(
           | undefined;
         const lastRole = typeof last?.role === "string" ? last.role : "";
         const lastText = last ? extractText(last) : null;
-        const shouldAppend =
-          lastRole !== "assistant" || typeof lastText !== "string" || lastText.trim() !== finalText.trim();
-        if (shouldAppend) {
-          state.chatMessages = [
-            ...state.chatMessages,
-            {
-              role: "assistant",
-              content: [{ type: "text", text: finalText }],
-              timestamp: Date.now(),
-            },
-          ];
+        const lastThinking = last ? extractThinking(last) : null;
+        const finalThinking = finalMessage ? extractThinking(finalMessage) : null;
+        const shouldReplaceExisting =
+          lastRole === "assistant" &&
+          typeof lastText === "string" &&
+          lastText.trim() === finalText.trim() &&
+          typeof finalThinking === "string" &&
+          finalThinking.trim().length > 0 &&
+          (!lastThinking || lastThinking.trim().length === 0);
+        if (shouldReplaceExisting && finalMessage) {
+          const next = [...msgs];
+          next[next.length - 1] = {
+            ...finalMessage,
+            role: "assistant",
+            timestamp:
+              typeof finalMessage.timestamp === "number"
+                ? finalMessage.timestamp
+                : Date.now(),
+          };
+          state.chatMessages = next;
+        } else {
+          const shouldAppend =
+            lastRole !== "assistant" ||
+            typeof lastText !== "string" ||
+            lastText.trim() !== finalText.trim();
+          if (shouldAppend) {
+            state.chatMessages = [
+              ...state.chatMessages,
+              finalMessage ?? {
+                role: "assistant",
+                content: [{ type: "text", text: finalText }],
+                timestamp: Date.now(),
+              },
+            ];
+          }
         }
       }
     }
     state.chatStream = null;
+    state.chatReasoningStream = null;
     if (shouldCloseActiveRun) {
       state.chatRunId = null;
       state.chatStreamStartedAt = null;
     }
   } else if (payload.state === "aborted") {
     state.chatStream = null;
+    state.chatReasoningStream = null;
     if (state.chatRunId && payload.runId === state.chatRunId) {
       state.chatRunId = null;
       state.chatStreamStartedAt = null;
     }
   } else if (payload.state === "error") {
     state.chatStream = null;
+    state.chatReasoningStream = null;
     if (state.chatRunId && payload.runId === state.chatRunId) {
       state.chatRunId = null;
       state.chatStreamStartedAt = null;

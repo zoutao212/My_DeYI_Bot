@@ -37,6 +37,7 @@ export type ChatProps = {
   messages: unknown[];
   toolMessages: unknown[];
   stream: string | null;
+  reasoningStream?: string | null;
   streamStartedAt: number | null;
   waitElapsedSeconds: number;
   assistantAvatarUrl?: string | null;
@@ -156,7 +157,7 @@ function renderCompactionIndicator(status: CompactionIndicatorStatus | null | un
 
 export function renderChat(props: ChatProps) {
   const canCompose = props.connected;
-  const isBusy = props.sending || props.stream !== null;
+  const isBusy = props.sending || props.stream !== null || (props.reasoningStream ?? null) !== null;
   const canAbort = Boolean(props.canAbort && props.onAbort);
   const activeSession = props.sessions?.sessions?.find(
     (row) => row.key === props.sessionKey,
@@ -190,10 +191,12 @@ export function renderChat(props: ChatProps) {
         if (item.kind === "stream") {
           return renderStreamingGroup(
             item.text,
+            item.reasoning ?? null,
             item.startedAt,
             props.onOpenSidebar,
             assistantIdentity,
             props.waitElapsedSeconds,
+            showReasoning,
           );
         }
 
@@ -510,13 +513,17 @@ function buildChatItems(props: ChatProps): Array<ChatItem | MessageGroup> {
     }
   }
 
-  if (props.stream !== null) {
+  if (props.stream !== null || (props.reasoningStream ?? null) !== null) {
     const key = `stream:${props.sessionKey}:${props.streamStartedAt ?? "live"}`;
-    if (props.stream.trim().length > 0) {
+    const streamText = props.stream ?? "";
+    const reasoningText = props.reasoningStream ?? null;
+    const hasVisibleReasoning = props.showThinking && Boolean(reasoningText?.trim());
+    if (streamText.trim().length > 0 || hasVisibleReasoning) {
       items.push({
         kind: "stream",
         key,
-        text: props.stream,
+        text: streamText,
+        reasoning: reasoningText,
         startedAt: props.streamStartedAt ?? Date.now(),
       });
     } else {

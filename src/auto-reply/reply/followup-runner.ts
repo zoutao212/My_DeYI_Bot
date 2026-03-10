@@ -58,7 +58,7 @@ import { estimateTokens, allocateBudget, truncateToTokenBudget, type BudgetReque
 import { localGrepSearch, getDefaultMemoryDirs } from "../../memory/local-search.js";
 import { createV2EnhancedExecutor, type V2EnhancedExecutor } from "../../agents/intelligent-task-decomposition/v2-enhanced-executor-v2.js";
 import { globalAbortManager } from "../../agents/global-abort-manager.js"; // 🚨 Bug #3 修复: 全局中断管理器
-import { searchNovelAssets, hasNovelAssets, formatNovelSnippetsForPrompt } from "../../memory/novel-assets-searcher.js";
+import { searchNovelAssets, hasNovelAssets, formatNovelSnippetsForPromptBlocks } from "../../memory/novel-assets-searcher.js";
 
 const TOOL_PROGRESS_ENABLED = process.env.CLAWDBOT_TASK_PROGRESS_TOOL_VERBOSE !== "0";
 
@@ -896,10 +896,9 @@ export function createFollowupRunner(params: {
           }
         }
 
-        // 小说素材注入（写作/角色扮演子任务）
-        // 从 NovelsAssets/ 目录检索与当前任务相关的原文片段（风格参考、情节参考）
-        // 仅对 writing/design 类型子任务启用，零远程 API 调用
-        let novelReferenceCtx = "";
+        let novelReferenceCtxA = "";
+        let novelReferenceCtxB = "";
+        let novelReferenceCtxC = "";
         if (shouldInjectHeavyContext && isSubTaskForMemory && queued.run.workspaceDir) {
           const novelTaskTypes = ["writing", "design"];
           const taskType = subTask?.taskType ?? "generic";
@@ -907,21 +906,53 @@ export function createFollowupRunner(params: {
             try {
               const novelAvailable = await hasNovelAssets(queued.run.workspaceDir);
               if (novelAvailable) {
-                const searchQuery = subTask?.summary || queued.prompt.substring(0, 300);
+                 const searchQuery = subTask?.summary || queued.prompt.substring(0, 300);
+                 const maxSnippets = Number.parseInt(process.env.CLAWDBOT_NOVEL_REF_MAX_SNIPPETS ?? "", 10);
+                 const maxSnippetsPerFile = Number.parseInt(process.env.CLAWDBOT_NOVEL_REF_MAX_SNIPPETS_PER_FILE ?? "", 10);
+                 const snippetTargetChars = Number.parseInt(process.env.CLAWDBOT_NOVEL_REF_SNIPPET_TARGET_CHARS ?? "", 10);
+                 const maxTotalChars = Number.parseInt(process.env.CLAWDBOT_NOVEL_REF_MAX_TOTAL_CHARS ?? "", 10);
+                 const blocks = Number.parseInt(process.env.CLAWDBOT_NOVEL_REF_BLOCKS ?? "", 10);
+
+                 const effectiveMaxSnippets = Number.isFinite(maxSnippets) ? Math.min(12, Math.max(2, maxSnippets)) : 8;
+                 const effectiveMaxSnippetsPerFile = Number.isFinite(maxSnippetsPerFile)
+                   ? Math.min(6, Math.max(1, maxSnippetsPerFile))
+                   : 3;
+                 const effectiveSnippetTarget = Number.isFinite(snippetTargetChars)
+                   ? Math.min(600, Math.max(120, snippetTargetChars))
+                   : 260;
+                 const effectiveMaxTotalChars = Number.isFinite(maxTotalChars) ? Math.min(12000, Math.max(2500, maxTotalChars)) : 7000;
+                 const effectiveBlocks = Number.isFinite(blocks) ? Math.min(6, Math.max(1, blocks)) : 3;
+
                 const novelResult = await searchNovelAssets(searchQuery, queued.run.workspaceDir, {
-                  maxSnippets: 4,
-                  snippetTargetChars: 400,
-                  snippetMaxChars: 600,
-                  maxSnippetsPerFile: 2,
-                  minScore: 0.15,
-                  autoExtractKeywords: true,
-                });
+                   maxSnippets: effectiveMaxSnippets,
+                   snippetTargetChars: effectiveSnippetTarget,
+                   snippetMaxChars: Math.min(800, effectiveSnippetTarget + 120),
+                   maxSnippetsPerFile: effectiveMaxSnippetsPerFile,
+                   minScore: 0.12,
+                   autoExtractKeywords: true,
+                 });
                 if (novelResult.snippets.length > 0) {
-                  const MAX_NOVEL_REF_CHARS = 3000;
-                  const formatted = formatNovelSnippetsForPrompt(novelResult, MAX_NOVEL_REF_CHARS);
-                  if (formatted) {
-                    novelReferenceCtx = `\n\n[📖 原文参考片段]\n以下是从小说素材库中检索到的与当前创作任务相关的原文片段，请参考其写作风格、描写手法和叙事节奏：\n${formatted}`;
-                    console.log(`[followup-runner] 📖 NovelsAssets 参考注入: ${novelResult.snippets.length} snippets, ${novelReferenceCtx.length} chars, ${novelResult.durationMs}ms (taskType=${taskType})`);
+                  const formattedBlocks = formatNovelSnippetsForPromptBlocks(novelResult, {
+                    maxTotalChars: effectiveMaxTotalChars,
+                    blocks: effectiveBlocks,
+                  });
+                  if (formattedBlocks.length > 0) {
+                    // W13+W14: 块级指令已内嵌到 formattedBlocks 中，外层只做身份标签
+                     const blockRoles = ["叙事教练·节奏与视角", "风格参照·意象与质感", "技法示范·结构与张力"];
+                     const mk = (idx: number, body: string) =>
+                       `\n\n[📖 风格化学习样本｜${blockRoles[idx] ?? `样本块 ${idx + 1}`}]\n⚠️ 以下是 few-shot 写作样本，严禁照抄情节与专有名词，只学习写法。\n${body}`;
+                    const blockA = formattedBlocks[0] ?? "";
+                    const blockB = formattedBlocks[1] ?? "";
+                    // 超过 3 块时不浪费：把剩余块合并进 C 槽位，仍保持 A/B/C 分散注入。
+                    const blockC = formattedBlocks.slice(2).join("\n\n");
+                    novelReferenceCtxA = blockA ? mk(0, blockA) : "";
+                    novelReferenceCtxB = blockB ? mk(1, blockB) : "";
+                    novelReferenceCtxC = blockC ? mk(2, blockC) : "";
+                     console.log(
+                       `[followup-runner] 📖 NovelsAssets 参考注入(分块): snippets=${novelResult.snippets.length}, ` +
+                        `blocks=${formattedBlocks.length}, perFile=${effectiveMaxSnippetsPerFile}, charsA=${novelReferenceCtxA.length}, charsB=${novelReferenceCtxB.length}, charsC=${novelReferenceCtxC.length}, ` +
+                       `${novelResult.durationMs}ms (taskType=${taskType})`,
+                     );
                   }
                 }
               }
@@ -1211,7 +1242,7 @@ export function createFollowupRunner(params: {
                   }
                 }
 
-                const combined = [base, siblingCtx, parentGoalCtx, subTaskMemoryCtx, novelReferenceCtx, persistInstruction, blueprintCtx, chapterOutlineCtx, experienceHint ? `\n\n${experienceHint}` : ""].filter(Boolean).join("");
+                const combined = [base, siblingCtx, novelReferenceCtxA, parentGoalCtx, subTaskMemoryCtx, novelReferenceCtxB, persistInstruction, blueprintCtx, novelReferenceCtxC, chapterOutlineCtx, experienceHint ? `\n\n${experienceHint}` : ""].filter(Boolean).join("");
                 return combined || undefined;
               })();
 

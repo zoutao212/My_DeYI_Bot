@@ -462,6 +462,7 @@ export function renderApp(state: AppViewState) {
                 state.sessionKey = next;
                 state.chatMessage = "";
                 state.chatStream = null;
+                state.chatReasoningStream = null;
                 state.chatStreamStartedAt = null;
                 state.chatRunId = null;
                 state.chatQueue = [];
@@ -489,6 +490,7 @@ export function renderApp(state: AppViewState) {
               messages: state.chatMessages,
               toolMessages: state.chatToolMessages,
               stream: state.chatStream,
+              reasoningStream: state.chatReasoningStream,
               streamStartedAt: state.chatStreamStartedAt,
               waitElapsedSeconds: state.chatWaitTick ?? 0,
               draft: state.chatMessage,

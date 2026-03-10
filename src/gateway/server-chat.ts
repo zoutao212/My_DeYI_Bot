@@ -125,13 +125,27 @@ export function createAgentEventHandler({
   // trailing-edge timers：节流窗口结束后自动发送最新缓冲内容，
   // 避免最后一个 delta 被吞掉导致前端文字滞后
   const deltaTrailingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const reasoningBuffers = new Map<string, string>();
+
+  const buildAssistantContent = (text: string, thinking?: string) => {
+    const content: Array<Record<string, unknown>> = [];
+    const normalizedThinking = thinking?.trim() ?? "";
+    const normalizedText = text.trim();
+    if (normalizedThinking) {
+      content.push({ type: "thinking", thinking: normalizedThinking });
+    }
+    if (normalizedText || content.length === 0) {
+      content.push({ type: "text", text });
+    }
+    return content;
+  };
 
   const sendDeltaNow = (
     sessionKey: string,
     clientRunId: string,
     seq: number,
     text: string,
-    extras?: { messageId?: string; chatroomMessageText?: string },
+    extras?: { messageId?: string; chatroomMessageText?: string; thinking?: string },
   ) => {
     chatRunState.deltaSentAt.set(clientRunId, Date.now());
     const payload = {
@@ -143,7 +157,7 @@ export function createAgentEventHandler({
       chatroomMessageText: extras?.chatroomMessageText,
       message: {
         role: "assistant",
-        content: [{ type: "text", text }],
+        content: buildAssistantContent(text, extras?.thinking),
         timestamp: Date.now(),
       },
     };
@@ -167,20 +181,28 @@ export function createAgentEventHandler({
     sessionKey: string,
     clientRunId: string,
     seq: number,
-    text: string,
+    update: { text?: string; thinking?: string },
     extras?: { messageId?: string; chatroomMessageText?: string },
   ) => {
+    if (typeof update.text === "string") {
+      chatRunState.buffers.set(clientRunId, update.text);
+    }
+    if (typeof update.thinking === "string") {
+      reasoningBuffers.set(clientRunId, update.thinking);
+    }
+    const text = chatRunState.buffers.get(clientRunId) ?? "";
+    const thinking = reasoningBuffers.get(clientRunId) ?? "";
+    const previewSource = text || thinking;
     // 首个 chunk 接收日志：在 deltaSentAt 中还没有记录时输出
     const isFirstChunk = !chatRunState.deltaSentAt.has(clientRunId);
     if (isFirstChunk) {
       const timeStr = new Date().toLocaleTimeString("zh-CN", { hour12: false });
-      const preview = text.length > 60 ? text.slice(0, 60) + "..." : text;
+      const preview =
+        previewSource.length > 60 ? previewSource.slice(0, 60) + "..." : previewSource;
       console.log(
-        `${timeStr} [reply] 🔵 AI 开始回复 session=${sessionKey} runId=${clientRunId} firstChunkChars=${text.length} preview="${preview}"`,
+        `${timeStr} [reply] 🔵 AI 开始回复 session=${sessionKey} runId=${clientRunId} firstChunkChars=${previewSource.length} preview="${preview}"`,
       );
     }
-
-    chatRunState.buffers.set(clientRunId, text);
     const now = Date.now();
     const last = chatRunState.deltaSentAt.get(clientRunId) ?? 0;
     const elapsed = now - last;
@@ -191,7 +213,10 @@ export function createAgentEventHandler({
 
     if (elapsed >= 150) {
       // 超过节流窗口，立即发送
-      sendDeltaNow(sessionKey, clientRunId, seq, text, extras);
+      sendDeltaNow(sessionKey, clientRunId, seq, text, {
+        ...extras,
+        thinking,
+      });
     } else {
       // 在节流窗口内，设置 trailing timer 确保窗口结束后发送
       const delay = 150 - elapsed;
@@ -200,8 +225,12 @@ export function createAgentEventHandler({
         setTimeout(() => {
           deltaTrailingTimers.delete(clientRunId);
           const latestText = chatRunState.buffers.get(clientRunId);
-          if (latestText != null) {
-            sendDeltaNow(sessionKey, clientRunId, seq, latestText, extras);
+          const latestThinking = reasoningBuffers.get(clientRunId);
+          if (latestText != null || latestThinking != null) {
+            sendDeltaNow(sessionKey, clientRunId, seq, latestText ?? "", {
+              ...extras,
+              thinking: latestThinking,
+            });
           }
         }, delay),
       );
@@ -225,16 +254,20 @@ export function createAgentEventHandler({
   ) => {
     cleanupDeltaTimer(clientRunId);
     const text = chatRunState.buffers.get(clientRunId)?.trim() ?? "";
+    const thinking = reasoningBuffers.get(clientRunId)?.trim() ?? "";
     chatRunState.buffers.delete(clientRunId);
+    reasoningBuffers.delete(clientRunId);
     chatRunState.deltaSentAt.delete(clientRunId);
 
     // CLI 控制台通知式日志
     const now = new Date();
     const timeStr = now.toLocaleTimeString("zh-CN", { hour12: false });
-    const textPreview = text.length > 80 ? text.slice(0, 80) + "..." : text;
+    const previewSource = text || thinking;
+    const textPreview =
+      previewSource.length > 80 ? previewSource.slice(0, 80) + "..." : previewSource;
     if (jobState === "done") {
       console.log(
-        `${timeStr} [reply] ✅ AI 已回复 session=${sessionKey} runId=${clientRunId} chars=${text.length}${textPreview ? ` preview="${textPreview}"` : ""}`,
+        `${timeStr} [reply] ✅ AI 已回复 session=${sessionKey} runId=${clientRunId} chars=${previewSource.length}${textPreview ? ` preview="${textPreview}"` : ""}`,
       );
     } else {
       const errMsg = error ? formatForLog(error) : "unknown";
@@ -249,10 +282,10 @@ export function createAgentEventHandler({
         sessionKey,
         seq,
         state: "final" as const,
-        message: text
+        message: text || thinking
           ? {
               role: "assistant",
-              content: [{ type: "text", text }],
+              content: buildAssistantContent(text, thinking),
               timestamp: Date.now(),
             }
           : undefined,
@@ -417,10 +450,28 @@ export function createAgentEventHandler({
               `textLen=${chatroomMessageText.length} totalLen=${evt.data.text.length}`,
           );
         }
-        emitChatDelta(sessionKey, clientRunId, evt.seq, evt.data.text, {
+        emitChatDelta(sessionKey, clientRunId, evt.seq, { text: evt.data.text }, {
           messageId,
           chatroomMessageText,
         });
+      } else if (
+        !isAborted &&
+        evt.stream === "reasoning" &&
+        (typeof evt.data?.thinking === "string" || typeof evt.data?.text === "string")
+      ) {
+        emitChatDelta(
+          sessionKey,
+          clientRunId,
+          evt.seq,
+          {
+            thinking:
+              typeof evt.data?.thinking === "string"
+                ? evt.data.thinking
+                : typeof evt.data?.text === "string"
+                  ? evt.data.text
+                  : undefined,
+          },
+        );
       } else if (!isAborted && (lifecyclePhase === "end" || lifecyclePhase === "error")) {
         if (chatLink) {
           const finished = chatRunState.registry.shift(evt.runId);
@@ -462,6 +513,7 @@ export function createAgentEventHandler({
         chatRunState.abortedRuns.delete(clientRunId);
         chatRunState.abortedRuns.delete(evt.runId);
         chatRunState.buffers.delete(clientRunId);
+        reasoningBuffers.delete(clientRunId);
         chatRunState.deltaSentAt.delete(clientRunId);
         cleanupDeltaTimer(clientRunId);
         // 清理聊天室标记

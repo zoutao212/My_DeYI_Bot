@@ -144,9 +144,13 @@ export function detectToolCallIntentInText(text: string): boolean {
   // 模式1: ```tool 代码块（标准文本工具格式）
   if (/```tool\s*\n/i.test(text)) return true;
 
+  // 模式1b: 中文工具标记格式（Gemini 偶发输出）
+  // 例如: [工具: show_task_board] 或 [工具：enqueue_task]
+  if (/\[\s*工具\s*[:：]\s*[a-zA-Z_]\w*\s*\]/.test(text)) return true;
+
   // 模式2: 函数调用语法 — toolName(param="value") 或 toolName(param=value)
   // 匹配常见工具名：read, write, edit, exec, process, memory_search 等
-  if (/\b(?:read|write|edit|exec|process|memory_search|memory_get|web_search|web_fetch|enqueue_task|browser|send_file|message)\s*\([^)]*[=:][^)]+\)/i.test(text)) return true;
+  if (/\b(?:read|write|edit|exec|process|memory_search|memory_get|web_search|web_fetch|enqueue_task|show_task_board|browser|send_file|message)\s*\([^)]*[=:][^)]+\)/i.test(text)) return true;
 
   // 模式3: JSON 工具调用格式在文本中 — {"tool": "...", "args": ...}
   if (/\{\s*["']tool["']\s*:\s*["']\w+["']/.test(text)) return true;
@@ -492,6 +496,17 @@ function mapMemoryPatchArgs(args: Record<string, unknown>): Record<string, unkno
  *   3. 裸 JSON 格式 {"tool": "xxx", "args": {...}} 在文本中
  */
 export function parseSpotToolCallsFromText(text: string): TextToolCall[] {
+  // 策略0: 中文工具标记格式 [工具: xxx]
+  // 说明：此格式通常不带参数；参数回退为空对象。
+  const toolTagPattern = /\[\s*工具\s*[:：]\s*([a-zA-Z_]\w*)\s*\]/g;
+  const tagged: TextToolCall[] = [];
+  let tagMatch: RegExpExecArray | null;
+  while ((tagMatch = toolTagPattern.exec(text)) !== null) {
+    const tool = tagMatch[1];
+    tagged.push({ tool, args: {}, raw: tagMatch[0] });
+  }
+  if (tagged.length > 0) return tagged.slice(0, MAX_CALLS_PER_ITERATION);
+
   // 策略1: 优先尝试标准 ```tool 代码块
   const standard = parseTextToolCalls(text);
   if (standard.length > 0) return standard;

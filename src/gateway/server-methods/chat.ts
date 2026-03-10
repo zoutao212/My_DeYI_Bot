@@ -266,13 +266,9 @@ function broadcastChatFinal(params: {
   params.context.nodeSendToSession(params.sessionKey, "chat", payload);
 }
 
-function extractLastToolResultText(params: {
-  messages: Record<string, unknown>[];
-  markerId: string;
-}): string | null {
-  let startIndex = -1;
-  for (let i = params.messages.length - 1; i >= 0; i -= 1) {
-    const entry = params.messages[i];
+function findRunMarkerStartIndex(messages: Record<string, unknown>[], markerId: string): number {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const entry = messages[i];
     const m = extractTranscriptMessage(entry);
     if (!m) continue;
     if (m.role !== "user") continue;
@@ -282,12 +278,18 @@ function extractLastToolResultText(params: {
       .map((part) => (part && typeof part === "object" ? (part as Record<string, unknown>).text : null))
       .filter((t): t is string => typeof t === "string")
       .join("\n");
-    if (matchesRunMarker(text, params.markerId)) {
-      startIndex = i;
-      break;
+    if (matchesRunMarker(text, markerId)) {
+      return i;
     }
   }
+  return -1;
+}
 
+function extractLastToolResultText(params: {
+  messages: Record<string, unknown>[];
+  markerId: string;
+}): string | null {
+  const startIndex = findRunMarkerStartIndex(params.messages, params.markerId);
   if (startIndex < 0) return null;
 
   for (let i = params.messages.length - 1; i > startIndex; i -= 1) {
@@ -307,6 +309,53 @@ function extractLastToolResultText(params: {
     }
     const combined = parts.join("\n").trim();
     if (combined) return combined;
+  }
+  return null;
+}
+
+function extractTextFromTranscriptMessage(message: Record<string, unknown> | null): string {
+  if (!message) return "";
+  const content = message.content;
+  if (typeof content === "string") return content.trim();
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (!item || typeof item !== "object") return "";
+        const rec = item as Record<string, unknown>;
+        if (rec.type === "text" && typeof rec.text === "string") return rec.text.trim();
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+  }
+  if (typeof message.text === "string") return message.text.trim();
+  return "";
+}
+
+function hasThinkingContent(message: Record<string, unknown> | null): boolean {
+  if (!message) return false;
+  const content = message.content;
+  if (!Array.isArray(content)) return false;
+  return content.some((item) => {
+    if (!item || typeof item !== "object") return false;
+    const rec = item as Record<string, unknown>;
+    return rec.type === "thinking" && typeof rec.thinking === "string" && rec.thinking.trim().length > 0;
+  });
+}
+
+function extractLastAssistantMessage(params: {
+  messages: Record<string, unknown>[];
+  markerId: string;
+}): Record<string, unknown> | null {
+  const startIndex = findRunMarkerStartIndex(params.messages, params.markerId);
+  if (startIndex < 0) return null;
+
+  for (let i = params.messages.length - 1; i > startIndex; i -= 1) {
+    const m = extractTranscriptMessage(params.messages[i]);
+    if (!m) continue;
+    if (m.role !== "assistant") continue;
+    if (extractTextFromTranscriptMessage(m) || hasThinkingContent(m)) return m;
   }
   return null;
 }
@@ -1372,6 +1421,7 @@ export const chatHandlers: GatewayRequestHandlers = {
           abortSignal: abortController.signal,
           images: parsedImages.length > 0 ? parsedImages : undefined,
           disableBlockStreaming: true,
+          onReasoningStream: async () => {},
           onAgentRunStart: () => {
             agentRunStarted = true;
           },
@@ -1443,6 +1493,9 @@ export const chatHandlers: GatewayRequestHandlers = {
             latestSessionId && latestStorePath
               ? readSessionMessages(latestSessionId, latestStorePath, latestEntry?.sessionFile)
               : [];
+          const recentTranscriptMessages = (Array.isArray(recentMessages)
+            ? recentMessages
+            : []) as Record<string, unknown>[];
 
           const traceEvents = readTraceEventsForRun({ sessionKey: p.sessionKey, runId: clientRunId });
 
@@ -1450,9 +1503,11 @@ export const chatHandlers: GatewayRequestHandlers = {
             traceEvents.length > 0 ? buildFallbackRunSummaryFromTrace(traceEvents) : "";
 
           const lastToolResultText = extractLastToolResultText({
-            messages: (Array.isArray(recentMessages)
-              ? recentMessages.slice(-80)
-              : []) as Record<string, unknown>[],
+            messages: recentTranscriptMessages.slice(-80),
+            markerId,
+          });
+          const latestAssistantMessage = extractLastAssistantMessage({
+            messages: recentTranscriptMessages,
             markerId,
           });
 
@@ -1515,6 +1570,22 @@ export const chatHandlers: GatewayRequestHandlers = {
                   .join("\n\n")
                   .trim()
               : safeReplyWithToolsAndSummary;
+
+          const latestAssistantText = extractTextFromTranscriptMessage(latestAssistantMessage);
+          if (
+            agentRunStarted &&
+            latestAssistantMessage &&
+            hasThinkingContent(latestAssistantMessage) &&
+            latestAssistantText &&
+            latestAssistantText === safeReplyNoConnError.trim()
+          ) {
+            broadcastChatFinal({
+              context,
+              runId: clientRunId,
+              sessionKey: p.sessionKey,
+              message: latestAssistantMessage,
+            });
+          }
 
           if (
             safeReplyNoConnError &&

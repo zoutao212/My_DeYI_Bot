@@ -52,17 +52,19 @@ export function renderReadingIndicatorGroup(assistant?: AssistantIdentity, waitE
 
 export function renderStreamingGroup(
   text: string,
+  reasoning: string | null,
   startedAt: number,
   onOpenSidebar?: (content: string) => void,
   assistant?: AssistantIdentity,
   waitElapsedSeconds?: number,
+  showReasoning = false,
 ) {
   const timestamp = new Date(startedAt).toLocaleTimeString([], {
     hour: "numeric",
     minute: "2-digit",
   });
   const name = assistant?.name ?? "Assistant";
-  const charCount = text.length;
+  const charCount = text.length + (reasoning?.length ?? 0);
   const elapsed = waitElapsedSeconds ?? 0;
   const elapsedText = elapsed >= 60
     ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s`
@@ -75,10 +77,13 @@ export function renderStreamingGroup(
         ${renderGroupedMessage(
           {
             role: "assistant",
-            content: [{ type: "text", text }],
+            content: [
+              ...(reasoning?.trim() ? [{ type: "thinking", thinking: reasoning.trim() }] : []),
+              ...(text ? [{ type: "text", text }] : []),
+            ],
             timestamp: startedAt,
           },
-          { isStreaming: true, showReasoning: false },
+          { isStreaming: true, showReasoning },
           onOpenSidebar,
         )}
         <div class="chat-group-footer">
@@ -236,7 +241,7 @@ function renderGroupedMessage(
     )}`;
   }
 
-  if (!markdown && !hasToolCards) return nothing;
+  if (!markdown && !reasoningMarkdown && !hasToolCards) return nothing;
 
   // 流式渲染时使用轻量级纯文本，避免每次 delta 都做 markdown 全量解析
   const renderedHtml = opts.isStreaming && markdown

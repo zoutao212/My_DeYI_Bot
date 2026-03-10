@@ -26,6 +26,7 @@ type LifecycleHost = {
   chatMessages: unknown[];
   chatToolMessages: unknown[];
   chatStream: string;
+  chatReasoningStream: string | null;
   chatRunId: string | null;
   chatWaitTick: number;
   chatWaitTickTimer: number | null;

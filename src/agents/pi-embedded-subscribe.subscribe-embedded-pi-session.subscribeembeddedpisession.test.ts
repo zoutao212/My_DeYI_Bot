@@ -148,41 +148,47 @@ describe("subscribeEmbeddedPiSession", () => {
   );
 
   it("emits delta chunks in agent events for streaming assistant text", () => {
-    let handler: ((evt: unknown) => void) | undefined;
-    const session: StubSession = {
-      subscribe: (fn) => {
-        handler = fn;
-        return () => {};
-      },
-    };
+    vi.useFakeTimers();
+    try {
+      let handler: ((evt: unknown) => void) | undefined;
+      const session: StubSession = {
+        subscribe: (fn) => {
+          handler = fn;
+          return () => {};
+        },
+      };
 
-    const onAgentEvent = vi.fn();
+      const onAgentEvent = vi.fn();
 
-    subscribeEmbeddedPiSession({
-      session: session as unknown as Parameters<typeof subscribeEmbeddedPiSession>[0]["session"],
-      runId: "run",
-      onAgentEvent,
-    });
+      subscribeEmbeddedPiSession({
+        session: session as unknown as Parameters<typeof subscribeEmbeddedPiSession>[0]["session"],
+        runId: "run",
+        onAgentEvent,
+      });
 
-    handler?.({ type: "message_start", message: { role: "assistant" } });
-    handler?.({
-      type: "message_update",
-      message: { role: "assistant" },
-      assistantMessageEvent: { type: "text_delta", delta: "Hello" },
-    });
-    handler?.({
-      type: "message_update",
-      message: { role: "assistant" },
-      assistantMessageEvent: { type: "text_delta", delta: " world" },
-    });
+      handler?.({ type: "message_start", message: { role: "assistant" } });
+      handler?.({
+        type: "message_update",
+        message: { role: "assistant" },
+        assistantMessageEvent: { type: "text_delta", delta: "Hello" },
+      });
+      handler?.({
+        type: "message_update",
+        message: { role: "assistant" },
+        assistantMessageEvent: { type: "text_delta", delta: " world" },
+      });
+      vi.advanceTimersByTime(100);
 
-    const payloads = onAgentEvent.mock.calls
-      .map((call) => call[0]?.data as Record<string, unknown> | undefined)
-      .filter((value): value is Record<string, unknown> => Boolean(value));
-    expect(payloads[0]?.text).toBe("Hello");
-    expect(payloads[0]?.delta).toBe("Hello");
-    expect(payloads[1]?.text).toBe("Hello world");
-    expect(payloads[1]?.delta).toBe(" world");
+      const payloads = onAgentEvent.mock.calls
+        .map((call) => call[0]?.data as Record<string, unknown> | undefined)
+        .filter((value): value is Record<string, unknown> => Boolean(value));
+      expect(payloads[0]?.text).toBe("Hello");
+      expect(payloads[0]?.delta).toBe("Hello");
+      expect(payloads[1]?.text).toBe("Hello world");
+      expect(payloads[1]?.delta).toBe(" world");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("skips agent events when cleaned text rewinds mid-stream", () => {
@@ -251,5 +257,42 @@ describe("subscribeEmbeddedPiSession", () => {
     expect(payloads).toHaveLength(1);
     expect(payloads[0]?.text).toBe("");
     expect(payloads[0]?.mediaUrls).toEqual(["https://example.com/a.png"]);
+  });
+
+  it("strips reply tags from streamed assistant events before diffing", () => {
+    let handler: ((evt: unknown) => void) | undefined;
+    const session: StubSession = {
+      subscribe: (fn) => {
+        handler = fn;
+        return () => {};
+      },
+    };
+
+    const onAgentEvent = vi.fn();
+
+    subscribeEmbeddedPiSession({
+      session: session as unknown as Parameters<typeof subscribeEmbeddedPiSession>[0]["session"],
+      runId: "run",
+      onAgentEvent,
+    });
+
+    handler?.({ type: "message_start", message: { role: "assistant" } });
+    handler?.({
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "text_delta", delta: "[[" },
+    });
+    handler?.({
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "text_delta", delta: "reply_to_current]] 在呢，主人。" },
+    });
+
+    const payloads = onAgentEvent.mock.calls
+      .map((call) => call[0]?.data as Record<string, unknown> | undefined)
+      .filter((value): value is Record<string, unknown> => Boolean(value));
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]?.text).toBe("在呢，主人。");
+    expect(payloads[0]?.delta).toBe("在呢，主人。");
   });
 });

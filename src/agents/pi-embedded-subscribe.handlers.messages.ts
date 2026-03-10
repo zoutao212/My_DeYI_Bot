@@ -1,7 +1,7 @@
 import type { AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 
-import { parseReplyDirectives } from "../auto-reply/reply/reply-directives.js";
+import { parseStreamingReplyPreview } from "../auto-reply/reply/streaming-directives.js";
 import { emitAgentEvent } from "../infra/agent-events.js";
 import {
   isMessagingToolDuplicateNormalized,
@@ -109,9 +109,10 @@ export function handleMessageUpdate(
     .trim();
   if (next && next !== ctx.state.lastStreamedAssistant) {
     const previousText = ctx.state.lastStreamedAssistant ?? "";
-    const { text: cleanedText, mediaUrls } = parseReplyDirectives(next);
-    const { text: previousCleanedText } = parseReplyDirectives(previousText);
-    if (cleanedText.startsWith(previousCleanedText)) {
+    const { text: cleanedText, mediaUrls } = parseStreamingReplyPreview(next);
+    const { text: previousCleanedText } = parseStreamingReplyPreview(previousText);
+    const hasRenderablePayload = Boolean(cleanedText) || (mediaUrls?.length ?? 0) > 0;
+    if (hasRenderablePayload && cleanedText.startsWith(previousCleanedText)) {
       const deltaText = cleanedText.slice(previousCleanedText.length);
       ctx.state.lastStreamedAssistant = next;
 
@@ -163,7 +164,7 @@ export function handleMessageUpdate(
         // 设置延迟发射，确保最终内容会被推送
         ctx.state.streamThrottler.pendingEmitTimeout = setTimeout(() => {
           // 再次检查是否需要发射（防止重复发射）
-          if (ctx.state.lastStreamedAssistant === cleanedText) {
+          if (ctx.state.lastStreamedAssistant === next) {
             ctx.state.streamThrottler.lastEmitTime = Date.now();
             ctx.state.streamThrottler.lastEmitTextLength = textLength;
             ctx.state.streamThrottler.pendingEmitTimeout = undefined;
@@ -173,7 +174,7 @@ export function handleMessageUpdate(
               stream: "assistant",
               data: {
                 text: cleanedText,
-                delta: cleanedText.slice((ctx.state.lastStreamedAssistant ?? "").length),
+                delta: deltaText,
                 mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
               },
             });
@@ -181,7 +182,7 @@ export function handleMessageUpdate(
               stream: "assistant",
               data: {
                 text: cleanedText,
-                delta: cleanedText.slice((ctx.state.lastStreamedAssistant ?? "").length),
+                delta: deltaText,
                 mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
               },
             });
@@ -238,6 +239,39 @@ export function handleMessageEnd(
       ? extractAssistantThinking(assistantMessage) || extractThinkingFromTaggedText(rawText)
       : "";
   const formattedReasoning = rawThinking ? formatReasoningMessage(rawThinking) : "";
+
+  const streamedTextPreview = text.trim();
+  if (streamedTextPreview) {
+    const preview = parseStreamingReplyPreview(streamedTextPreview);
+    const cleanedText = preview.text ?? "";
+    const lastEmitLength = ctx.state.streamThrottler.lastEmitTextLength;
+    const shouldFlush =
+      cleanedText.length > 0 &&
+      cleanedText.length >= lastEmitLength &&
+      (Boolean(ctx.state.streamThrottler.pendingEmitTimeout) || cleanedText.length > lastEmitLength);
+    if (shouldFlush) {
+      const delta = cleanedText.length > lastEmitLength ? cleanedText.slice(lastEmitLength) : "";
+      const data = {
+        text: cleanedText,
+        delta,
+        mediaUrls: preview.mediaUrls?.length ? preview.mediaUrls : undefined,
+      };
+      ctx.state.streamThrottler.lastEmitTime = Date.now();
+      ctx.state.streamThrottler.lastEmitTextLength = cleanedText.length;
+      emitAgentEvent({
+        runId: ctx.params.runId,
+        stream: "assistant",
+        data,
+      });
+      void ctx.params.onAgentEvent?.({ stream: "assistant", data });
+      if (ctx.params.onPartialReply && ctx.state.shouldEmitPartialReplies) {
+        void ctx.params.onPartialReply({
+          text: cleanedText,
+          mediaUrls: preview.mediaUrls?.length ? preview.mediaUrls : undefined,
+        });
+      }
+    }
+  }
 
   const addedDuringMessage = ctx.state.assistantTexts.length > ctx.state.assistantTextBaseline;
   const chunkerHasBuffered = ctx.blockChunker?.hasBuffered() ?? false;

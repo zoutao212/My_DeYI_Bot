@@ -122,3 +122,12 @@ export function createStreamingDirectiveAccumulator() {
     reset,
   };
 }
+
+export function parseStreamingReplyPreview(
+  raw: string,
+  options: { silentToken?: string } = {},
+): ReplyDirectiveParseResult {
+  const combined = `${raw ?? ""}`;
+  const split = splitTrailingDirective(combined);
+  return parseChunk(split.text, { silentToken: options.silentToken });
+}

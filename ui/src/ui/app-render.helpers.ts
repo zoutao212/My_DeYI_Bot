@@ -5,6 +5,7 @@ import type { AppViewState } from "./app-view-state";
 import { iconForTab, pathForTab, titleForTab, type Tab } from "./navigation";
 import { icons } from "./icons";
 import { loadChatHistory } from "./controllers/chat";
+import { patchSession } from "./controllers/sessions";
 import { syncUrlWithSessionKey } from "./app-settings";
 import type { SessionsListResult } from "./types";
 import type { ThemeMode } from "./theme";
@@ -48,6 +49,10 @@ export function renderChatControls(state: AppViewState) {
   const focusActive = state.settings.chatFocusMode;
   const disableFocusToggle = !state.connected;
   const requireApproval = state.settings.chatRequireSendApproval;
+  const activeSession = sessions?.sessions?.find((row) => row.key === state.sessionKey);
+  const reasoningLevel = typeof activeSession?.reasoningLevel === "string" ? activeSession.reasoningLevel : "";
+  const reasoningEnabled = reasoningLevel && reasoningLevel !== "off";
+  const disableReasoningToggle = !state.connected || state.chatSending || state.sessionsLoading;
   // Refresh icon
   const refreshIcon = html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"></path><path d="M21 3v5h-5"></path></svg>`;
   const focusIcon = html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h3"></path><path d="M20 7V4h-3"></path><path d="M4 17v3h3"></path><path d="M20 17v3h-3"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
@@ -62,6 +67,7 @@ export function renderChatControls(state: AppViewState) {
             state.sessionKey = next;
             state.chatMessage = "";
             state.chatStream = null;
+            state.chatReasoningStream = null;
             state.chatStreamStartedAt = null;
             state.chatRunId = null;
             state.resetToolStream();
@@ -128,6 +134,34 @@ export function renderChatControls(state: AppViewState) {
       </button>
       <span class="muted" style="font-size: 12px; user-select: none;">
         ${showThinking ? "思考输出：开" : "思考输出：关"}
+      </span>
+      <button
+        class="btn btn--sm btn--icon ${reasoningEnabled ? "active" : ""}"
+        ?disabled=${disableReasoningToggle}
+        @click=${() => {
+          if (disableReasoningToggle) return;
+          const next = reasoningLevel === "stream" ? "off" : "stream";
+          if (next === "stream" && !state.settings.chatShowThinking) {
+            state.applySettings({ ...state.settings, chatShowThinking: true });
+          }
+          void patchSession(state, state.sessionKey, { reasoningLevel: next });
+        }}
+        aria-pressed=${reasoningEnabled}
+        aria-label=${disableReasoningToggle
+          ? "Reasoning toggle disabled"
+          : reasoningEnabled
+            ? "Disable reasoning display"
+            : "Enable reasoning display"}
+        title=${disableReasoningToggle
+          ? "Reasoning toggle disabled"
+          : reasoningEnabled
+            ? `Disable reasoning display (currently ${reasoningLevel || "inherit"})`
+            : "Enable reasoning display (stream)"}
+      >
+        ${icons.eye}
+      </button>
+      <span class="muted" style="font-size: 12px; user-select: none;">
+        ${`Reasoning: ${reasoningLevel || "inherit"}`}
       </span>
       <button
         class="btn btn--sm btn--icon ${requireApproval ? "active" : ""}"

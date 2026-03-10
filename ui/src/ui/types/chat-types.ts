@@ -5,7 +5,7 @@
 /** Union type for items in the chat thread */
 export type ChatItem =
   | { kind: "message"; key: string; message: unknown }
-  | { kind: "stream"; key: string; text: string; startedAt: number }
+  | { kind: "stream"; key: string; text: string; reasoning?: string | null; startedAt: number }
   | { kind: "reading-indicator"; key: string };
 
 /** A group of consecutive messages from the same role (Slack-style layout) */
