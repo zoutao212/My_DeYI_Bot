@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import type { DatabaseSync } from "node:sqlite";
@@ -1058,7 +1059,16 @@ export class MemoryIndexManager {
     needsFullReindex: boolean;
     progress?: MemorySyncProgressState;
   }) {
-    const files = await listMemoryFiles(this.workspaceDir);
+    const textEtlEnabledRaw = process.env.CLAWDBOT_TEXTETL_MEMORY_ENABLED?.trim();
+    const textEtlEnabled = textEtlEnabledRaw === "1" || textEtlEnabledRaw?.toLowerCase() === "true";
+    const chunkAssetsDir = (process.env.CLAWDBOT_NOVELS_CHUNK_ASSETS_DIR?.trim())
+      || path.join(path.resolve(os.homedir(), "clawd"), "NovelsChunkAssets");
+    const textEtlBooksDir = path.join(chunkAssetsDir, "books");
+
+    const files = await listMemoryFiles(this.workspaceDir, {
+      extraDirs: textEtlEnabled ? [textEtlBooksDir] : undefined,
+      extensions: textEtlEnabled ? [".md", ".txt", ".jsonl"] : undefined,
+    });
     const fileEntries = await Promise.all(
       files.map(async (file) => buildFileEntry(file, this.workspaceDir)),
     );
@@ -2167,13 +2177,57 @@ export class MemoryIndexManager {
     entry: MemoryFileEntry | SessionFileEntry,
     options: { source: MemorySource; content?: string },
   ) {
-    const content = options.content ?? (await fs.readFile(entry.absPath, "utf-8"));
+    const isTextEtlJsonl =
+      options.source === "memory" &&
+      entry.absPath.toLowerCase().endsWith(".jsonl") &&
+      /\\books\\[^\\]+\\chunks\.jsonl$/i.test(entry.absPath.replace(/\//g, "\\"));
+
+    const ftsOnlyRaw = process.env.CLAWDBOT_TEXTETL_MEMORY_FTS_ONLY?.trim();
+    const textEtlFtsOnly = ftsOnlyRaw === "1" || ftsOnlyRaw?.toLowerCase() === "true";
+
+    const parseTextEtlJsonlToMarkdown = (raw: string): string => {
+      const lines = raw.replace(/\r\n/g, "\n").split("\n");
+      const out: string[] = [];
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t) continue;
+        try {
+          const obj = JSON.parse(t);
+          const title = typeof obj?.title === "string" ? obj.title.trim() : "";
+          const keywordsTop = Array.isArray(obj?.keywordsTop)
+            ? obj.keywordsTop.map((x: unknown) => String(x)).filter(Boolean).slice(0, 10)
+            : [];
+          const text = typeof obj?.text === "string" ? obj.text.trim() : "";
+          const idx = typeof obj?.idx === "number" ? obj.idx : Number.parseInt(String(obj?.idx ?? ""), 10);
+
+          const header = title ? `### ${title}${Number.isFinite(idx) ? ` (#${idx})` : ""}` : (Number.isFinite(idx) ? `### #${idx}` : "### (TextETL)");
+          out.push(header);
+          if (keywordsTop.length > 0) out.push(`关键词：${keywordsTop.join("、")}`);
+          if (text) out.push(text);
+          out.push("---");
+        } catch {
+          // ignore
+        }
+      }
+      return out.join("\n\n");
+    };
+
+    const rawContent = options.content ?? (await fs.readFile(entry.absPath, "utf-8"));
+    const content = isTextEtlJsonl ? parseTextEtlJsonlToMarkdown(rawContent) : rawContent;
     const chunks = chunkMarkdown(content, this.settings.chunking).filter(
       (chunk) => chunk.text.trim().length > 0,
     );
-    const embeddings = this.batch.enabled
-      ? await this.embedChunksWithBatch(chunks, entry, options.source)
-      : await this.embedChunksInBatches(chunks);
+
+    // 全局兜底：如果 Vector 存储被禁用且 FTS 可用，则无需生成 embeddings。
+    // 这样可以避免 embedding provider 网络/权限问题导致“纯文本索引”也失败。
+    const shouldSkipEmbeddingsGlobal = !this.vector.enabled && this.fts.enabled && this.fts.available;
+
+    const shouldSkipEmbeddings = shouldSkipEmbeddingsGlobal || (isTextEtlJsonl && textEtlFtsOnly);
+    const embeddings = shouldSkipEmbeddings
+      ? chunks.map(() => [])
+      : (this.batch.enabled
+        ? await this.embedChunksWithBatch(chunks, entry, options.source)
+        : await this.embedChunksInBatches(chunks));
     const sample = embeddings.find((embedding) => embedding.length > 0);
     const vectorReady = sample ? await this.ensureVectorReady(sample.length) : false;
     const now = Date.now();

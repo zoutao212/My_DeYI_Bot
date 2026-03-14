@@ -327,3 +327,96 @@ trigger: always_on
 
 ## 所有的构建 和 测试 不需要 你 随便 启动构建和 测试 
 ## 因为 构建 需要 很久，你的测试全是没用的垃圾 ！用户 会自己构建和测试！  你只需要分析问题修复问题！
+
+我开始直接改代码，把 agentMode 状态机（对话/任务/收尾）、任务态 Loop Contract 的“兜底推进”、以及 所有普通对话自动附 NextAction 三件事一起落地。实现上我会尽量“最小侵入 + 可回放”：只改关键入口（SessionEntry 类型、TaskTreeMetadata、agent-runner.ts、followup-runner.ts、task-tree-manager.ts），并把状态切换写入会话与任务树元数据，后续你看日志就能追。
+
+接下来我会按文件逐个打补丁（每次只动一个文件，便于回滚）。
+
+types.ts
++14
+  agentModeReason?: string;
+ 
+  /** agentMode 最近一次切换时间（ms） */
+  agentModeUpdatedAt?: number;
+};
+
+定位 SessionEntry/SessionStore、TaskTreeMetadata、任务树持久化与会话持久化的权威位置
+
+2
+实现 agentMode 状态机：对话态/任务态/收尾态，落盘到 sessionEntry 与 taskTree.metadata
+
+实现 Loop Contract：任务态每轮必须推进（否则系统兜底生成/入队最小任务）
+
+实现轻量 loop：direct 普通对话也自动附 NextAction（可降噪/可关闭）
+
+加观测/回放：状态转换与推进动作日志、round 收尾后自动回对话态
+已落地的改造（B + C 全做了）
+你要的两件事我已经直接改进到代码里了：状态机（对话/任务/收尾） + 普通对话也有轻量 loop（自动 NextAction），并且把“任务态必须推进”的 Loop Contract 做成了系统兜底，避免模型“聊两句就停”。
+
+1) 会话级 agentMode（落盘到 SessionEntry）
+已改文件：
+
+src/config/sessions/types.ts
+新增字段：
+
+agentMode?: "dialog" | "task" | "closing"
+agentModeReason?: string
+agentModeUpdatedAt?: number
+这让状态机在会话层面可观测、可回放。
+
+2) 任务树级 agentMode（落盘到 TaskTree.metadata）
+已改文件：
+
+src/agents/intelligent-task-decomposition/types.ts
+在 TaskTreeMetadata 新增同样三字段：
+
+agentMode / agentModeReason / agentModeUpdatedAt
+以后你看 TASK_TREE.json 就能直接知道这个任务树当前处于哪个工作流状态。
+
+3) Loop Contract（任务态强制推进：CP0 触发时系统自己创建并入队“真实子任务”）
+已改文件：
+
+src/auto-reply/reply/agent-runner.ts
+核心行为（你要的“永远陪伴”的系统化版本）：
+
+当 CP0 判断 strategy !== "direct" 且队列模式允许（followup/collect/steer-backlog），不再把“入队”完全交给 LLM 自觉，而是系统兜底：
+
+把 sessionEntry.agentMode 切到 task（并写原因 CP0:force_decompose/suggest_decompose）
+加载/初始化任务树
+创建/获取 round
+创建一个真实 SubTask（内容就是用户原话 + summaryLine）
+把这个 SubTask 以 isNewRootTask=true 入队（从权限角度保证能分解，且确保后续 followup-runner 真的会执行它）
+这样无论模型是否调用 enqueue_task，系统都能把对话推进成真正的任务 loop。
+
+4) 轻量 loop：所有普通对话自动追加 NextAction
+同样在：
+
+src/auto-reply/reply/agent-runner.ts
+我在最终 payload 出口处追加了：
+
+如果 CP0 非 direct：NextAction 提示“我会自动进入任务推进（agent loop）…”
+如果 direct：NextAction 提示“可拆步骤/给最小落地改动…”
+并且做了去重：如果回复里已经有 NextAction: 就不重复追加。
+
+5) 收尾态闭环：round 交付后自动回到对话态（closing → dialog）
+已改文件：
+
+src/auto-reply/reply/followup-runner.ts
+改动点：
+
+round 完成时（postResult.roundCompleted）：
+调 _setAgentMode(mode:"closing")，同时写入
+sessionEntry.agentMode
+taskTree.metadata.agentMode
+deliverCompletedRound(...) 完成后：
+调 _setAgentMode(mode:"dialog")
+saveTaskTree 落盘
+这就形成了你要的“任务态自己跑完→收尾→回到可聊天的陪伴态”。
+
+当前注意事项（我建议你立刻做的 1 件事）
+由于我无法在你机器上自动跑构建，我建议你本地做一次最小校验：
+
+你自己运行一次 TypeScript 编译或启动（你习惯怎么验就怎么来）
+如果有报错，把第一条错误贴给我，我会继续微创修到 0 错误为止
+我这边已经修正了之前出现的 import 冲突/自引用/重复导入，并补齐了 TypingController/createTypingSignaler/resolveReplyToMode/createExecutionContext/... 等缺失导入，理论上 agent-runner.ts 已恢复可编译。
+

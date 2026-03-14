@@ -5,6 +5,14 @@ export type FollowupQueueState = {
   items: FollowupRun[];
   draining: boolean;
   lastEnqueuedAt: number;
+  /** 🆕 Watchdog: 最近一次“可判定推进”的时间戳（ms） */
+  lastProgressAt?: number;
+  /** 🆕 Watchdog: 最近一次推进原因（仅用于诊断，可为空） */
+  lastProgressReason?: string;
+  /** 🆕 Watchdog: 连续卡死计数（用于渐进式自愈：重排→延迟→熔断） */
+  stuckCount?: number;
+  /** 🆕 Watchdog: 最近一次触发自愈的时间戳（ms），用于节流 */
+  lastWatchdogAt?: number;
   mode: QueueMode;
   debounceMs: number;
   cap: number;
@@ -42,6 +50,10 @@ export function getFollowupQueue(key: string, settings: QueueSettings): Followup
     items: [],
     draining: false,
     lastEnqueuedAt: 0,
+    lastProgressAt: Date.now(),
+    lastProgressReason: "init",
+    stuckCount: 0,
+    lastWatchdogAt: 0,
     mode: settings.mode,
     debounceMs:
       typeof settings.debounceMs === "number"
@@ -64,6 +76,10 @@ export function getFollowupQueue(key: string, settings: QueueSettings): Followup
     if (!q) return;
     q.items = snap.items;
     q.lastEnqueuedAt = snap.lastEnqueuedAt;
+    q.lastProgressAt = (snap as any).lastProgressAt ?? q.lastProgressAt ?? Date.now();
+    q.lastProgressReason = (snap as any).lastProgressReason ?? q.lastProgressReason;
+    q.stuckCount = (snap as any).stuckCount ?? q.stuckCount ?? 0;
+    q.lastWatchdogAt = (snap as any).lastWatchdogAt ?? q.lastWatchdogAt ?? 0;
     q.mode = snap.mode;
     q.debounceMs = snap.debounceMs;
     q.cap = snap.cap;

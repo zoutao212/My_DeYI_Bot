@@ -582,6 +582,20 @@ export interface TaskTreeMetadata {
   // 🆕 V8 P3: 经验池摘要（分解前注入）
   /** 从经验池查询到的历史教训摘要，供 buildDecompositionPrompt 读取 */
   experienceSummary?: string;
+
+  /**
+   * 🆕 Agent 工作流状态机（任务树级）
+   * dialog  : 普通对话态（不强制入队）
+   * task    : 任务态（agent loop，强制推进直到 round 结束）
+   * closing : 收尾态（合并/交付/归档进行中或刚完成）
+   */
+  agentMode?: "dialog" | "task" | "closing";
+
+  /** agentMode 最近一次切换原因（短文本，用于观测与回放） */
+  agentModeReason?: string;
+
+  /** agentMode 最近一次切换时间（ms） */
+  agentModeUpdatedAt?: number;
 }
 
 /**
@@ -670,6 +684,23 @@ export interface SubTaskMetadata {
 
   /** attempt 层结构化失败分类与恢复建议（用于诊断与回放，不影响业务逻辑） */
   lastAttemptOutcome?: AttemptOutcome;
+
+  // 🆕 drain Watchdog 熔断保护（任务树级硬标记）
+
+  /** 是否被 drain Watchdog 熔断丢弃（用于避免反复卡死） */
+  watchdogDropped?: boolean;
+
+  /** 熔断丢弃原因（短文本，可回放） */
+  watchdogDropReason?: string;
+
+  /** 熔断丢弃评分（越高越危险） */
+  watchdogDropScore?: number;
+
+  /** 熔断丢弃时间戳（ms） */
+  watchdogDropAt?: number;
+
+  /** 熔断丢弃选择依据（诊断用，不保证稳定结构） */
+  watchdogDropExplain?: Record<string, unknown>;
 
   // 🆕 迭代优化相关字段
 

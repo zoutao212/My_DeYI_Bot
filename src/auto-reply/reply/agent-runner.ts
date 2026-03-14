@@ -38,16 +38,39 @@ import { createFollowupRunner } from "./followup-runner.js";
 import { enqueueFollowupRun, scheduleFollowupDrain, type FollowupRun, type QueueSettings } from "./queue.js";
 import { setCurrentFollowupRunContext, clearCurrentFollowupRunContext } from "../../agents/tools/enqueue-task-tool.js";
 import { getGlobalOrchestrator } from "../../agents/tools/enqueue-task-tool.js";
-import { createReplyToModeFilterForChannel, resolveReplyToMode } from "./reply-threading.js";
-import { persistSessionUsageUpdate } from "./session-usage.js";
-import { incrementCompactionCount } from "./session-updates.js";
-import { getActiveContext } from "../../agents/intelligent-task-decomposition/intent-complexity-analyzer.js";
 import { createExecutionContext } from "../../agents/intelligent-task-decomposition/execution-context.js";
+import { TaskEventLogger } from "../../agents/intelligent-task-decomposition/task-event-logger.js";
+import { appendLoopLedgerEntry } from "../../agents/intelligent-task-decomposition/loop-ledger.js";
+import { clearCommandLane, getQueueSize } from "../../process/command-queue.js";
+import { normalizeMainKey } from "../../routing/session-key.js";
+import { isReasoningTagProvider } from "../../utils/provider-utils.js";
+import { hasControlCommand } from "../command-detection.js";
+import { SILENT_REPLY_TOKEN } from "../tokens.js";
+import {
+  analyzeIntentComplexity,
+  buildComplexityGuidance,
+  getActiveContext,
+  setActiveContext,
+  type TaskIntelligenceContext,
+} from "../../agents/intelligent-task-decomposition/intent-complexity-analyzer.js";
+import { applySessionHints } from "./body.js";
+import { emitDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
 import type { TypingController } from "./typing.js";
 import { createTypingSignaler } from "./typing-mode.js";
-import { emitDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
+import { resolveReplyToMode, createReplyToModeFilterForChannel } from "./reply-threading.js";
+import { persistSessionUsageUpdate } from "./session-usage.js";
+import { incrementCompactionCount } from "./session-updates.js";
 
 const BLOCK_REPLY_SEND_TIMEOUT_MS = 15_000;
+
+async function _appendTaskEvent(sessionId: string, type: any, data: Record<string, unknown>): Promise<void> {
+  try {
+    const logger = new TaskEventLogger(sessionId);
+    await logger.append(type, data);
+  } catch {
+    // 事件流是旁路审计，不允许阻塞主流程。
+  }
+}
 
 export async function runReplyAgent(params: {
   commandBody: string;
@@ -109,6 +132,100 @@ export async function runReplyAgent(params: {
   let activeSessionEntry = sessionEntry;
   const activeSessionStore = sessionStore;
   let activeIsNewSession = isNewSession;
+
+  // 自主程度指令（会话级）：允许用户一句话切换 quiet/normal/proactive。
+  // 旁路原则：任何异常都不阻塞本轮回复。
+  try {
+    const msg = followupRun.prompt ?? "";
+    const sessionId = followupRun.run.sessionId;
+
+    const desiredLevel = (() => {
+      if (/(安静|别吵|少说|别那么主动|降低主动)/.test(msg)) return "quiet" as const;
+      if (/(积极|主动一点|加速|更主动|放开跑|推进起来)/.test(msg)) return "proactive" as const;
+      if (/(默认|正常|恢复默认|恢复正常)/.test(msg)) return "normal" as const;
+      return undefined;
+    })();
+
+    if (desiredLevel && storePath && sessionKey) {
+      const prev =
+        activeSessionEntry?.autonomyLevel ??
+        (sessionKey ? activeSessionStore?.[sessionKey]?.autonomyLevel : undefined) ??
+        "normal";
+      if (prev !== desiredLevel) {
+        await updateSessionStoreEntry({
+          storePath,
+          sessionKey,
+          update: async () => ({
+            autonomyLevel: desiredLevel,
+            autonomyLevelUpdatedAt: Date.now(),
+            updatedAt: Date.now(),
+          }),
+        });
+        await _appendTaskEvent(sessionId, "autonomy_level_changed", {
+          from: prev,
+          to: desiredLevel,
+          reason: "user_message",
+        });
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // 机会型 Watchdog：每次用户 turn 入口检查一次，避免 closing/task 卡死导致“陪伴断线”。
+  // 旁路原则：任何异常都不阻塞本轮回复。
+  try {
+    const watchdogSessionId = followupRun.run.sessionId;
+    const currentMode = activeSessionEntry?.agentMode;
+    const modeUpdatedAt = activeSessionEntry?.agentModeUpdatedAt ?? 0;
+    const now = Date.now();
+    const CLOSING_STUCK_MS = 3 * 60_000;
+
+    if (storePath && sessionKey) {
+      if (currentMode === "closing" && modeUpdatedAt > 0 && now - modeUpdatedAt > CLOSING_STUCK_MS) {
+        await updateSessionStoreEntry({
+          storePath,
+          sessionKey,
+          update: async () => ({
+            agentMode: "dialog",
+            agentModeReason: "watchdog:closing_stuck",
+            agentModeUpdatedAt: now,
+            updatedAt: now,
+          }),
+        });
+        await _appendTaskEvent(watchdogSessionId, "watchdog_recovered", {
+          from: "closing",
+          to: "dialog",
+          reason: "closing_stuck",
+          modeUpdatedAt,
+        });
+      }
+    }
+
+    if (currentMode === "task") {
+      const orchestrator = getGlobalOrchestrator();
+      const hasUnfinished = await orchestrator.hasUnfinishedTasks(watchdogSessionId);
+      if (!hasUnfinished && storePath && sessionKey) {
+        await updateSessionStoreEntry({
+          storePath,
+          sessionKey,
+          update: async () => ({
+            agentMode: "dialog",
+            agentModeReason: "watchdog:task_empty",
+            agentModeUpdatedAt: now,
+            updatedAt: now,
+          }),
+        });
+        await _appendTaskEvent(watchdogSessionId, "watchdog_recovered", {
+          from: "task",
+          to: "dialog",
+          reason: "task_empty",
+        });
+      }
+    }
+  } catch {
+    // ignore
+  }
 
   const isHeartbeat = opts?.isHeartbeat === true;
   const typingSignals = createTypingSignaler({
@@ -197,25 +314,99 @@ export async function runReplyAgent(params: {
     try {
       const sk = sessionKey?.trim();
       const cp0 = sk ? getActiveContext(sk)?.intentAnalysis : undefined;
+      const autonomyLevel =
+        activeSessionEntry?.autonomyLevel ??
+        (sessionKey ? activeSessionStore?.[sessionKey]?.autonomyLevel : undefined) ??
+        "normal";
+
+      const allowByAutonomy = (() => {
+        if (!cp0) return false;
+        if (autonomyLevel === "quiet") return cp0.strategy === "force_decompose";
+        if (autonomyLevel === "proactive") return cp0.strategy !== "direct";
+        return cp0.strategy === "force_decompose" || cp0.strategy === "suggest_decompose";
+      })();
+
       const shouldFallbackEnqueue =
-        Boolean(cp0 && cp0.strategy !== "direct") &&
+        Boolean(cp0 && allowByAutonomy) &&
         (resolvedQueue.mode === "collect" ||
           resolvedQueue.mode === "followup" ||
           resolvedQueue.mode === "steer-backlog");
       if (shouldFallbackEnqueue && queueKey) {
+        const orchestrator = getGlobalOrchestrator();
+        const sessionId = followupRun.run.sessionId;
+        const userMessage = followupRun.prompt;
+        const roundId = followupRun.rootTaskId ?? crypto.randomUUID();
+
+        const ensureAgentMode = async (mode: "dialog" | "task" | "closing", reason: string) => {
+          if (!storePath || !sessionKey) return;
+          await updateSessionStoreEntry({
+            storePath,
+            sessionKey,
+            update: async () => ({
+              agentMode: mode,
+              agentModeReason: reason,
+              agentModeUpdatedAt: Date.now(),
+              updatedAt: Date.now(),
+            }),
+          });
+        };
+
+        await ensureAgentMode("task", `CP0:${cp0?.strategy ?? "unknown"}`);
+        await _appendTaskEvent(sessionId, "agent_mode_changed", {
+          to: "task",
+          reason: `CP0:${cp0?.strategy ?? "unknown"}`,
+          autonomyLevel,
+        });
+
+        let taskTree = await orchestrator.loadTaskTree(sessionId);
+        if (!taskTree) {
+          taskTree = await orchestrator.initializeTaskTree(userMessage, sessionId);
+        }
+        if (!taskTree.metadata) {
+          taskTree.metadata = { totalTasks: taskTree.subTasks.length, completedTasks: 0, failedTasks: 0 };
+        }
+        taskTree.metadata.agentMode = "task";
+        taskTree.metadata.agentModeReason = `CP0:${cp0?.strategy ?? "unknown"}`;
+        taskTree.metadata.agentModeUpdatedAt = Date.now();
+
+        orchestrator.getOrCreateRound(taskTree, roundId, userMessage);
+        await orchestrator.saveTaskTree(taskTree);
+
+        const subTask = await orchestrator.addSubTask(
+          taskTree,
+          userMessage,
+          followupRun.summaryLine ?? userMessage.substring(0, 80),
+          undefined,
+          false,
+          roundId,
+        );
+
         const didEnqueue = enqueueFollowupRun(
           queueKey,
           {
             ...followupRun,
             enqueuedAt: Date.now(),
+            rootTaskId: roundId,
+            subTaskId: subTask.id,
+            isQueueTask: false,
+            isRootTask: true,
+            isNewRootTask: true,
+            taskDepth: 0,
           },
           resolvedQueue,
           "message-id",
         );
         if (didEnqueue) {
           console.log(
-            `[agent-runner] 🧩 Fallback enqueue enabled by CP0 (strategy=${cp0?.strategy ?? "unknown"})`,
+            `[agent-runner] 🧩 Fallback enqueue enabled by CP0 (strategy=${cp0?.strategy ?? "unknown"}, roundId=${roundId}, subTaskId=${subTask.id})`,
           );
+          await _appendTaskEvent(sessionId, "fallback_enqueued", {
+            roundId,
+            subTaskId: subTask.id,
+            strategy: cp0?.strategy ?? "unknown",
+            autonomyLevel,
+            queueMode: resolvedQueue.mode,
+          });
         }
       }
     } catch (err) {
@@ -605,6 +796,70 @@ export async function runReplyAgent(params: {
 
     // If verbose is enabled and this is a new session, prepend a session hint.
     let finalPayloads = replyPayloads;
+
+    try {
+      const sk = sessionKey?.trim();
+      const cp0 = sk ? getActiveContext(sk)?.intentAnalysis : undefined;
+      const autonomyLevel =
+        activeSessionEntry?.autonomyLevel ??
+        (sessionKey ? activeSessionStore?.[sessionKey]?.autonomyLevel : undefined) ??
+        "normal";
+      const modeHint = cp0?.strategy && cp0.strategy !== "direct" ? "task" : "dialog";
+      const nextActionLine = (() => {
+        if (modeHint === "task") {
+          if (autonomyLevel === "quiet") {
+            return "NextAction: 我会在你确认后进入任务推进。你可以补充：验收标准 / 文件路径 / 优先级。";
+          }
+          return "NextAction: 我会自动进入任务推进（agent loop）。你可以补充：验收标准 / 文件路径 / 优先级。";
+        }
+        if (autonomyLevel === "proactive") {
+          return "NextAction: 我可以立刻把它拆成可执行步骤并入队推进；你只要确认目标与边界条件。";
+        }
+        return "NextAction: 如果你愿意，我可以把这件事拆成可执行步骤，或直接给出最小可落地改动建议。";
+      })();
+
+      // 🧾 LoopLedger（最小落盘）：每轮记录一次“我打算怎么继续”。
+      // 旁路原则：失败不阻塞回复。
+      try {
+        await appendLoopLedgerEntry({
+          sessionId: followupRun.run.sessionId,
+          phase: modeHint,
+          reason: "next_action_generated",
+          autonomyLevel,
+          agentMode: activeSessionEntry?.agentMode,
+          cp0Strategy: cp0?.strategy,
+          roundId: followupRun.rootTaskId,
+          nextAction: nextActionLine,
+          reflection: {
+            summary: modeHint === "task" ? "进入任务推进" : "保持对话陪伴",
+            openQuestions: modeHint === "task" ? ["验收标准/输入文件路径/优先级？"] : undefined,
+          },
+        });
+      } catch {
+        // ignore
+      }
+
+      const lastTextIdx = (() => {
+        for (let i = finalPayloads.length - 1; i >= 0; i--) {
+          const t = finalPayloads[i]?.text;
+          if (typeof t === "string" && t.trim().length > 0) return i;
+        }
+        return -1;
+      })();
+
+      if (lastTextIdx >= 0) {
+        const existing = finalPayloads[lastTextIdx].text ?? "";
+        if (!/\bNextAction\b\s*:/i.test(existing)) {
+          finalPayloads = finalPayloads.map((p, idx) =>
+            idx === lastTextIdx && p.text
+              ? { ...p, text: `${p.text}\n\n${nextActionLine}` }
+              : p,
+          );
+        }
+      }
+    } catch {
+      // 非关键路径：NextAction 追加失败不阻塞
+    }
     const verboseEnabled = resolvedVerboseLevel !== "off";
     if (autoCompactionCompleted) {
       const count = await incrementCompactionCount({

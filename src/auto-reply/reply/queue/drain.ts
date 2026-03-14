@@ -13,11 +13,220 @@ import { runWithTracking } from "../../../agents/intelligent-task-decomposition/
 import { getGlobalOrchestrator } from "../../../agents/tools/enqueue-task-tool.js";
 import { flushQueueSnapshot, scheduleSaveQueueSnapshot, writeDeadlockDiagnostic } from "./persistence.js";
 import { buildChildFollowupRun } from "../followup-lifecycle.js";
+import { TaskEventLogger } from "../../../agents/intelligent-task-decomposition/task-event-logger.js";
 
 // ☆新 V3: 并行并发上限，防止同时发射过多 LLM 请求导致 rate limiting 或 token 预算瞬间耗尽
 // 🔧 P21 修复：从 3 降到 2，trace 证明 3 并发就触发上游 429
 const MAX_PARALLEL_CONCURRENCY = 2;
 const PARALLEL_BATCH_COOLDOWN_MS = 3000; // 批次之间冷却 3 秒
+
+async function _appendQueueWatchdogEvent(params: {
+  sessionId?: string;
+  queueKey: string;
+  action: string;
+  reason: string;
+  extra?: Record<string, unknown>;
+}): Promise<void> {
+  try {
+    if (!params.sessionId) return;
+    const logger = new TaskEventLogger(params.sessionId);
+    await logger.append("watchdog_recovered" as any, {
+      queueKey: params.queueKey,
+      action: params.action,
+      reason: params.reason,
+      ...(params.extra ?? {}),
+    });
+  } catch {
+    // ignore
+  }
+}
+
+function _touchQueueProgress(queue: any, reason: string): void {
+  try {
+    queue.lastProgressAt = Date.now();
+    queue.lastProgressReason = reason;
+    queue.stuckCount = 0;
+  } catch {
+    // ignore
+  }
+}
+
+async function _maybeRecoverStuckQueue(params: {
+  queueKey: string;
+  queue: any;
+  drainIteration: number;
+}): Promise<boolean> {
+  const { queueKey, queue, drainIteration } = params;
+
+  // 只对“仍有 item 且 drain 正在跑”的场景生效
+  if (!queue?.draining) return false;
+  if (!Array.isArray(queue.items) || queue.items.length === 0) return false;
+
+  const now = Date.now();
+  const lastProgressAt = typeof queue.lastProgressAt === "number" ? queue.lastProgressAt : 0;
+  const lastWatchdogAt = typeof queue.lastWatchdogAt === "number" ? queue.lastWatchdogAt : 0;
+  const stuckCount = typeof queue.stuckCount === "number" ? queue.stuckCount : 0;
+
+  // 阈值：非空但 90s 无推进 → 判定卡死
+  const STUCK_MS = 90_000;
+  // 节流：两次自愈至少间隔 30s
+  const COOLDOWN_MS = 30_000;
+  if (lastProgressAt > 0 && now - lastProgressAt < STUCK_MS) return false;
+  if (lastWatchdogAt > 0 && now - lastWatchdogAt < COOLDOWN_MS) return false;
+
+  queue.lastWatchdogAt = now;
+  queue.stuckCount = stuckCount + 1;
+
+  const peek = queue.items[0];
+  const sessionId = peek?.run?.sessionId;
+
+  // 渐进式恢复：
+  // 1) 轻量重排：把最老的 item 移到末尾（避免坏任务一直卡在队首）
+  // 2) 延迟：等待 2s（给并行任务/IO 完成）
+  // 3) 熔断：丢弃 1 个 item（保命），写事件
+  if (queue.stuckCount === 1) {
+    const moved = queue.items.shift();
+    if (moved) queue.items.push(moved);
+    scheduleSaveQueueSnapshot(queueKey, queue);
+    await _appendQueueWatchdogEvent({
+      sessionId,
+      queueKey,
+      action: "reorder",
+      reason: "queue_stuck",
+      extra: {
+        drainIteration,
+        stuckCount: queue.stuckCount,
+        movedSubTaskId: moved?.subTaskId,
+      },
+    });
+    _touchQueueProgress(queue, "watchdog:reorder");
+    return true;
+  }
+
+  if (queue.stuckCount === 2) {
+    await _appendQueueWatchdogEvent({
+      sessionId,
+      queueKey,
+      action: "delay",
+      reason: "queue_stuck",
+      extra: { drainIteration, stuckCount: queue.stuckCount },
+    });
+    await new Promise((r) => setTimeout(r, 2000));
+    _touchQueueProgress(queue, "watchdog:delay");
+    return true;
+  }
+
+  // 熔断：优先丢弃最可能导致卡死的那一个
+  // 评分因素：
+  // - subTask.status=failed  → +100
+  // - retryCount 越大越容易继续失败 → +retryCount*10
+  // - 相同 subTaskId 在队列中重复越多 → +dupCount*20
+  let dropIdx = 0;
+  let dropReason = "fallback:first";
+  let dropScore = -1;
+  let dropExplain: Record<string, unknown> = {};
+  try {
+    const dupCounts = new Map<string, number>();
+    for (const it of queue.items) {
+      const id = typeof it?.subTaskId === "string" ? it.subTaskId : "";
+      if (!id) continue;
+      dupCounts.set(id, (dupCounts.get(id) ?? 0) + 1);
+    }
+
+    const orchestrator = getGlobalOrchestrator();
+    const taskTree = sessionId ? await orchestrator.loadTaskTree(sessionId) : null;
+
+    for (let i = 0; i < queue.items.length; i++) {
+      const it = queue.items[i];
+      const sid = typeof it?.subTaskId === "string" ? it.subTaskId : undefined;
+      const dup = sid ? (dupCounts.get(sid) ?? 1) : 1;
+
+      let status: string | undefined;
+      let retryCount = 0;
+      if (taskTree && sid) {
+        const st = taskTree.subTasks.find((t: any) => t?.id === sid);
+        status = st?.status;
+        retryCount = typeof st?.retryCount === "number" ? st.retryCount : 0;
+      }
+
+      const failedScore = status === "failed" ? 100 : 0;
+      const retryScore = Math.max(0, retryCount) * 10;
+      const dupScore = Math.max(1, dup) * 20;
+      const score = failedScore + retryScore + dupScore;
+
+      if (score > dropScore) {
+        dropScore = score;
+        dropIdx = i;
+        dropReason = "scored";
+        dropExplain = {
+          subTaskId: sid,
+          status: status ?? "unknown",
+          retryCount,
+          dupCount: dup,
+          failedScore,
+          retryScore,
+          dupScore,
+          score,
+        };
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  const dropped = queue.items.splice(Math.max(0, Math.min(dropIdx, queue.items.length - 1)), 1)[0];
+  scheduleSaveQueueSnapshot(queueKey, queue);
+
+  // 🛡️ 任务树级硬保护：如果丢弃的是 subTaskId，同步标记到任务树，避免后续反复卡死。
+  try {
+    const droppedSubTaskId = typeof dropped?.subTaskId === "string" ? dropped.subTaskId : undefined;
+    if (sessionId && droppedSubTaskId) {
+      const orchestrator = getGlobalOrchestrator();
+      const taskTree = await orchestrator.loadTaskTree(sessionId);
+      if (taskTree) {
+        const subTask = taskTree.subTasks.find((t: any) => t?.id === droppedSubTaskId);
+        const now = Date.now();
+        if (subTask) {
+          if (!subTask.metadata) subTask.metadata = {};
+          (subTask.metadata as any).watchdogDropped = true;
+          (subTask.metadata as any).watchdogDropReason = "queue_stuck:fuse_drop_one";
+          (subTask.metadata as any).watchdogDropScore = typeof dropScore === "number" ? dropScore : undefined;
+          (subTask.metadata as any).watchdogDropExplain = dropExplain;
+          (subTask.metadata as any).watchdogDropAt = now;
+        }
+
+        await orchestrator.skipSubTask(taskTree, droppedSubTaskId, {
+          error: "Watchdog 熔断丢弃：队列长期无进展",
+          metadata: subTask?.metadata,
+          completedAt: now,
+        });
+
+        await orchestrator.saveTaskTree(taskTree);
+      }
+    }
+  } catch {
+    // ignore
+  }
+  await _appendQueueWatchdogEvent({
+    sessionId,
+    queueKey,
+    action: "fuse_drop_one",
+    reason: "queue_stuck",
+    extra: {
+      drainIteration,
+      stuckCount: queue.stuckCount,
+      droppedSubTaskId: dropped?.subTaskId,
+      droppedSummary: dropped?.summaryLine,
+      selection: {
+        mode: dropReason,
+        score: dropScore,
+        explain: dropExplain,
+      },
+    },
+  });
+  _touchQueueProgress(queue, "watchdog:fuse_drop_one");
+  return true;
+}
 
 /**
  * 分批并发执行：每批最多 MAX_PARALLEL_CONCURRENCY 个任务
@@ -61,6 +270,16 @@ export function scheduleFollowupDrain(
       let tasksCompletedInDrain = 0;
       while (queue.items.length > 0 || queue.droppedCount > 0) {
         drainIteration++;
+        // Watchdog：在每轮开始时尝试恢复卡死队列（旁路，不阻塞）
+        try {
+          const recovered = await _maybeRecoverStuckQueue({ queueKey: key, queue, drainIteration });
+          if (recovered) {
+            // 触发了自愈，回到 while 顶部重新调度
+            continue;
+          }
+        } catch {
+          // ignore
+        }
         console.log(`[drain] 🔄 Iteration ${drainIteration}: items=${queue.items.length}, droppedCount=${queue.droppedCount}, mode=${queue.mode}`);
         await waitForQueueDebounce(queue);
 
@@ -136,6 +355,7 @@ export function scheduleFollowupDrain(
                         scheduleSaveQueueSnapshot(key, queue);
                         waitCount = 0; // 执行了非任务项，重置计数器
                         await runFollowup(nonTask);
+                        _touchQueueProgress(queue, "wait:ran_non_task");
                       } else {
                         // 🔧 P4 修复：安全阀 — 防止无限等待
                         waitCount++;
@@ -207,6 +427,7 @@ export function scheduleFollowupDrain(
                               } else {
                                 await runFollowup(stuckItem);
                               }
+                              _touchQueueProgress(queue, "wait:safety_fifo");
                             }
                           }
                           continue;
@@ -272,6 +493,7 @@ export function scheduleFollowupDrain(
                           const trackingId = matched.subTaskId ?? "unknown";
                           await runWithTracking(trackingId, () => runFollowup(matched));
                           tasksCompletedInDrain++;
+                          _touchQueueProgress(queue, "execute:serial_done");
                           console.log(`[drain] ✅ Done: ${matched.summaryLine || 'none'}, remaining=${queue.items.length}, 总完成=${tasksCompletedInDrain}`);
                           continue;
                         }
@@ -285,6 +507,7 @@ export function scheduleFollowupDrain(
                         const syntheticRun = buildChildFollowupRun(nextPeek, targetTask);
                         // 🔧 问题 V 修复：synthetic run 也用 runWithTracking 包裹
                         await runWithTracking(targetTask.id, () => runFollowup(syntheticRun));
+                        _touchQueueProgress(queue, "execute:synthetic_done");
                         console.log(`[drain] ✅ Synthetic run done: ${targetTask.summary}, remaining=${queue.items.length}`);
                         continue;
                       }
@@ -307,6 +530,7 @@ export function scheduleFollowupDrain(
                     } else {
                       await runFollowup(fallback);
                     }
+                    _touchQueueProgress(queue, "execute:fifo_fallback");
                     console.log(`[drain] ✅ FIFO fallback done, remaining=${queue.items.length}`);
                     continue;
                   }
@@ -329,6 +553,7 @@ export function scheduleFollowupDrain(
           } else {
             await runFollowup(next);
           }
+          _touchQueueProgress(queue, "fifo:queue_task_done");
           console.log(`[drain] ✅ FIFO done: ${next.summaryLine || 'none'}, remaining=${queue.items.length}`);
           continue;
         }
@@ -471,6 +696,7 @@ export function scheduleFollowupDrain(
                 if (parallelItems.length > 1) {
                   console.log(`[drain] 🚀 Parallel execution: ${parallelItems.length} tasks (max concurrency=${MAX_PARALLEL_CONCURRENCY})`);
                   await runParallelChunked(parallelItems, runFollowup);
+                  _touchQueueProgress(queue, "parallel:batch_done");
                   continue;
                 } else {
                   // 放回队列头部
@@ -493,6 +719,7 @@ export function scheduleFollowupDrain(
         } else {
           await runFollowup(next);
         }
+        _touchQueueProgress(queue, "generic:task_done");
         console.log(`[drain] ✅ Task finished: summary=${next.summaryLine || 'none'}, remaining=${queue.items.length}`);
       }
       const drainTotalSec = Math.round((Date.now() - drainStartTime) / 1000);

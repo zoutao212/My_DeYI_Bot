@@ -5,7 +5,11 @@ export type TaskEventType =
   | "subtask_status_changed"
   | "persistence_finalized"
   | "persistence_failed"
-  | "round_completed";
+  | "round_completed"
+  | "agent_mode_changed"
+  | "autonomy_level_changed"
+  | "fallback_enqueued"
+  | "watchdog_recovered";
 
 export type TaskEventRecord = {
   ts: number;

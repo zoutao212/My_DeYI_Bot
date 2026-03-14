@@ -37,6 +37,10 @@ function serializeQueueState(queue: FollowupQueueState): Omit<FollowupQueueState
   return {
     items: queue.items,
     lastEnqueuedAt: queue.lastEnqueuedAt,
+    lastProgressAt: queue.lastProgressAt,
+    lastProgressReason: queue.lastProgressReason,
+    stuckCount: queue.stuckCount,
+    lastWatchdogAt: queue.lastWatchdogAt,
     mode: queue.mode,
     debounceMs: queue.debounceMs,
     cap: queue.cap,

@@ -193,16 +193,31 @@ function mergeConfig(
     maxResults: overrides?.query?.maxResults ?? defaults?.query?.maxResults ?? DEFAULT_MAX_RESULTS,
     minScore: overrides?.query?.minScore ?? defaults?.query?.minScore ?? DEFAULT_MIN_SCORE,
   };
+  const envHybridEnabledRaw = process.env.CLAWDBOT_MEMORY_HYBRID_ENABLED?.trim();
+  const envHybridEnabled =
+    envHybridEnabledRaw === "1" || envHybridEnabledRaw?.toLowerCase() === "true"
+      ? true
+      : envHybridEnabledRaw === "0" || envHybridEnabledRaw?.toLowerCase() === "false"
+        ? false
+        : undefined;
+  const envVectorWeightRaw = process.env.CLAWDBOT_MEMORY_HYBRID_VECTOR_WEIGHT?.trim();
+  const envTextWeightRaw = process.env.CLAWDBOT_MEMORY_HYBRID_TEXT_WEIGHT?.trim();
+  const envVectorWeight = envVectorWeightRaw ? Number.parseFloat(envVectorWeightRaw) : undefined;
+  const envTextWeight = envTextWeightRaw ? Number.parseFloat(envTextWeightRaw) : undefined;
+
   const hybrid = {
     enabled:
+      envHybridEnabled ??
       overrides?.query?.hybrid?.enabled ??
       defaults?.query?.hybrid?.enabled ??
       DEFAULT_HYBRID_ENABLED,
     vectorWeight:
+      (Number.isFinite(envVectorWeight) ? envVectorWeight : undefined) ??
       overrides?.query?.hybrid?.vectorWeight ??
       defaults?.query?.hybrid?.vectorWeight ??
       DEFAULT_HYBRID_VECTOR_WEIGHT,
     textWeight:
+      (Number.isFinite(envTextWeight) ? envTextWeight : undefined) ??
       overrides?.query?.hybrid?.textWeight ??
       defaults?.query?.hybrid?.textWeight ??
       DEFAULT_HYBRID_TEXT_WEIGHT,

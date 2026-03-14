@@ -76,9 +76,12 @@ async function walkDir(
 
 export async function listMemoryFiles(
   workspaceDir: string,
-  options?: { extraDirs?: string[] },
+  options?: { extraDirs?: string[]; extensions?: string[] },
 ): Promise<string[]> {
   const result: string[] = [];
+  const extensions = options?.extensions && options.extensions.length > 0
+    ? options.extensions
+    : DEFAULT_MEMORY_EXTENSIONS;
 
   // 顶层记忆文件
   const memoryFile = path.join(workspaceDir, "MEMORY.md");
@@ -89,7 +92,7 @@ export async function listMemoryFiles(
   // 核心记忆目录
   const memoryDir = path.join(workspaceDir, "memory");
   if (await exists(memoryDir)) {
-    await walkDir(memoryDir, result);
+    await walkDir(memoryDir, result, extensions);
   }
 
   // 角色记忆目录 characters/*/memory/
@@ -101,7 +104,7 @@ export async function listMemoryFiles(
         if (!charEntry.isDirectory() || charEntry.name.startsWith(".")) continue;
         const charMemDir = path.join(charactersDir, charEntry.name, "memory");
         if (await exists(charMemDir)) {
-          await walkDir(charMemDir, result);
+          await walkDir(charMemDir, result, extensions);
         }
       }
     } catch {}
@@ -111,7 +114,7 @@ export async function listMemoryFiles(
   if (options?.extraDirs) {
     for (const extraDir of options.extraDirs) {
       if (await exists(extraDir)) {
-        await walkDir(extraDir, result);
+        await walkDir(extraDir, result, extensions);
       }
     }
   }

@@ -1,6 +1,9 @@
 import type { Command } from "commander";
 import { DEFAULT_CHAT_CHANNEL } from "../../channels/registry.js";
 import { agentCliCommand } from "../../commands/agent-via-gateway.js";
+import { loadConfig } from "../../config/config.js";
+import { resolveSession } from "../../commands/agent/session.js";
+import { replayAgentRunReport } from "../../commands/agent/replay.js";
 import {
   agentsAddCommand,
   agentsDeleteCommand,
@@ -34,6 +37,9 @@ export function registerAgentCommands(program: Command, args: { agentChannelOpti
     .option("--reply-to <target>", "Delivery target override (separate from session routing)")
     .option("--reply-channel <channel>", "Delivery channel override (separate from routing)")
     .option("--reply-account <id>", "Delivery account id override")
+    .option("--replay", "Print last task-events + loop-ledger for the resolved session", false)
+    .option("--replay-events <n>", "Max number of task-events lines to print (default 50)")
+    .option("--replay-ledger <n>", "Max number of loop-ledger entries to print (default 20)")
     .option(
       "--local",
       "Run the embedded agent locally (requires model provider API keys in your shell)",
@@ -76,6 +82,26 @@ ${theme.muted("Docs:")} ${formatDocsLink("/cli/agent", "docs.clawd.bot/cli/agent
       // Build default deps (keeps parity with other commands; future-proofing).
       const deps = createDefaultDeps();
       await runCommandWithRuntime(defaultRuntime, async () => {
+        if (opts.replay === true) {
+          const cfg = loadConfig();
+          const sessionResolution = resolveSession({
+            cfg,
+            to: opts.to as string | undefined,
+            sessionId: opts.sessionId as string | undefined,
+            sessionKey: undefined,
+            agentId: (opts.agent as string | undefined)?.trim(),
+          });
+          const maxEvents = opts.replayEvents ? Number.parseInt(String(opts.replayEvents), 10) : undefined;
+          const maxLedger = opts.replayLedger ? Number.parseInt(String(opts.replayLedger), 10) : undefined;
+          await replayAgentRunReport({
+            sessionId: sessionResolution.sessionId,
+            runtime: defaultRuntime,
+            maxEvents: Number.isFinite(maxEvents as any) ? (maxEvents as number) : undefined,
+            maxLedger: Number.isFinite(maxLedger as any) ? (maxLedger as number) : undefined,
+            json: opts.json === true,
+          });
+          return;
+        }
         await agentCliCommand(opts, defaultRuntime, deps);
       });
     });

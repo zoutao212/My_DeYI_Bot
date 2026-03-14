@@ -94,6 +94,31 @@ export type SessionEntry = {
   lastThreadId?: string | number;
   skillsSnapshot?: SessionSkillSnapshot;
   systemPromptReport?: SessionSystemPromptReport;
+
+  /**
+   * 🆕 Agent 工作流状态机（会话级）
+   * dialog  : 普通对话态（不强制入队）
+   * task    : 任务态（agent loop，强制推进直到 round 结束）
+   * closing : 收尾态（合并/交付/归档进行中或刚完成）
+   */
+  agentMode?: "dialog" | "task" | "closing";
+
+  /** agentMode 最近一次切换原因（短文本，用于观测与回放） */
+  agentModeReason?: string;
+
+  /** agentMode 最近一次切换时间（ms） */
+  agentModeUpdatedAt?: number;
+
+  /**
+   * 🆕 自主程度（会话级）
+   * quiet      : 尽量安静，仅在强信号/明确任务时进入 task
+   * normal     : 默认平衡策略
+   * proactive  : 更积极地推动任务分解与推进（更频繁进入 task）
+   */
+  autonomyLevel?: "quiet" | "normal" | "proactive";
+
+  /** autonomyLevel 最近一次切换时间（ms） */
+  autonomyLevelUpdatedAt?: number;
 };
 
 export function mergeSessionEntry(

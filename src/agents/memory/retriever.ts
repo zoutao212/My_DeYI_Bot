@@ -9,6 +9,7 @@
 import type { ClawdbotConfig } from "../../config/config.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { MemoryIndexManager } from "../../memory/manager.js";
+import { formatTextEtlHitsForMemoryContext, searchTextEtlBooks } from "../../textetl/search.js";
 import type {
   MemoryRetrievalRequest,
   MemoryRetrievalResult,
@@ -76,7 +77,21 @@ export class MemoryRetriever {
       });
 
       // 3. 格式化结果
-      const formattedContext = this.formatMemoryContext(results);
+      let formattedContext = this.formatMemoryContext(results);
+
+      // 4. 联邦接入 TextETL 素材库（不依赖 MemoryIndex 预索引，不阻塞主流程）
+      try {
+        const hits = await this.withTimeout(
+          searchTextEtlBooks(request.query, { maxResults: 6, maxTextChars: 900 }),
+          1200,
+        );
+        const extra = formatTextEtlHitsForMemoryContext(hits);
+        if (extra) {
+          formattedContext = formattedContext ? `${formattedContext}\n\n${extra}` : extra;
+        }
+      } catch {
+        // ignore
+      }
 
       return {
         memories: results.map((r) => ({

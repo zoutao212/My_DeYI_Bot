@@ -32,6 +32,9 @@ import { resolveReplyToMode } from "./reply-threading.js";
 import { isRoutableChannel, routeReply } from "./route-reply.js";
 import { persistSessionUsageUpdate } from "./session-usage.js";
 import { incrementCompactionCount } from "./session-updates.js";
+import { updateSessionStoreEntry } from "../../config/sessions/store.js";
+import { TaskEventLogger } from "../../agents/intelligent-task-decomposition/task-event-logger.js";
+import { appendLoopLedgerEntry } from "../../agents/intelligent-task-decomposition/loop-ledger.js";
 import type { TypingController } from "./typing.js";
 import { createTypingSignaler } from "./typing-mode.js";
 import { setCurrentFollowupRunContext, clearCurrentFollowupRunContext } from "../../agents/tools/enqueue-task-tool.js";
@@ -59,6 +62,7 @@ import { localGrepSearch, getDefaultMemoryDirs } from "../../memory/local-search
 import { createV2EnhancedExecutor, type V2EnhancedExecutor } from "../../agents/intelligent-task-decomposition/v2-enhanced-executor-v2.js";
 import { globalAbortManager } from "../../agents/global-abort-manager.js"; // 🚨 Bug #3 修复: 全局中断管理器
 import { searchNovelAssets, hasNovelAssets, formatNovelSnippetsForPromptBlocks } from "../../memory/novel-assets-searcher.js";
+import { materializeNovelSnippetsToChunkAssets } from "../../textetl/autogen.js";
 
 const TOOL_PROGRESS_ENABLED = process.env.CLAWDBOT_TASK_PROGRESS_TOOL_VERBOSE !== "0";
 
@@ -74,6 +78,74 @@ const v2EnhancedExecutor = createV2EnhancedExecutor({
 
 function _sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+async function _appendTaskEvent(sessionId: string, type: any, data: Record<string, unknown>): Promise<void> {
+  try {
+    const logger = new TaskEventLogger(sessionId);
+    await logger.append(type, data);
+  } catch {
+    // 事件流是旁路审计，不允许阻塞主流程。
+  }
+}
+
+async function _setAgentMode(params: {
+  storePath?: string;
+  sessionKey?: string;
+  mode: "dialog" | "task" | "closing";
+  reason: string;
+  taskTree?: TaskTree | null;
+}): Promise<void> {
+  const { storePath, sessionKey, mode, reason, taskTree } = params;
+
+  const sessionId = taskTree?.id;
+
+  if (taskTree) {
+    if (!taskTree.metadata) {
+      taskTree.metadata = {
+        totalTasks: taskTree.subTasks.length,
+        completedTasks: taskTree.subTasks.filter((t) => t.status === "completed").length,
+        failedTasks: taskTree.subTasks.filter((t) => t.status === "failed").length,
+      };
+    }
+    taskTree.metadata.agentMode = mode;
+    taskTree.metadata.agentModeReason = reason;
+    taskTree.metadata.agentModeUpdatedAt = Date.now();
+  }
+
+  if (sessionId) {
+    await _appendTaskEvent(sessionId, "agent_mode_changed", {
+      to: mode,
+      reason,
+    });
+
+    // 🧾 LoopLedger（最小落盘）：记录关键状态切换，保证可回放。
+    try {
+      await appendLoopLedgerEntry({
+        sessionId,
+        phase: mode,
+        reason,
+        agentMode: mode,
+        reflection: {
+          summary: `状态切换 -> ${mode}`,
+        },
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!storePath || !sessionKey) return;
+  await updateSessionStoreEntry({
+    storePath,
+    sessionKey,
+    update: async () => ({
+      agentMode: mode,
+      agentModeReason: reason,
+      agentModeUpdatedAt: Date.now(),
+      updatedAt: Date.now(),
+    }),
+  });
 }
 
 async function loadRecentPhaseContext(params: {
@@ -962,6 +1034,219 @@ export function createFollowupRunner(params: {
           }
         }
 
+        let textEtlReferenceCtxA = "";
+        let textEtlReferenceCtxB = "";
+        if (shouldInjectHeavyContext && isSubTaskForMemory && queued.run.workspaceDir) {
+          const novelTaskTypes = ["writing", "design"];
+          const taskType = subTask?.taskType ?? "generic";
+          if (novelTaskTypes.includes(taskType)) {
+            try {
+              const clawdDir = path.resolve(os.homedir(), "clawd");
+              const chunkAssetsDir = (process.env.CLAWDBOT_NOVELS_CHUNK_ASSETS_DIR?.trim())
+                || path.join(clawdDir, "NovelsChunkAssets");
+              const novelAssetsDir = (process.env.CLAWDBOT_NOVELS_ASSETS_DIR?.trim())
+                || path.join(clawdDir, "NovelsAssets");
+              const searchQuery = subTask?.summary || queued.prompt.substring(0, 300);
+
+              const runChunkSearch = async () => localGrepSearch(searchQuery, {
+                dirs: [chunkAssetsDir],
+                extensions: [".md", ".txt", ".jsonl", ".json"],
+                recursive: true,
+                contextLines: 2,
+                maxResults: 12,
+                maxFileSize: 2 * 1024 * 1024,
+                workspaceDir: clawdDir,
+              });
+
+              const tryIndexSearch = async (): Promise<Awaited<ReturnType<typeof runChunkSearch>>> => {
+                const enabledRaw = process.env.CLAWDBOT_TEXTETL_INDEX_ENABLED?.trim();
+                const enabled = enabledRaw ? (enabledRaw === "1" || enabledRaw.toLowerCase() === "true") : true;
+                if (!enabled) return [];
+
+                try {
+                  const { extractSearchTerms } = await import("../../memory/keyword-extractor.js");
+                  const terms = extractSearchTerms(searchQuery, 12)
+                    .map((t: any) => String(t).trim())
+                    .filter(Boolean)
+                    .slice(0, 12);
+                  if (terms.length === 0) return [];
+
+                  const booksRoot = path.join(chunkAssetsDir, "books");
+                  const entries = await fs.readdir(booksRoot, { withFileTypes: true });
+                  const results: any[] = [];
+
+                  for (const e of entries) {
+                    if (!e.isDirectory()) continue;
+                    const bookId = e.name;
+                    const baseDir = path.join(booksRoot, bookId);
+                    const indexPath = path.join(baseDir, "index.json");
+                    const jsonlPath = path.join(baseDir, "chunks.jsonl");
+
+                    let indexObj: Record<string, number[]> | null = null;
+                    try {
+                      const raw = await fs.readFile(indexPath, "utf-8");
+                      indexObj = JSON.parse(raw);
+                    } catch {
+                      continue;
+                    }
+
+                    const candidate = new Set<number>();
+                    for (const term of terms) {
+                      const arr = indexObj?.[term];
+                      if (Array.isArray(arr)) {
+                        for (const n of arr) {
+                          if (typeof n === "number" && Number.isFinite(n)) candidate.add(n);
+                        }
+                      }
+                    }
+                    if (candidate.size === 0) continue;
+
+                    // 只扫描 chunks.jsonl，找到候选 idx 后就停止（避免全量扫）
+                    let jsonlRaw = "";
+                    try {
+                      jsonlRaw = await fs.readFile(jsonlPath, "utf-8");
+                    } catch {
+                      continue;
+                    }
+
+                    const lines = jsonlRaw.split("\n");
+                    let hitCount = 0;
+                    for (let i = 0; i < lines.length; i += 1) {
+                      const line = (lines[i] ?? "").trim();
+                      if (!line) continue;
+                      try {
+                        const obj = JSON.parse(line);
+                        const idx = typeof obj?.idx === "number" ? obj.idx : Number.parseInt(String(obj?.idx ?? ""), 10);
+                        if (!Number.isFinite(idx)) continue;
+                        if (!candidate.has(idx)) continue;
+                        const rel = path.relative(clawdDir, jsonlPath).replace(/\\/g, "/");
+                        results.push({
+                          path: rel,
+                          absPath: jsonlPath,
+                          startLine: i + 1,
+                          endLine: i + 1,
+                          score: 0.8,
+                          snippet: line,
+                          source: "grep",
+                        });
+                        hitCount += 1;
+                        if (results.length >= 12) break;
+                        if (hitCount >= 6) break;
+                      } catch {
+                        // ignore
+                      }
+                    }
+                    if (results.length >= 12) break;
+                  }
+
+                  return results;
+                } catch {
+                  return [];
+                }
+              };
+
+              let results = await runChunkSearch();
+
+              // 如果本地全量扫描命中不足，优先尝试 index.json 倒排索引提速召回
+              if (results.length < 4) {
+                const indexed = await tryIndexSearch();
+                if (indexed.length > results.length) {
+                  results = indexed;
+                }
+              }
+
+              const autoGenEnabledRaw = process.env.CLAWDBOT_TEXTETL_AUTOGEN_ENABLED?.trim();
+              const autoGenEnabled = autoGenEnabledRaw === "1" || autoGenEnabledRaw?.toLowerCase() === "true";
+              const minResults = Number.parseInt(process.env.CLAWDBOT_TEXTETL_AUTOGEN_MIN_RESULTS ?? "", 10);
+              const autoGenMinResults = Number.isFinite(minResults) ? Math.max(0, minResults) : 4;
+
+              if (autoGenEnabled && results.length < autoGenMinResults) {
+                try {
+                  const novelResult = await searchNovelAssets(searchQuery, clawdDir, {
+                    dirs: [novelAssetsDir],
+                    maxSnippets: 10,
+                    snippetTargetChars: 520,
+                    snippetMinChars: 160,
+                    snippetMaxChars: 900,
+                    maxSnippetsPerFile: 3,
+                    minScore: 0.14,
+                    autoExtractKeywords: true,
+                  });
+
+                  if (novelResult.snippets.length > 0) {
+                    const { written, outputDir } = await materializeNovelSnippetsToChunkAssets({
+                      chunkAssetsDir,
+                      query: searchQuery,
+                      snippets: novelResult.snippets,
+                      maxWrite: 8,
+                    });
+                    if (written > 0) {
+                      results = await runChunkSearch();
+                      console.log(
+                        `[followup-runner] 🧩 TextETL 自动切片: written=${written}, autogenDir=${outputDir}, rerunResults=${results.length}`,
+                      );
+                    }
+                  }
+                } catch {
+                  // 自动切片失败不影响主流程
+                }
+              }
+
+              const normalizeSnippet = (r: any): string => {
+                try {
+                  const abs = String(r.absPath || "");
+                  if (!abs.toLowerCase().endsWith(".jsonl") && !abs.toLowerCase().endsWith(".json")) {
+                    return String(r.snippet || "");
+                  }
+                  const raw = String(r.snippet || "");
+                  const lines = raw.split("\n");
+                  const texts: string[] = [];
+                  for (const line of lines) {
+                    const t = line.trim();
+                    if (!t) continue;
+                    try {
+                      const obj = JSON.parse(t);
+                      const body = typeof obj?.text === "string" ? obj.text : "";
+                      const keywordsTop = Array.isArray(obj?.keywordsTop)
+                        ? obj.keywordsTop.map((x: any) => String(x)).filter(Boolean).slice(0, 10)
+                        : [];
+                      const label = keywordsTop.length > 0 ? `关键词：${keywordsTop.join("、")}` : "";
+                      const combined = [label, body].filter(Boolean).join("\n");
+                      if (combined.trim()) texts.push(combined.trim());
+                    } catch {
+                      // ignore non-json lines
+                    }
+                  }
+                  return texts.join("\n\n...") || raw;
+                } catch {
+                  return String(r.snippet || "");
+                }
+              };
+
+              if (results.length > 0) {
+                const header = (idx: number) => `\n\n[🧩 TextETL 参考片段-${idx + 1}]\n以下是从 TextETL 产物中检索到的相关片段（关键词检索），用于补充世界观/角色/剧情细节：\n`;
+                const lines = results.map((r, i) => {
+                  const title = `- (${i + 1}) ${r.path} (行 ${r.startLine}-${r.endLine}, score=${r.score.toFixed(2)})`;
+                  return `${title}\n${normalizeSnippet(r)}`;
+                });
+
+                const joined = lines.join("\n\n---\n\n");
+                const maxA = 3200;
+                const maxB = 3200;
+                const a = joined.slice(0, maxA);
+                const b = joined.slice(maxA, maxA + maxB);
+                textEtlReferenceCtxA = a ? header(0) + a : "";
+                textEtlReferenceCtxB = b ? header(1) + b : "";
+                console.log(
+                  `[followup-runner] 🧩 TextETL 参考注入: results=${results.length}, charsA=${textEtlReferenceCtxA.length}, charsB=${textEtlReferenceCtxB.length} (taskType=${taskType})`,
+                );
+              }
+            } catch {
+              // TextETL 检索失败不阻塞任务执行
+            }
+          }
+        }
+
         const execPrompt = (() => {
                 // 子任务强制落盘（在 prompt 本体注入指令）
                 const isSubTask = Boolean(queued.subTaskId);
@@ -1242,7 +1527,7 @@ export function createFollowupRunner(params: {
                   }
                 }
 
-                const combined = [base, siblingCtx, novelReferenceCtxA, parentGoalCtx, subTaskMemoryCtx, novelReferenceCtxB, persistInstruction, blueprintCtx, novelReferenceCtxC, chapterOutlineCtx, experienceHint ? `\n\n${experienceHint}` : ""].filter(Boolean).join("");
+                const combined = [base, siblingCtx, novelReferenceCtxA, textEtlReferenceCtxA, parentGoalCtx, subTaskMemoryCtx, novelReferenceCtxB, textEtlReferenceCtxB, persistInstruction, blueprintCtx, novelReferenceCtxC, chapterOutlineCtx, experienceHint ? `\n\n${experienceHint}` : ""].filter(Boolean).join("");
                 return combined || undefined;
               })();
 
@@ -1918,6 +2203,15 @@ export function createFollowupRunner(params: {
               }
               taskTree = refreshedTaskTree;
 
+              await _setAgentMode({
+                storePath,
+                sessionKey,
+                mode: "closing",
+                reason: `round_completed:${postResult.completedRoundId}`,
+                taskTree: refreshedTaskTree,
+              });
+              await orchestrator.saveTaskTree(refreshedTaskTree);
+
               // 委托 onRoundCompleted 钩子：合并输出 + 交付报告
               const roundResult = await orchestrator.onRoundCompleted(refreshedTaskTree, postResult.completedRoundId);
               await deliverCompletedRound({
@@ -1933,6 +2227,32 @@ export function createFollowupRunner(params: {
                 }),
                 logPrefix: "[followup-runner]",
               });
+
+              // 🧾 LoopLedger：round 交付完成，记录一次“复盘/下一步”。
+              try {
+                await appendLoopLedgerEntry({
+                  sessionId,
+                  phase: "closing",
+                  reason: `round_delivered:${postResult.completedRoundId}`,
+                  roundId: postResult.completedRoundId,
+                  nextAction: "等待用户下一条指令；若用户无新指令，保持对话陪伴态。",
+                  reflection: {
+                    summary: "轮次已交付",
+                    openQuestions: ["是否需要继续推进新需求，或对产出做验收/迭代？"],
+                  },
+                });
+              } catch {
+                // ignore
+              }
+
+              await _setAgentMode({
+                storePath,
+                sessionKey,
+                mode: "dialog",
+                reason: `round_delivered:${postResult.completedRoundId}`,
+                taskTree: refreshedTaskTree,
+              });
+              await orchestrator.saveTaskTree(refreshedTaskTree);
             }
           } catch (ppErr) {
             console.warn(`[followup-runner] ⚠️ 子任务后处理异常（不阻塞）: ${ppErr}`);

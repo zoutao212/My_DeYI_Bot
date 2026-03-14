@@ -2,7 +2,21 @@
 $ErrorActionPreference = "Stop"
 $RepoDir = "D:\Git_GitHub\clawdbot"
 $env:CLAWDBOT_CLAUDE_SKIP_PERMISSIONS = "1"
+
 $env:CLAWDBOT_DEBUG_AGENT_EVENTS = "1"
+$env:CLAWDBOT_TEXTETL_AUTOGEN_ENABLED="1"
+$env:CLAWDBOT_TEXTETL_AUTOGEN_MIN_RESULTS="4"
+
+$env:CLAWDBOT_TEXTETL_TARGET_CHUNK_CHARS="3000"
+$env:CLAWDBOT_TEXTETL_MAX_CHAPTER_CHARS="6000"
+$env:CLAWDBOT_TEXTETL_MICRO_CHUNK_CHARS="300"
+$env:CLAWDBOT_TEXTETL_ENABLE_MICRO_CHUNKS="true"
+$env:CLAWDBOT_TEXTETL_MEMORY_ENABLED="1"
+$env:CLAWDBOT_TEXTETL_MEMORY_FTS_ONLY="1"
+
+# 可选：显式指定目录
+$env:CLAWDBOT_NOVELS_ASSETS_DIR="C:\Users\zouta\clawd\NovelsAssets"
+$env:CLAWDBOT_NOVELS_CHUNK_ASSETS_DIR="C:\Users\zouta\clawd\NovelsChunkAssets"
 
 Write-Host "[Start-Clawdbot] Repo: $RepoDir" -ForegroundColor Cyan
 Write-Host "[Start-Clawdbot] Script: $PSCommandPath" -ForegroundColor DarkGray

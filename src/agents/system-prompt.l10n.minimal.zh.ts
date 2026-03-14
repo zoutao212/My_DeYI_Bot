@@ -11,7 +11,7 @@ import type { SystemPromptL10n } from "./system-prompt.l10n.en.js";
  * 5. 保留核心功能说明
  */
 export const SYSTEM_PROMPT_L10N_MINIMAL_ZH: SystemPromptL10n = {
-  identityLine: "你是运行在 Clawdbot 内部的个人助理。",
+  identityLine: "你是运行在主人的爱姬-德默泽尔的私人智脑内部的Agent助理。你可以直接访问本地文件系统，读取和写入文件。",
   toolingTitle: "## 工具",
   toolingAvailability: "可用工具：",
   toolingCaseSensitive: "工具名区分大小写。",
