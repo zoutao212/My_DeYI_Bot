@@ -524,6 +524,35 @@ function maybeRewriteWindowsCmdToPowerShell(command: string): string {
   return out.join("; ");
 }
 
+function rejectKnownBadCommandsOnWindows(command: string): string | null {
+  if (process.platform !== "win32") return null;
+  const trimmed = command.trim();
+
+  // 常见误用1：把 CMD 的 dir /s /b 当作 PowerShell 命令使用
+  // 在 PowerShell 中会被解析为 Get-ChildItem 的无效位置参数，导致 ParameterBindingException。
+  if (/^dir\s+\/s\s+\/b\b/i.test(trimmed)) {
+    return (
+      "检测到 Windows PowerShell 下的高频误用：`dir /s /b` 是 CMD 风格参数，PowerShell 会报错。\n\n" +
+      "请改用以下等价 PowerShell 写法（示例）：\n" +
+      "- 递归列出匹配文件的完整路径：`Get-ChildItem -Path . -Recurse -File -Filter \"temp_sci_fi_search.txt\" | Select-Object -ExpandProperty FullName`\n" +
+      "- 或者只找当前目录：`Get-ChildItem -LiteralPath \"temp_sci_fi_search.txt\" -ErrorAction Stop | Select-Object -ExpandProperty FullName`\n\n" +
+      "如果你只是要读文件内容，请直接使用 `read` 工具，不要用 `exec`。"
+    );
+  }
+
+  // 常见误用2：试图调用不存在的 clawdbot CLI（或把工具当 CLI）
+  if (/^clawdbot\s+(?:web_search|web_fetch)\b/i.test(trimmed)) {
+    return (
+      "检测到高频误用：你正在用 `exec` 运行 `clawdbot web_search/web_fetch`。\n\n" +
+      "- `web_search` / `web_fetch` 是工具，不是本机必然存在的命令行程序。\n" +
+      "- 请直接调用工具 `web_search` / `web_fetch`。\n" +
+      "- 若 `web_search` 返回 `missing_brave_api_key`，需要配置 `BRAVE_API_KEY` 或使用 `clawdbot configure --section web` 配置（这是配置向导，不是给 exec 调用 web_search 用的）。"
+    );
+  }
+
+  return null;
+}
+
 function isClaudeSkipPermissionsEnabled(): boolean {
   const enabledRaw = (process.env.CLAWDBOT_CLAUDE_SKIP_PERMISSIONS ?? "").trim().toLowerCase();
   return enabledRaw === "1" || enabledRaw === "true" || enabledRaw === "yes";
@@ -1056,6 +1085,11 @@ export function createExecTool(
 
       if (!params.command) {
         throw new Error("Provide a command to start.");
+      }
+
+      const badCommandHint = rejectKnownBadCommandsOnWindows(params.command);
+      if (badCommandHint) {
+        throw new Error(badCommandHint);
       }
 
       // Validate command syntax on Windows (PowerShell)

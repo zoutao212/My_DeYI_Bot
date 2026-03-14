@@ -125,6 +125,7 @@ function resolveSearchApiKey(search?: WebSearchConfig): string | undefined {
 function missingSearchKeyPayload(provider: (typeof SEARCH_PROVIDERS)[number]) {
   if (provider === "perplexity") {
     return {
+      status: "error",
       error: "missing_perplexity_api_key",
       message:
         "web_search (perplexity) needs an API key. Set PERPLEXITY_API_KEY or OPENROUTER_API_KEY in the Gateway environment, or configure tools.web.search.perplexity.apiKey.",
@@ -132,6 +133,7 @@ function missingSearchKeyPayload(provider: (typeof SEARCH_PROVIDERS)[number]) {
     };
   }
   return {
+    status: "error",
     error: "missing_brave_api_key",
     message: `web_search needs a Brave Search API key. Run \`${formatCliCommand("clawdbot configure --section web")}\` to store it, or set BRAVE_API_KEY in the Gateway environment.`,
     docs: "https://docs.clawd.bot/tools/web",
@@ -445,6 +447,7 @@ export function createWebSearchTool(options?: {
       const rawFreshness = readStringParam(params, "freshness");
       if (rawFreshness && provider !== "brave") {
         return jsonResult({
+          status: "error",
           error: "unsupported_freshness",
           message: "freshness is only supported by the Brave web_search provider.",
           docs: "https://docs.clawd.bot/tools/web",
@@ -453,6 +456,7 @@ export function createWebSearchTool(options?: {
       const freshness = rawFreshness ? normalizeFreshness(rawFreshness) : undefined;
       if (rawFreshness && !freshness) {
         return jsonResult({
+          status: "error",
           error: "invalid_freshness",
           message:
             "freshness must be one of pd, pw, pm, py, or a range like YYYY-MM-DDtoYYYY-MM-DD.",
