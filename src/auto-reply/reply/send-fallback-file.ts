@@ -27,7 +27,7 @@ export type SendFallbackFileParams = {
 export type SendFallbackFileResult = {
   ok: boolean;
   /** 实际使用的发送方式 */
-  method: "telegram" | "route-reply" | "text-notify" | "skipped";
+  method: "telegram" | "safew" | "route-reply" | "text-notify" | "skipped";
   error?: string;
 };
 
@@ -126,6 +126,74 @@ export async function sendFallbackFile(
         // 降级也失败，返回原始错误
       }
       return { ok: false, method: "telegram", error: msg };
+    }
+  }
+
+  // ── Safew：直接发送文件（基于 Telegram Bot API） ─────────────
+  if (channel === "safew") {
+    try {
+      const fileBuffer = await readFile(filePath);
+      const threadId = queued.originatingThreadId;
+      const resolvedThreadId =
+        threadId != null
+          ? typeof threadId === "string"
+            ? Number(threadId)
+            : threadId
+          : undefined;
+      const { sendSafewDocument } = await import("../../safew/send-document.js");
+      const res = await sendSafewDocument({
+        to,
+        fileBuffer,
+        fileName,
+        caption,
+        parseMode: "HTML",
+        accountId: queued.originatingAccountId,
+        messageThreadId: resolvedThreadId,
+      });
+      if (!res.ok) {
+        return {
+          ok: false,
+          method: "safew",
+          error: res.description || `Safew sendDocument failed (${res.errorCode ?? "unknown"})`,
+        };
+      }
+      console.log(
+        `[send-fallback-file] ✅ 已通过 Safew 发送文件：${fileName} → ${to}`,
+      );
+      return { ok: true, method: "safew" };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[send-fallback-file] ⚠️ Safew 文件发送失败，降级为 routeReply 文本通知：${msg}`,
+      );
+
+      try {
+        const { isRoutableChannel, routeReply } = await import("./route-reply.js");
+        if (isRoutableChannel(channel)) {
+          const fileContent = (await readFile(filePath, "utf-8")).slice(0, 4000);
+          const notifyText = caption
+            ? `📎 ${caption}\n\n${fileContent}${fileContent.length >= 4000 ? "\n\n...(已截断)" : ""}`
+            : `📎 文件内容：\n\n${fileContent}${fileContent.length >= 4000 ? "\n\n...(已截断)" : ""}`;
+          const payload: ReplyPayload = { text: notifyText };
+          const result = await routeReply({
+            payload,
+            channel,
+            to,
+            sessionKey: queued.run.sessionKey,
+            accountId: queued.originatingAccountId,
+            threadId: queued.originatingThreadId,
+            cfg: queued.run.config,
+          });
+          if (result.ok) {
+            console.log(`[send-fallback-file] ✅ Safew sendDocument 失败后通过 routeReply 成功发送文本`);
+            return { ok: true, method: "text-notify" };
+          }
+        }
+      } catch {
+        // ignore
+      }
+
+      return { ok: false, method: "safew", error: msg };
     }
   }
 

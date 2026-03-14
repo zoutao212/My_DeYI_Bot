@@ -46,6 +46,7 @@ const MAX_FILE_SIZE = {
   discord: 8 * 1024 * 1024, // 8 MB
   slack: 1024 * 1024 * 1024, // 1 GB
   web: 100 * 1024 * 1024, // 100 MB
+  safew: 50 * 1024 * 1024, // 50 MB（Safew 基于 Telegram Bot API）
 };
 
 /**
@@ -110,6 +111,7 @@ export function createSendFileTool(options: {
 
 **支持的频道**：
 - Telegram（最大 50MB）
+- Safew（最大 50MB）
 - Discord（最大 8MB）
 - Slack（最大 1GB）
 - Web 网关
@@ -133,9 +135,12 @@ export function createSendFileTool(options: {
       const filePath = readStringParam(params, "filePath", { required: true });
       const caption = readStringParam(params, "caption") || "";
 
+      let resolvedPath = "";
+      let originatingChannel: string | undefined;
+
       try {
         // 1. 解析文件路径
-        const resolvedPath = isAbsolute(filePath)
+        resolvedPath = isAbsolute(filePath)
           ? filePath
           : resolve(options.workspaceDir, filePath);
 
@@ -193,11 +198,13 @@ export function createSendFileTool(options: {
         }
 
         const {
-          originatingChannel,
+          originatingChannel: _originatingChannel,
           originatingTo,
           originatingAccountId,
           originatingThreadId,
         } = currentFollowupRun;
+
+        originatingChannel = _originatingChannel;
 
         // 🔧 P14 修复：webchat 频道不需要 originatingTo，提前处理
         if (originatingChannel === "webchat") {
@@ -273,6 +280,23 @@ export function createSendFileTool(options: {
             fileSize,
             channel: "telegram",
           });
+        } else if (originatingChannel === "safew") {
+          await sendFileToSafew({
+            to: originatingTo,
+            fileBuffer,
+            fileName,
+            caption,
+            accountId: originatingAccountId,
+            threadId: originatingThreadId as number | undefined,
+          });
+
+          return jsonResult({
+            success: true,
+            message: `✅ 文件已发送到 Safew：${fileName}（${formatFileSize(fileSize)}）`,
+            fileName,
+            fileSize,
+            channel: "safew",
+          });
         } else if (originatingChannel === "discord") {
           // TODO: 实现 Discord 文件发送
           return jsonResult({
@@ -296,6 +320,32 @@ export function createSendFileTool(options: {
         }
       } catch (err) {
         console.error(`[send_file] ❌ Error:`, err);
+
+        const anyErr = err as any;
+        const errorCode = typeof anyErr?.error_code === "number" ? anyErr.error_code : undefined;
+        const description = typeof anyErr?.description === "string" ? anyErr.description : "";
+        const method = typeof anyErr?.method === "string" ? anyErr.method : "";
+
+        if (originatingChannel === "safew" && method === "sendDocument" && errorCode === 401) {
+          const isTokenInvalid = /BOT_TOKEN_INVALID/i.test(description) || /token/i.test(description);
+          return jsonResult({
+            success: false,
+            status: "error",
+            error:
+              `Safew 文件发送失败：401 Unauthorized（${
+                isTokenInvalid ? "BOT_TOKEN_INVALID" : "Bot Token 未授权/已过期/配置错误"
+              }）。` +
+              `⚠️ 这不是网络抖动，重复调用 send_file 无法解决，请勿重试。\n\n` +
+              `请检查 Safew 配置：\n` +
+              `- config: channels.safew.botToken 或 channels.safew.tokenFile\n` +
+              `- 账号级覆盖: channels.safew.accounts.<accountId>.botToken / tokenFile\n` +
+              `- 环境变量: SAFEW_BOT_TOKEN（仅 default 账号可用）\n\n` +
+              `并确认当前运行实例实际加载的配置文件（常见路径：C:\\Users\\zouta\\.clawdbot\\clawdbot.json）。\n\n` +
+              `文件已在本地：${resolvedPath}` +
+              (description ? `\n\n原始错误：${description}` : ""),
+          });
+        }
+
         return jsonResult({
           success: false,
           error: String(err),
@@ -350,4 +400,31 @@ async function sendFileToTelegram(params: {
   }
 
   await bot.api.sendDocument(target.chatId, file, sendParams);
+}
+
+async function sendFileToSafew(params: {
+  to: string;
+  fileBuffer: Buffer;
+  fileName: string;
+  caption: string;
+  accountId?: string;
+  threadId?: number;
+}): Promise<void> {
+  const { sendSafewDocument } = await import("../../safew/send-document.js");
+  const result = await sendSafewDocument({
+    to: params.to,
+    fileBuffer: params.fileBuffer,
+    fileName: params.fileName,
+    caption: params.caption,
+    parseMode: "HTML",
+    accountId: params.accountId,
+    messageThreadId: params.threadId,
+  });
+  if (!result.ok) {
+    throw Object.assign(new Error(result.description || "Safew sendDocument failed"), {
+      method: "sendDocument",
+      error_code: result.errorCode,
+      description: result.description,
+    });
+  }
 }

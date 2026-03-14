@@ -10,8 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Bot, InputFile } from "grammy";
 import { logVerbose } from "../globals.js";
-import { loadConfig } from "../config/config.js";
-import { resolveSafewAccount } from "./accounts.js";
+import { sendSafewDocument } from "./send-document.js";
 
 /** 超过此字符数的纯文本回复自动作为 .txt 文件发送 */
 export const LONG_TEXT_FILE_THRESHOLD = 2000;
@@ -50,16 +49,8 @@ export async function sendSafewLongTextFile(
   // 解析 bot 实例
   let bot = params.bot;
   if (!bot) {
-    let token = params.token;
-    if (!token) {
-      const cfg = loadConfig();
-      const account = resolveSafewAccount({ cfg, accountId: params.accountId });
-      token = account.token;
-    }
-    if (!token) {
-      return { ok: false, error: "Safew token 未配置" };
-    }
-    bot = new Bot(token);
+    // 未提供 bot 时，优先走 Safew 直传（避免 grammY attach:// 兼容性问题）
+    bot = undefined;
   }
 
   try {
@@ -80,7 +71,26 @@ export async function sendSafewLongTextFile(
       text.length > 200 ? text.slice(0, 197) + "..." : text;
     docParams.caption = captionText;
 
-    await bot.api.sendDocument(chatId, file, docParams);
+    if (bot) {
+      await bot.api.sendDocument(chatId, file, docParams);
+    } else {
+      const textCaption = typeof docParams.caption === "string" ? (docParams.caption as string) : undefined;
+      const messageThreadId =
+        typeof docParams.message_thread_id === "number" ? (docParams.message_thread_id as number) : undefined;
+      const fileBuffer = Buffer.from(text, "utf-8");
+      const res = await sendSafewDocument({
+        to: chatId,
+        fileBuffer,
+        fileName: "reply.txt",
+        caption: textCaption,
+        parseMode: undefined,
+        accountId: params.accountId,
+        messageThreadId,
+      });
+      if (!res.ok) {
+        return { ok: false, error: res.description || "Safew sendDocument failed" };
+      }
+    }
     logVerbose(
       `safew: sent long reply as .txt file (${text.length} chars > threshold ${LONG_TEXT_FILE_THRESHOLD})`,
     );

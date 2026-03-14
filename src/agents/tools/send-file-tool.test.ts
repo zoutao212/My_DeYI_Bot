@@ -4,6 +4,66 @@ import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+vi.mock("./enqueue-task-tool.js", () => {
+  return {
+    getCurrentFollowupRunContext: () => ({
+      originatingChannel: "safew",
+      originatingTo: "safew:123456",
+      originatingAccountId: "default",
+      originatingThreadId: undefined,
+    }),
+  };
+});
+
+const sendDocumentMock = vi.fn(async () => ({ message_id: 1, chat: { id: 123456 } }));
+
+vi.mock("grammy", () => {
+  class Bot {
+    api = {
+      sendDocument: sendDocumentMock,
+    };
+    constructor(_token: string) {}
+  }
+  class InputFile {
+    constructor(_buf: unknown, _name: string) {}
+  }
+  return { Bot, InputFile };
+});
+
+vi.mock("../../config/config.js", () => {
+  return {
+    loadConfig: () => ({
+      channels: {
+        safew: {
+          enabled: true,
+          botToken: "test-token",
+        },
+      },
+    }),
+  };
+});
+
+vi.mock("../../safew/accounts.js", () => {
+  return {
+    resolveSafewAccount: () => ({
+      accountId: "default",
+      enabled: true,
+      token: "test-token",
+      tokenSource: "config",
+      config: {},
+    }),
+  };
+});
+
+vi.mock("../../safew/targets.js", () => {
+  return {
+    parseSafewTarget: (to: string) => ({
+      chatId: to.replace(/^safew:/i, ""),
+      messageThreadId: undefined,
+    }),
+  };
+});
+
 describe("send-file-tool", () => {
   let testDir: string;
   let testFile: string;
@@ -71,6 +131,25 @@ describe("send-file-tool", () => {
         expect.objectContaining({
           type: "text",
           text: expect.stringContaining("不支持的文件类型"),
+        }),
+      ]),
+    });
+  });
+
+  it("should send file to safew channel", async () => {
+    sendDocumentMock.mockClear();
+    const tool = createSendFileTool({ workspaceDir: testDir });
+    const result = await tool.execute("test-id", {
+      filePath: testFile,
+      caption: "test",
+    });
+
+    expect(sendDocumentMock).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      content: expect.arrayContaining([
+        expect.objectContaining({
+          type: "text",
+          text: expect.stringContaining("✅"),
         }),
       ]),
     });

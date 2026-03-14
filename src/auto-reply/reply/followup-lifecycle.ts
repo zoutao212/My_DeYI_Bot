@@ -221,8 +221,15 @@ export async function deliverCompletedRound(params: {
 
     if (!mergedSendResult.ok) {
       const displayPath = userCopyPath ?? roundResult.mergedFilePath;
+      const deliverablesDir = path.dirname(roundResult.mergedFilePath);
       await sendFollowupPayloads(
-        [{ text: `📝 子任务输出已合并保存到：\n${displayPath}` }],
+        [{
+          text:
+            `📝 我已完成合并，但文件发送失败（${mergedSendResult.method}）。\n\n` +
+            `你可以在本地取件：\n` +
+            `- 合并文件：${displayPath}\n` +
+            `- deliverables 目录：${deliverablesDir}`,
+        }],
         queued,
       );
     }

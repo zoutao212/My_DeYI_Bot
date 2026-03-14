@@ -88,12 +88,11 @@ function resolveSafewClientOptions(
     Number.isFinite(account.config.timeoutSeconds)
       ? Math.max(1, Math.floor(account.config.timeoutSeconds))
       : undefined;
-  return fetchImpl || timeoutSeconds
-    ? {
-        ...(fetchImpl ? { fetch: fetchImpl as unknown as ApiClientOptions["fetch"] } : {}),
-        ...(timeoutSeconds ? { timeoutSeconds } : {}),
-      }
-    : undefined;
+  return {
+    apiRoot: "https://api.safew.org",
+    ...(fetchImpl ? { fetch: fetchImpl as unknown as ApiClientOptions["fetch"] } : {}),
+    ...(timeoutSeconds ? { timeoutSeconds } : {}),
+  };
 }
 
 function resolveToken(explicit: string | undefined, params: { accountId: string; token: string }) {
