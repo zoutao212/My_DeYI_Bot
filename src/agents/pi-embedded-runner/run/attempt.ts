@@ -58,6 +58,7 @@ import { resolveDefaultModelForAgent } from "../../model-selection.js";
 import { generateSessionSummary, formatSessionSummary } from "../../session-summary.js";
 import { retrieveMemoryContext } from "../../memory/pipeline-integration.js";
 import { resolvePersonaPrompt, renderPersonaWithContext } from "../../persona-injector.js";
+import { proactiveRetrieval } from "../../proactive-retrieval.js"; // 🆕 主动检索增强引擎
 
 import { emitAgentEvent } from "../../../infra/agent-events.js";
 import { isAbortError } from "../abort.js";
@@ -613,6 +614,44 @@ export async function runEmbeddedAttempt(
             ? `${enhancedExtraSystemPrompt}\n\n${relevantMemories}`
             : relevantMemories;
         }
+      }
+
+      // 🆕 主动检索增强：从用户消息、Agent 定义、系统提示词中抽取关键词进行多维度检索
+      // 在人格 + 记忆注入之后执行，确保检索结果能够与人格设定协同工作
+      let proactiveRetrievalCtx = "";
+      try {
+        const retrievalResult = await proactiveRetrieval(params.config!, {
+          userMessage: params.prompt || "",
+          agentDefinition: "", // 可以从 params 或其他地方获取
+          systemPrompt: enhancedExtraSystemPrompt || "",
+          backgroundPrompt: "",
+          sessionId: params.sessionId,
+          sessionKey: params.sessionKey,
+          maxSnippets: 6,
+          minScore: 0.35,
+          enableMemory: true,
+          enableNovel: true,
+          enableAgentDef: false, // agentDefinition 为空时禁用
+          enableToolDefs: true, // 🆕 ToolCall 2.0 工具定义注入
+        });
+        
+        if (retrievalResult.formattedContext) {
+          proactiveRetrievalCtx = retrievalResult.formattedContext;
+          log.info(
+            `[attempt] 🚀 主动检索增强完成：${retrievalResult.stats.memory} 记忆，` +
+            `${retrievalResult.stats.novel} 小说，${retrievalResult.stats.toolDef} 工具定义，` +
+            `${retrievalResult.durationMs}ms`
+          );
+        }
+      } catch (err) {
+        log.warn(`[attempt] ⚠️ 主动检索失败 (不阻塞): ${err}`);
+      }
+
+      // 将主动检索结果注入到 enhancedExtraSystemPrompt
+      if (proactiveRetrievalCtx) {
+        enhancedExtraSystemPrompt = enhancedExtraSystemPrompt
+          ? `${enhancedExtraSystemPrompt}\n${proactiveRetrievalCtx}`
+          : proactiveRetrievalCtx;
       }
 
       // Step 3.8: P118 — 输出 token 限制感知 + continue_generation 引导

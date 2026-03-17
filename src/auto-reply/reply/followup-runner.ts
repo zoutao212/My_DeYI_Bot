@@ -63,6 +63,7 @@ import { createV2EnhancedExecutor, type V2EnhancedExecutor } from "../../agents/
 import { globalAbortManager } from "../../agents/global-abort-manager.js"; // 🚨 Bug #3 修复: 全局中断管理器
 import { searchNovelAssets, hasNovelAssets, formatNovelSnippetsForPromptBlocks } from "../../memory/novel-assets-searcher.js";
 import { materializeNovelSnippetsToChunkAssets } from "../../textetl/autogen.js";
+import { proactiveRetrieval } from "../../agents/proactive-retrieval.js"; // 🆕 主动检索增强引擎
 
 const TOOL_PROGRESS_ENABLED = process.env.CLAWDBOT_TASK_PROGRESS_TOOL_VERBOSE !== "0";
 
@@ -1334,6 +1335,36 @@ export function createFollowupRunner(params: {
                 }
                 const base = queued.run.extraSystemPrompt ?? "";
 
+                // 🆕 主动检索增强：在 prompt 构建前，从用户消息、Agent 定义、系统提示词中抽取关键词进行多维度检索
+                let proactiveRetrievalCtx = "";
+                try {
+                  const retrievalResult = await proactiveRetrieval(queued.run.config, {
+                    userMessage: queued.prompt,
+                    agentDefinition: taskTree?.metadata?.agentDefinition,
+                    systemPrompt: base,
+                    backgroundPrompt: "", // 可以从 taskTree.metadata 中获取
+                    sessionId,
+                    sessionKey: queued.run.sessionKey,
+                    maxSnippets: 6,
+                    minScore: 0.35,
+                    enableMemory: true,
+                    enableNovel: true,
+                    enableAgentDef: true,
+                    enableToolDefs: true, // 🆕 ToolCall 2.0 工具定义注入
+                  });
+                  
+                  if (retrievalResult.formattedContext) {
+                    proactiveRetrievalCtx = retrievalResult.formattedContext;
+                    console.log(
+                      `[followup-runner] 🚀 主动检索增强完成：${retrievalResult.stats.memory} 记忆，` +
+                      `${retrievalResult.stats.novel} 小说，${retrievalResult.stats.toolDef} 工具定义，` +
+                      `${retrievalResult.durationMs}ms`
+                    );
+                  }
+                } catch (err) {
+                  console.warn(`[followup-runner] ⚠️ 主动检索失败 (不阻塞): ${err}`);
+                }
+
                 // 🔧 子任务强制落盘（二级强化，主指令已注入 prompt 本体）
                 const isSubTask = Boolean(queued.subTaskId);
                 const persistInstruction = isSubTask
@@ -1527,7 +1558,7 @@ export function createFollowupRunner(params: {
                   }
                 }
 
-                const combined = [base, siblingCtx, novelReferenceCtxA, textEtlReferenceCtxA, parentGoalCtx, subTaskMemoryCtx, novelReferenceCtxB, textEtlReferenceCtxB, persistInstruction, blueprintCtx, novelReferenceCtxC, chapterOutlineCtx, experienceHint ? `\n\n${experienceHint}` : ""].filter(Boolean).join("");
+                const combined = [base, proactiveRetrievalCtx, siblingCtx, novelReferenceCtxA, textEtlReferenceCtxA, parentGoalCtx, subTaskMemoryCtx, novelReferenceCtxB, textEtlReferenceCtxB, persistInstruction, blueprintCtx, novelReferenceCtxC, chapterOutlineCtx, experienceHint ? `\n\n${experienceHint}` : ""].filter(Boolean).join("");
                 return combined || undefined;
               })();
 
