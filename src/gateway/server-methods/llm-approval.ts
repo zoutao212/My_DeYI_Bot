@@ -90,6 +90,8 @@ export function createLlmApprovalHandlers(manager: LlmApprovalManager): GatewayR
         return;
       }
 
+      console.log(`[llm-approval] 📥 收到审批响应：id=${p.id}, decision=${decision}, client=${client?.connect?.client?.displayName ?? client?.connect?.client?.id ?? 'unknown'}`);
+
       if (decision === "allow-always") {
         const snapshot = manager.getSnapshot(p.id);
         if (snapshot) {
@@ -100,12 +102,14 @@ export function createLlmApprovalHandlers(manager: LlmApprovalManager): GatewayR
             summary: snapshot.request.bodySummary ?? undefined,
           });
           saveLlmApprovals(next);
+          console.log(`[llm-approval] 💾 已添加到白名单：provider=${snapshot.request.provider}, model=${snapshot.request.modelId}`);
         }
       }
 
       const resolvedBy = client?.connect?.client?.displayName ?? client?.connect?.client?.id;
       const ok = manager.resolve(p.id, decision, resolvedBy ?? null);
       if (!ok) {
+        console.error(`[llm-approval] ❌ 审批解析失败：未知的审批 ID ${p.id}`);
         respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown approval id"));
         return;
       }
@@ -116,6 +120,7 @@ export function createLlmApprovalHandlers(manager: LlmApprovalManager): GatewayR
         { dropIfSlow: true },
       );
 
+      console.log(`[llm-approval] 🎉 审批流程完成：id=${p.id}, decision=${decision}`);
       respond(true, { ok: true }, undefined);
     },
   };

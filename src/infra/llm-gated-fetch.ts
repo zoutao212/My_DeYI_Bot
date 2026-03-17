@@ -252,16 +252,24 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       const approvals = loadLlmApprovals();
       const ask = shouldAskLlmApproval({ approvals, request: payload });
       if (ask.ask) {
+        console.log(`[llm-gated-fetch] 🔒 需要审批，正在请求...`);
         const res = await params.requestApproval({ request: payload, timeoutMs: 120_000 });
         const decision = res.decision;
+        console.log(`[llm-gated-fetch] ✅ 审批决策：${decision}`);
+        
         if (decision === "allow-once" || decision === "allow-always") {
           // 审批通过，执行请求
-          return await executeRequestWithRetry(attemptKey, input, init);
+          console.log(`[llm-gated-fetch] 🚀 审批通过，正在执行 LLM 请求...`);
+          const response = await executeRequestWithRetry(attemptKey, input, init);
+          console.log(`[llm-gated-fetch] ✅ LLM 请求完成，状态码：${response.status}`);
+          return response;
         }
+        console.error(`[llm-gated-fetch] ❌ 审批被拒绝：${decision}`);
         throw new Error("LLM_REQUEST_DENIED: approval required");
       }
 
       // 无需审批，直接执行请求
+      console.log(`[llm-gated-fetch] ℹ️ 无需审批，直接执行请求`);
       return await executeRequestWithRetry(attemptKey, input, init);
     } catch (error) {
       // 捕获并记录各种错误类型
@@ -371,6 +379,8 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
     input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> {
+    console.log(`[llm-gated-fetch] 📤 开始执行请求：${typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url}`);
+    
     // 🔧 P19 修复：从 60s 提高到 180s，创作任务（3000+ 字）需要更长时间
     const TIMEOUT_MS = 180_000; // 180 秒
     const controller = new AbortController();
@@ -645,7 +655,10 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
     }
     
     try {
+      console.log(`[llm-gated-fetch] 🌐 调用 original fetch...`);
       const response = await original(input, { ...init, signal: combinedSignal });
+      
+      console.log(`[llm-gated-fetch] ✅ Fetch 完成，状态码：${response.status}`);
       
       // 清除超时定时器
       clearTimeout(timeoutId);

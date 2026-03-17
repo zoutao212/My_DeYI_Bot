@@ -48,6 +48,7 @@ import { createExecApprovalForwarder } from "../infra/exec-approval-forwarder.js
 import { LlmApprovalManager } from "./llm-approval-manager.js";
 import { createLlmApprovalHandlers } from "./server-methods/llm-approval.js";
 import { installLlmFetchGate } from "../infra/llm-gated-fetch.js";
+import { registerGlobalApprovalRequestHandler } from "../infra/llm-approval-wrapper.js";
 import type { startBrowserControlServerIfEnabled } from "./server-browser.js";
 import { createChannelManager } from "./server-channels.js";
 import { createAgentEventHandler } from "./server-chat.js";
@@ -435,6 +436,28 @@ export async function startGatewayServer(
 
   const llmApprovalManager = new LlmApprovalManager();
   const llmApprovalHandlers = createLlmApprovalHandlers(llmApprovalManager);
+
+  // 注册全局审批处理器，连接 llm-approval-wrapper 和网关广播系统
+  registerGlobalApprovalRequestHandler(async (payload) => {
+    const timeout = payload.expiresAtMs - payload.createdAtMs;
+    const record = llmApprovalManager.createOrGet(payload.request, timeout, payload.id);
+    const decisionPromise = llmApprovalManager.waitForDecision(record, timeout);
+    
+    // 广播审批请求到所有连接的客户端（包括 Control UI）
+    broadcast(
+      "llm.approval.requested",
+      {
+        id: record.id,
+        request: record.request,
+        createdAtMs: record.createdAtMs,
+        expiresAtMs: record.expiresAtMs,
+      },
+      { dropIfSlow: true },
+    );
+    
+    const decision = await decisionPromise;
+    return decision ?? "deny"; // 超时默认拒绝
+  });
 
   installLlmFetchGate({
     requestApproval: async ({ request, timeoutMs }) => {

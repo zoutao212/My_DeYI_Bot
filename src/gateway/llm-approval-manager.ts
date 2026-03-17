@@ -85,11 +85,19 @@ export class LlmApprovalManager {
 
   resolve(recordId: string, decision: LlmApprovalDecision, resolvedBy?: string | null): boolean {
     const pending = this.pending.get(recordId);
-    if (!pending) return false;
+    if (!pending) {
+      console.log(`[llm-approval] ⚠️ 尝试解析未知的审批记录：${recordId}`);
+      return false;
+    }
     clearTimeout(pending.timer);
     pending.record.resolvedAtMs = Date.now();
     pending.record.decision = decision;
     pending.record.resolvedBy = resolvedBy ?? null;
+    
+    const waitTimeMs = pending.record.resolvedAtMs - pending.record.createdAtMs;
+    console.log(`[llm-approval] ✅ 审批已解析：id=${recordId}, decision=${decision}, resolvedBy=${resolvedBy ?? 'unknown'}, waitTime=${waitTimeMs}ms`);
+    console.log(`[llm-approval] 📋 请求详情：provider=${pending.record.request.provider}, model=${pending.record.request.modelId}, summary=${pending.record.request.bodySummary}`);
+    
     if (pending.requestKey) this.pendingByKey.delete(pending.requestKey);
     this.pending.delete(recordId);
     pending.resolve(decision);

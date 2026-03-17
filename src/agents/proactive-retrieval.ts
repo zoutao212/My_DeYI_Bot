@@ -23,6 +23,8 @@ import { getMemorySearchManager } from "../memory/index.js";
 import { localGrepSearch, deepGrepSearch, getDefaultMemoryDirs } from "../memory/local-search.js";
 import { searchNovelAssets, hasNovelAssets } from "../memory/novel-assets-searcher.js";
 import { extractSearchTerms } from "../memory/keyword-extractor.js";
+import { intelligentExtract, adjustRetrievalParams } from "../memory/intelligent-keyword-extractor.js"; // 🆕 智能关键词抽取
+import { optimizeRetrievalResult } from "../memory/tiered-retrieval-optimizer.js"; // 🆕 分层检索优化
 import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "./agent-scope.js";
 import { resolveMemorySearchConfig } from "./memory-search.js";
 
@@ -90,6 +92,21 @@ export interface ProactiveRetrievalResult {
     novel: number;
     agentDef: number;
     toolDef: number;
+  };
+  /** 🆕 智能抽取结果（意图、实体、时间敏感度） */
+  intelligentExtraction?: import("../memory/intelligent-keyword-extractor.js").IntelligentExtractionResult;
+  /** 🆕 分层检索结果 */
+  tieredResult?: import("../memory/tiered-retrieval-optimizer.js").TieredRetrievalResult;
+  /** 🆕 优化后的检索结果（含注入建议） */
+  optimizedResult?: import("../memory/tiered-retrieval-optimizer.js").OptimizedRetrievalResult;
+  /** 🆕 分层信息（高/中/低相关性分组） */
+  tiers?: {
+    /** 高相关性片段 (>0.7) */
+    highRelevance: RetrievalSnippet[];
+    /** 中等相关性片段 (0.4-0.7) */
+    mediumRelevance: RetrievalSnippet[];
+    /** 低相关性片段 (<0.4) */
+    lowRelevance: RetrievalSnippet[];
   };
 }
 
@@ -185,6 +202,51 @@ function formatRetrievalContext(snippets: RetrievalSnippet[]): string {
 }
 
 /**
+ * 🆕 分层格式化检索结果 - 根据不同相关性级别采用不同注入策略
+ */
+function formatRetrievalContextWithTiers(
+  snippets: RetrievalSnippet[],
+  tiers: {
+    highRelevance: RetrievalSnippet[];
+    mediumRelevance: RetrievalSnippet[];
+    lowRelevance: RetrievalSnippet[];
+  }
+): string {
+  if (snippets.length === 0) return "";
+  
+  const sections: string[] = [];
+  
+  // 🔴 高相关性片段 - 直接注入核心区域（LLM 必读）
+  if (tiers.highRelevance.length > 0) {
+    const lines = tiers.highRelevance.map(s => {
+      const location = s.startLine !== undefined && s.endLine !== undefined
+        ? ` (${s.path}:${s.startLine}-${s.endLine})`
+        : ` (${s.path})`;
+      return `【必读】${s.text.substring(0, 350)}${s.text.length > 350 ? "..." : ""}${location}`;
+    });
+    sections.push(`## 🔴 高相关性背景信息（重要）\n${lines.join("\n")}`);
+  }
+  
+  // 🟡 中等相关性片段 - 注入参考区域（可选阅读）
+  if (tiers.mediumRelevance.length > 0) {
+    const lines = tiers.mediumRelevance.map(s => {
+      const location = s.startLine !== undefined && s.endLine !== undefined
+        ? ` (${s.path}:${s.startLine}-${s.endLine})`
+        : ` (${s.path})`;
+      return `[参考]${s.text.substring(0, 300)}${s.text.length > 300 ? "..." : ""}${location}`;
+    });
+    sections.push(`## 🟡 中等相关性参考资料（选读）\n${lines.join("\n")}`);
+  }
+  
+  // 🟢 低相关性片段 - 不注入 prompt，仅记录日志（已在上面过滤）
+  // 如果有特殊需求需要注入，可以放在这里
+  
+  if (sections.length === 0) return "";
+  
+  return `\n\n=== 主动检索的分层上下文信息 ===\n${sections.join("\n\n")}\n=====================================\n`;
+}
+
+/**
  * 执行主动检索增强
  *
  * 这是核心函数，会在以下时机被调用：
@@ -209,17 +271,42 @@ export async function proactiveRetrieval(
   const enableAgentDef = options.enableAgentDef ?? true;
   const enableToolDefs = options.enableToolDefs ?? true;
   
-  // Step 1: 从多源抽取关键词
-  const extractedKeywords = extractKeywordsFromContexts({
+  // 🆕 Step 1: 智能关键词抽取（意图识别、实体识别、时间敏感度分析）
+  const intelligentResult = intelligentExtract(options.userMessage);
+  log.debug(
+    `🆕 智能抽取完成：意图=${intelligentResult.intent}, ` +
+    `实体=${intelligentResult.entities.length}, ` +
+    `时间敏感=${intelligentResult.temporal.hasTemporal}, ` +
+    `策略=${intelligentResult.suggestedStrategy}`
+  );
+  
+  // 🆕 Step 2: 根据检索策略调整参数
+  const adjustedParams = adjustRetrievalParams(intelligentResult.suggestedStrategy);
+  const effectiveMaxSnippets = options.maxSnippets ?? adjustedParams.maxSnippets;
+  const effectiveMinScore = options.minScore ?? adjustedParams.minScore;
+  
+  log.debug(
+    `🆕 检索参数调整：maxSnippets=${effectiveMaxSnippets}, ` +
+    `minScore=${effectiveMinScore}, ` +
+    `prioritizeRecent=${adjustedParams.prioritizeRecent}`
+  );
+  
+  // Step 3: 从多源抽取关键词（传统方法 + 智能扩展）
+  const traditionalKeywords = extractKeywordsFromContexts({
     agentDefinition: options.agentDefinition,
     systemPrompt: options.systemPrompt,
     backgroundPrompt: options.backgroundPrompt,
     userMessage: options.userMessage,
   });
   
-  log.debug(`Starting proactive retrieval with ${extractedKeywords.length} keywords`);
+  // 合并传统关键词和智能扩展词
+  const allKeywords = Array.from(
+    new Set([...traditionalKeywords, ...intelligentResult.keywords, ...intelligentResult.expandedTerms])
+  ).slice(0, 20); // 限制最多 20 个关键词
   
-  // Step 2: 并行执行多维度检索
+  log.debug(`Starting proactive retrieval with ${allKeywords.length} keywords (merged traditional + intelligent)`);
+  
+  // Step 4: 并行执行多维度检索
   const allSnippets: RetrievalSnippet[] = [];
   const stats = { memory: 0, novel: 0, agentDef: 0, toolDef: 0 };
   
@@ -237,16 +324,16 @@ export async function proactiveRetrieval(
         const dirs = getDefaultMemoryDirs(workspaceDir);
         
         // 使用多关键词检索
-        for (const keyword of extractedKeywords.slice(0, 5)) { // 限制最多 5 个关键词，避免过多查询
+        for (const keyword of allKeywords.slice(0, 5)) { // 限制最多 5 个关键词，避免过多查询
           const results = await localGrepSearch(keyword, {
             dirs,
             extensions: [".md"],
-            maxResults: Math.ceil(maxSnippets / 2),
+            maxResults: Math.ceil(effectiveMaxSnippets / 2),
             workspaceDir,
           });
           
           for (const r of results) {
-            if (r.score >= minScore) {
+            if (r.score >= effectiveMinScore) {
               allSnippets.push({
                 source: "memory",
                 path: r.path,
@@ -265,8 +352,8 @@ export async function proactiveRetrieval(
         const { manager } = await getMemorySearchManager({ cfg: config, agentId });
         if (manager) {
           const semanticResults = await manager.search(options.userMessage, {
-            maxResults: Math.ceil(maxSnippets / 2),
-            minScore,
+            maxResults: Math.ceil(effectiveMaxSnippets / 2),
+            minScore: effectiveMinScore,
             sessionKey: options.sessionKey,
           });
           
@@ -300,15 +387,15 @@ export async function proactiveRetrieval(
       const novelAvailable = await hasNovelAssets(workspaceDir).catch(() => false);
       if (novelAvailable) {
         const novelResult = await searchNovelAssets(options.userMessage, workspaceDir, {
-          maxSnippets: Math.ceil(maxSnippets / 2),
+          maxSnippets: Math.ceil(effectiveMaxSnippets / 2),
           snippetTargetChars: 300,
           snippetMaxChars: 500,
           autoExtractKeywords: true,
-          extraTerms: extractedKeywords,
+          extraTerms: allKeywords,
         });
         
         for (const s of novelResult.snippets) {
-          if (s.score >= minScore) {
+          if (s.score >= effectiveMinScore) {
             allSnippets.push({
               source: "novel",
               path: `NovelsAssets/${s.fileName}`,
@@ -329,7 +416,7 @@ export async function proactiveRetrieval(
   
   // 2.3 Agent 定义相关片段 (从抽取的关键词反向检索)
   if (enableAgentDef && options.agentDefinition) {
-    for (const keyword of extractedKeywords.slice(0, 3)) {
+    for (const keyword of allKeywords.slice(0, 3)) {
       const lowerDef = options.agentDefinition.toLowerCase();
       const lowerKeyword = keyword.toLowerCase();
       const index = lowerDef.indexOf(lowerKeyword);
@@ -390,7 +477,7 @@ export async function proactiveRetrieval(
     }
   }
   
-  // Step 3: 去重 + 排序 + 截断
+  // 🆕 Step 3: 去重 + 排序 + 分层
   const seen = new Set<string>();
   const deduplicated = allSnippets.filter(s => {
     const key = `${s.source}:${s.path}:${s.startLine}-${s.endLine}`;
@@ -400,20 +487,47 @@ export async function proactiveRetrieval(
   });
   
   deduplicated.sort((a, b) => b.score - a.score);
-  const finalSnippets = deduplicated.slice(0, maxSnippets);
   
-  // Step 4: 格式化输出
-  const formattedContext = formatRetrievalContext(finalSnippets);
+  // 🆕 按相关性分层
+  const highRelevance = deduplicated.filter(s => s.score >= 0.7);
+  const mediumRelevance = deduplicated.filter(s => s.score >= 0.4 && s.score < 0.7);
+  const lowRelevance = deduplicated.filter(s => s.score < 0.4);
+  
+  // 优先选择高相关性片段，但不超过总限额
+  const maxHigh = Math.min(highRelevance.length, Math.ceil(effectiveMaxSnippets * 0.6)); // 60% 给高相关
+  const maxMedium = Math.min(mediumRelevance.length, effectiveMaxSnippets - maxHigh); // 剩余给中等相关
+  
+  const finalSnippets = [
+    ...highRelevance.slice(0, maxHigh),
+    ...mediumRelevance.slice(0, maxMedium),
+  ];
+  
+  // 🆕 记录低相关性片段供分析（不注入 prompt）
+  if (lowRelevance.length > 0) {
+    log.debug(`📊 低相关性片段：${lowRelevance.length} 条（未注入，仅记录）`);
+  }
+  
+  // 🆕 Step 4: 分层格式化输出
+  const formattedContext = formatRetrievalContextWithTiers(finalSnippets, {
+    highRelevance,
+    mediumRelevance,
+    lowRelevance,
+  });
   const durationMs = Date.now() - startTime;
   
-  log.info(`Proactive retrieval completed in ${durationMs}ms: ${finalSnippets.length} snippets`);
+  log.info(`🆕 主动检索完成：耗时${durationMs}ms, 总计${deduplicated.length}条，注入${finalSnippets.length}条 (高:${highRelevance.length}, 中:${mediumRelevance.length}, 低:${lowRelevance.length})`);
   
   return {
     snippets: finalSnippets,
     formattedContext,
-    extractedKeywords,
+    extractedKeywords: allKeywords,
     durationMs,
     stats,
+    tiers: {
+      highRelevance,
+      mediumRelevance,
+      lowRelevance,
+    },
   };
 }
 

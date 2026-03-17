@@ -1323,7 +1323,7 @@ export function createFollowupRunner(params: {
                 return queued.prompt;
               })();
 
-        const execExtraSystemPrompt = (() => {
+        const execExtraSystemPrompt = await (async () => {
                 // 🆕 子任务间上下文共享：注入已完成兄弟任务的输出摘要
                 // 🔧 传入 currentTaskId，让 buildSiblingContext 智能过滤：
                 // 续写子任务只注入直接依赖的前序任务，避免 prompt 膨胀导致上下文溢出
@@ -1335,21 +1335,21 @@ export function createFollowupRunner(params: {
                 }
                 const base = queued.run.extraSystemPrompt ?? "";
 
-                // 🆕 主动检索增强：在 prompt 构建前，从用户消息、Agent 定义、系统提示词中抽取关键词进行多维度检索
+                // 🆕 主动检索增强：在 prompt 构建前，从用户消息、系统提示词中抽取关键词进行多维度检索
                 let proactiveRetrievalCtx = "";
                 try {
                   const retrievalResult = await proactiveRetrieval(queued.run.config, {
                     userMessage: queued.prompt,
-                    agentDefinition: taskTree?.metadata?.agentDefinition,
+                    agentDefinition: undefined, // TaskTreeMetadata 中没有此字段
                     systemPrompt: base,
-                    backgroundPrompt: "", // 可以从 taskTree.metadata 中获取
+                    backgroundPrompt: "",
                     sessionId,
                     sessionKey: queued.run.sessionKey,
                     maxSnippets: 6,
                     minScore: 0.35,
                     enableMemory: true,
                     enableNovel: true,
-                    enableAgentDef: true,
+                    enableAgentDef: false,
                     enableToolDefs: true, // 🆕 ToolCall 2.0 工具定义注入
                   });
                   
