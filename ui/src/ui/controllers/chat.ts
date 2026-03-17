@@ -180,6 +180,11 @@ export function handleChatEvent(
         textLength: chatroomMessageText.length,
         activeRunId: state.chatRunId,
       });
+      
+      // 聊天室分条推送时，立即清空 stream 气泡，避免与正式消息重复显示
+      state.chatStream = null;
+      state.chatReasoningStream = null;
+      
       const msgs = state.chatMessages as Array<Record<string, unknown>>;
       let prevIdx = -1;
       for (let i = msgs.length - 1; i >= 0; i--) {
@@ -203,9 +208,6 @@ export function handleChatEvent(
       } else {
         state.chatMessages = [...msgs, message];
       }
-      // 聊天室分条推送时，优先展示落地气泡，不再额外显示累计 stream 气泡。
-      state.chatStream = null;
-      state.chatReasoningStream = null;
       return payload.state;
     }
 
