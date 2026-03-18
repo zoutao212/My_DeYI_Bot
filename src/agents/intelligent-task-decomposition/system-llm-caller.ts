@@ -18,7 +18,7 @@ import { FailoverError } from "../failover-error.js";
 import { runWithModelFallback } from "../model-fallback.js";
 import type { LLMCaller } from "./batch-executor.js";
 import { buildPromptProfileSystemPrompt } from "../pi-embedded-runner/prompt-profiles.js";
-import { withApproval, checkApprovalRequired } from "../../infra/llm-approval-wrapper.js";
+import { withApproval } from "../../infra/llm-approval-wrapper.js";
 import crypto from "node:crypto";
 
 /**
@@ -148,45 +148,13 @@ export function createSystemLLMCaller(params?: SystemLLMCallerConfig): LLMCaller
         bodySummary: `系统 LLM 调用 (prompt 长度：${prompt.length}, model: ${provider}/${modelId})`,
       };
       
-      const { required, matchedRuleId } = checkApprovalRequired(approvalPayload);
-      
-      if (required) {
-        console.log(`[SystemLLMCaller] 🔒 等待人工审批：${approvalPayload.bodySummary}`);
-        
-        // 发出审批请求事件（网关会拦截并显示在 Web UI）
-        const { approvalEvents } = await import("../../infra/llm-approval-wrapper.js");
-        await new Promise<void>((resolve, reject) => {
-          const timeoutHandle = setTimeout(() => {
-            approvalEvents.off("approval-decision", onDecision);
-            reject(new Error("LLM_APPROVAL_TIMEOUT: 人工审批超时 (120s)"));
-          }, 120_000);
-          
-          const onDecision = (decisionPayload: {
-            requestId: string;
-            decision: "allow-once" | "allow-always" | "deny";
-          }) => {
-            clearTimeout(timeoutHandle);
-            if (decisionPayload.decision === "deny") {
-              reject(new Error("LLM_REQUEST_DENIED: 请求被人工审批拒绝"));
-            } else {
-              console.log(`[SystemLLMCaller] ✅ 审批通过：${decisionPayload.decision}`);
-              resolve();
-            }
-          };
-          
-          approvalEvents.once("approval-decision", onDecision);
-          
-          // 发出审批请求
-          approvalEvents.emit("approval-request", {
-            id: crypto.randomUUID(),
-            request: approvalPayload,
-            createdAtMs: Date.now(),
-            expiresAtMs: Date.now() + 120_000,
-          });
-        });
-      } else if (matchedRuleId) {
-        console.log(`[SystemLLMCaller] ✅ 命中白名单规则 ${matchedRuleId}，跳过审批`);
-      }
+      // 使用 withApproval 包装器进行审批检查（避免双重检查）
+      await withApproval(
+        async () => {
+          console.log(`[SystemLLMCaller] ✅ 审批检查完成，准备执行 LLM 调用`);
+        },
+        () => approvalPayload,
+      );
       
       const base = await buildPromptProfileSystemPrompt("deyi_mini_base");
       const effectivePrompt = base ? `${base}\n\n${prompt}` : prompt;

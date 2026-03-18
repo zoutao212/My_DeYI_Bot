@@ -20,7 +20,7 @@ import { EventEmitter } from "node:events";
 
 // 审批超时配置
 const APPROVAL_TIMEOUT_MS = 120_000; // 2 分钟
-const APPROVAL_CACHE_TTL_MS = 5 * 60_000; // 5 分钟缓存
+const APPROVAL_CACHE_TTL_MS = 0; // 禁用缓存，每次都审批
 
 // 审批决策缓存（避免重复询问相同的请求）
 interface CachedApproval {

@@ -42,7 +42,7 @@ import {
   type FailoverReason,
 } from "../pi-embedded-helpers.js";
 import { normalizeUsage, type UsageLike } from "../usage.js";
-import { withApproval, checkApprovalRequired } from "../../infra/llm-approval-wrapper.js";
+import { withApproval } from "../../infra/llm-approval-wrapper.js";
 
 import { compactEmbeddedPiSessionDirect } from "./compact.js";
 import { resolveGlobalLane, resolveSessionLane } from "./lanes.js";
@@ -71,7 +71,9 @@ function scrubAnthropicRefusalMagic(prompt: string): string {
 export async function runEmbeddedPiAgent(
   params: RunEmbeddedPiAgentParams,
 ): Promise<EmbeddedPiRunResult> {
-  // 🔒 LLM 请求人工审批检查
+  // 🔒 LLM 请求人工审批检查（通过 withApproval 包装器统一处理）
+  const { withApproval } = await import("../../infra/llm-approval-wrapper.js");
+  
   const approvalPayload = {
     provider: params.provider ?? "unknown",
     modelId: params.model ?? "unknown",
@@ -86,23 +88,13 @@ export async function runEmbeddedPiAgent(
     bodySummary: `LLM 调用 (prompt 长度：${params.prompt.length}, model: ${params.provider}/${params.model})`,
   };
   
-  const { required, matchedRuleId } = checkApprovalRequired(approvalPayload);
-  
-  if (required) {
-    console.log(`[runEmbeddedPiAgent] 🔒 等待人工审批：${approvalPayload.bodySummary}`);
-    
-    // 使用 withApproval 包装器，它会调用全局处理器
-    const { withApproval } = await import("../../infra/llm-approval-wrapper.js");
-    await withApproval(
-      async () => {
-        // 审批通过后继续执行
-        console.log(`[runEmbeddedPiAgent] ✅ 审批通过，继续执行`);
-      },
-      () => approvalPayload,
-    );
-  } else if (matchedRuleId) {
-    console.log(`[runEmbeddedPiAgent] ✅ 命中白名单规则 ${matchedRuleId}，跳过审批`);
-  }
+  // 使用 withApproval 包装器进行审批检查（避免双重检查）
+  await withApproval(
+    async () => {
+      console.log(`[runEmbeddedPiAgent] ✅ 审批检查完成，准备执行 LLM 调用`);
+    },
+    () => approvalPayload,
+  );
   
   const resolvedPromptProfile =
     params.promptProfile ??
