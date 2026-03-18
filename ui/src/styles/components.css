@@ -1551,6 +1551,42 @@
   color: var(--danger);
 }
 
+/* 🎯 Tool Result 显示区域 - 优先显示工具执行结果 */
+.exec-approval-tool-result {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--bg-accent, #f0f9ff);
+  border: 2px solid var(--accent, #3b82f6);
+  border-radius: var(--radius-md);
+}
+
+.exec-approval-tool-result-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent, #3b82f6);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.exec-approval-tool-result-content {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  max-height: min(40dvh, 400px);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
 .exec-approval-actions {
   margin-top: 16px;
   display: flex;

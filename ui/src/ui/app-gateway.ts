@@ -353,10 +353,13 @@ function handleGatewayEventUnsafe(host: GatewayHost, evt: GatewayEventFrame) {
   if (evt.event === "llm.approval.requested") {
     const entry = parseLlmApprovalRequested(evt.payload);
     if (entry) {
+      console.log(`[UI] 📥 收到审批请求：id=${entry.id}, provider=${entry.request.provider}, model=${entry.request.modelId}`);
+      console.log(`[UI] 📊 当前队列长度：${host.llmApprovalQueue.length} → ${host.llmApprovalQueue.length + 1}`);
       host.llmApprovalQueue = addLlmApproval(host.llmApprovalQueue, entry);
       host.llmApprovalError = null;
       const delay = Math.max(0, entry.expiresAtMs - Date.now() + 500);
       window.setTimeout(() => {
+        console.log(`[UI] ⏰ 审批请求超时自动移除：id=${entry.id}`);
         host.llmApprovalQueue = removeLlmApproval(host.llmApprovalQueue, entry.id);
       }, delay);
     }
@@ -366,7 +369,13 @@ function handleGatewayEventUnsafe(host: GatewayHost, evt: GatewayEventFrame) {
   if (evt.event === "llm.approval.resolved") {
     const resolved = parseLlmApprovalResolved(evt.payload);
     if (resolved) {
+      console.log(`[UI] ✅ 收到审批决策：id=${resolved.id}, decision=${resolved.decision}`);
+      console.log(`[UI] 📊 当前队列长度：${host.llmApprovalQueue.length} → ${host.llmApprovalQueue.length - 1}`);
       host.llmApprovalQueue = removeLlmApproval(host.llmApprovalQueue, resolved.id);
+      console.log(`[UI] 📊 移除后队列长度：${host.llmApprovalQueue.length}`);
+      if (host.llmApprovalQueue.length > 0) {
+        console.log(`[UI] 🔔 队列中还有 ${host.llmApprovalQueue.length} 个待审批请求`);
+      }
     }
   }
 }

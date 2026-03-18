@@ -42,7 +42,6 @@ import {
   type FailoverReason,
 } from "../pi-embedded-helpers.js";
 import { normalizeUsage, type UsageLike } from "../usage.js";
-import { withApproval } from "../../infra/llm-approval-wrapper.js";
 
 import { compactEmbeddedPiSessionDirect } from "./compact.js";
 import { resolveGlobalLane, resolveSessionLane } from "./lanes.js";
@@ -72,29 +71,11 @@ export async function runEmbeddedPiAgent(
   params: RunEmbeddedPiAgentParams,
 ): Promise<EmbeddedPiRunResult> {
   // 🔒 LLM 请求人工审批检查（通过 withApproval 包装器统一处理）
-  const { withApproval } = await import("../../infra/llm-approval-wrapper.js");
-  
-  const approvalPayload = {
-    provider: params.provider ?? "unknown",
-    modelId: params.model ?? "unknown",
-    source: params.runMode ?? "chat",
-    toolName: "runEmbeddedPiAgent",
-    sessionKey: params.sessionKey ?? null,
-    runId: params.runId ?? null,
-    url: "internal://pi-embedded-runner/runEmbeddedPiAgent",
-    method: "POST",
-    headers: {},
-    bodyText: params.prompt.slice(0, 10000),
-    bodySummary: `LLM 调用 (prompt 长度：${params.prompt.length}, model: ${params.provider}/${params.model})`,
-  };
-  
-  // 使用 withApproval 包装器进行审批检查（避免双重检查）
-  await withApproval(
-    async () => {
-      console.log(`[runEmbeddedPiAgent] ✅ 审批检查完成，准备执行 LLM 调用`);
-    },
-    () => approvalPayload,
-  );
+  // 🔧 移除 withApproval 包装器
+  // 原因：llm-gated-fetch 已经在 fetch() 层面做了完整的审批检查
+  // withApproval 的 payload 不完整（只有 prompt 前 10000 字符），无法正确判断是否包含 tool result
+  // 这会导致审批被错误触发（即使请求不包含 tool result）
+  console.log(`[runEmbeddedPiAgent] ℹ️ 审批检查由 llm-gated-fetch 统一处理`);
   
   const resolvedPromptProfile =
     params.promptProfile ??

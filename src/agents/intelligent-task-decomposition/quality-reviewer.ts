@@ -41,7 +41,7 @@ import nodeFs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runEmbeddedPiAgent } from "../pi-embedded.js";
-import { withApproval, checkApprovalRequired } from "../../infra/llm-approval-wrapper.js";
+import { checkApprovalRequired } from "../../infra/llm-approval-wrapper.js";
 
 /**
  * LLM 配置接口

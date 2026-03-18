@@ -43,6 +43,179 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+/**
+ * 从 LLM 响应中提取最新的 tool call（LLM 即将调用的工具）
+ * 用于在审批界面显示 LLM 计划调用哪些工具及其参数
+ */
+function extractLatestToolCalls(raw: string, isZh: boolean): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+
+  const messages = Array.isArray(parsed.messages) ? parsed.messages : null;
+  const contents = Array.isArray(parsed.contents) ? parsed.contents : null;
+
+  // 🎯 OpenAI format: messages[].tool_calls
+  if (messages && messages.length > 0) {
+    // 从后往前找最新的 assistant 消息（包含 tool_calls）
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const m = messages[i];
+      if (!isRecord(m)) continue;
+      const role = typeof m.role === "string" ? m.role : "unknown";
+      
+      if (role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+        const toolCallsInfo: string[] = [];
+        for (const tc of m.tool_calls) {
+          if (!isRecord(tc)) continue;
+          const func = tc.function;
+          if (!isRecord(func)) continue;
+          const funcName = typeof func.name === "string" ? func.name : "unknown";
+          const args = func.arguments;
+          let argsStr = "";
+          if (typeof args === "string") {
+            try {
+              const argsObj = JSON.parse(args);
+              argsStr = JSON.stringify(argsObj, null, 2);
+            } catch {
+              argsStr = args;
+            }
+          } else if (args && typeof args === "object") {
+            argsStr = JSON.stringify(args, null, 2);
+          }
+          toolCallsInfo.push(`[${funcName}]\n${argsStr}`);
+        }
+        if (toolCallsInfo.length > 0) {
+          return toolCallsInfo.join("\n\n");
+        }
+      }
+    }
+  }
+
+  // 🎯 Google Generative AI format: contents[].parts[].functionCall
+  if (contents && contents.length > 0) {
+    // 从后往前找最新的 model 消息（包含 functionCall）
+    for (let i = contents.length - 1; i >= 0; i -= 1) {
+      const c = contents[i];
+      if (!isRecord(c)) continue;
+      const role = typeof c.role === "string" ? c.role : "unknown";
+      
+      if (role === "model" && Array.isArray(c.parts)) {
+        const functionCalls: string[] = [];
+        for (const part of c.parts) {
+          if (!isRecord(part)) continue;
+          if (part.functionCall && isRecord(part.functionCall)) {
+            const funcCall = part.functionCall;
+            const funcName = typeof funcCall.name === "string" ? funcCall.name : "unknown";
+            const args = funcCall.args;
+            let argsStr = "";
+            if (args && typeof args === "object") {
+              argsStr = JSON.stringify(args, null, 2);
+            }
+            functionCalls.push(`[${funcName}]\n${argsStr}`);
+          }
+        }
+        if (functionCalls.length > 0) {
+          return functionCalls.join("\n\n");
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * 从 OpenAI/Google 格式的 LLM 请求中提取最新的 tool result 内容
+ * 用于在审批界面主区域直接显示，让用户一眼就能看到工具执行结果
+ */
+function extractLatestToolResult(raw: string, isZh: boolean): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+
+  const messages = Array.isArray(parsed.messages) ? parsed.messages : null;
+  const contents = Array.isArray(parsed.contents) ? parsed.contents : null;
+
+  // 🎯 OpenAI format: messages[].tool_result
+  if (messages && messages.length > 0) {
+    const latestToolResults: string[] = [];
+    
+    // 从后往前找最新的 tool result
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const m = messages[i];
+      if (!isRecord(m)) continue;
+      const role = typeof m.role === "string" ? m.role : "unknown";
+      
+      if (role === "tool" || role === "toolResult") {
+        const toolName = typeof m.name === "string" ? m.name : 
+                        typeof m.toolName === "string" ? m.toolName : "unknown";
+        const content = normalizeMessageContentToText(m.content);
+        if (content) {
+          latestToolResults.unshift(`[${toolName}] ${content}`);
+        }
+      } else if (role === "assistant" || role === "user") {
+        // 遇到 assistant 或 user 消息，停止搜索
+        break;
+      }
+    }
+    
+    if (latestToolResults.length > 0) {
+      return latestToolResults.join("\n\n");
+    }
+  }
+
+  // 🎯 Google Generative AI format: contents[].parts[].functionResponse
+  if (contents && contents.length > 0) {
+    const latestFuncResponses: string[] = [];
+    
+    for (let i = contents.length - 1; i >= 0; i -= 1) {
+      const c = contents[i];
+      if (!isRecord(c)) continue;
+      const role = typeof c.role === "string" ? c.role : "unknown";
+      
+      if ((role === "function" || role === "model") && Array.isArray(c.parts)) {
+        for (const part of c.parts) {
+          if (!isRecord(part)) continue;
+          if (part.functionResponse && isRecord(part.functionResponse)) {
+            const funcResp = part.functionResponse;
+            const funcName = typeof funcResp.name === "string" ? funcResp.name : "unknown";
+            const response = funcResp.response;
+            let respStr = "";
+            if (typeof response === "string") {
+              respStr = response;
+            } else if (response && typeof response === "object") {
+              respStr = JSON.stringify(response, null, 2);
+            }
+            if (respStr) {
+              latestFuncResponses.unshift(`[${funcName}] ${respStr}`);
+            }
+          }
+        }
+      } else if (role === "user") {
+        break;
+      }
+    }
+    
+    if (latestFuncResponses.length > 0) {
+      return latestFuncResponses.join("\n\n");
+    }
+  }
+
+  return null;
+}
+
 function stringifyMaybe(value: unknown): string {
   if (value == null) return "";
   if (typeof value === "string") return value;
@@ -92,6 +265,7 @@ function tryPrettyOpenAiPayload(raw: string, isZh: boolean): string | null {
 
   const model = typeof parsed.model === "string" ? parsed.model : "";
   const messages = Array.isArray(parsed.messages) ? parsed.messages : null;
+  const contents = Array.isArray(parsed.contents) ? parsed.contents : null;
   const tools = Array.isArray(parsed.tools) ? parsed.tools : null;
   const stream = typeof parsed.stream === "boolean" ? parsed.stream : null;
   const store = typeof parsed.store === "boolean" ? parsed.store : null;
@@ -112,21 +286,123 @@ function tryPrettyOpenAiPayload(raw: string, isZh: boolean): string | null {
   if (reasoning) lines.push(`${isZh ? "推理强度" : "Reasoning"}: ${reasoning}`);
   if (tools) lines.push(`${isZh ? "工具数量" : "Tools"}: ${tools.length}`);
   if (messages) lines.push(`${isZh ? "消息数量" : "Messages"}: ${messages.length}`);
+  if (contents) lines.push(`${isZh ? "内容数量" : "Contents"}: ${contents.length}`);
 
+  // 🆕 提取并高亮显示 tool result（OpenAI format）
+  let toolResultCount = 0;
+  const latestToolResults: Array<{ toolName: string; toolCallId: string; content: string }> = [];
+  
   if (messages && messages.length > 0) {
-    lines.push("");
-    lines.push(isZh ? "--- messages ---" : "--- messages ---");
-    for (let i = 0; i < messages.length; i += 1) {
+    // 从后往前找最新的 tool result
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
       const m = messages[i];
       if (!isRecord(m)) continue;
       const role = typeof m.role === "string" ? m.role : "unknown";
-      const name = typeof m.name === "string" ? m.name : "";
-      const header = name ? `#${i + 1} role=${role} name=${name}` : `#${i + 1} role=${role}`;
-      lines.push(header);
-      const content = normalizeMessageContentToText(m.content);
-      lines.push(content || (isZh ? "(空)" : "(empty)"));
-      lines.push("");
+      if (role === "tool" || role === "toolResult") {
+        toolResultCount++;
+        const toolName = typeof m.name === "string" ? m.name : 
+                        typeof m.toolName === "string" ? m.toolName : "unknown";
+        const toolCallId = typeof m.tool_call_id === "string" ? m.tool_call_id :
+                          typeof m.toolCallId === "string" ? m.toolCallId : "unknown";
+        const content = normalizeMessageContentToText(m.content);
+        latestToolResults.unshift({ toolName, toolCallId, content });
+      } else if (role === "assistant" || role === "user") {
+        // 遇到 assistant 或 user 消息，说明已经找到了最新一轮的 tool result
+        break;
+      }
     }
+    
+    if (latestToolResults.length > 0) {
+      lines.push("");
+      lines.push(isZh ? "=== 🎯 最新 Tool Results (本轮工具执行结果) ===" : "=== 🎯 Latest Tool Results ===");
+      for (let i = 0; i < latestToolResults.length; i += 1) {
+        const tr = latestToolResults[i];
+        lines.push(`\n[Tool Result #${i + 1}] ${tr.toolName} (id: ${tr.toolCallId})`);
+        lines.push(tr.content || (isZh ? "(空)" : "(empty)"));
+      }
+    } else if (toolResultCount === 0) {
+      lines.push("");
+      lines.push(isZh ? "=== 📋 Tool Results ===" : "=== 📋 Tool Results ===");
+      lines.push(isZh ? "(本次请求没有 tool result，这是首次 LLM 调用或 LLM 继续生成)" : "(No tool results - this is initial LLM call or continuation)");
+    }
+  }
+
+  // 🆕 提取并高亮显示 function response（Google Generative AI format）
+  const latestFuncResponses: Array<{ funcName: string; response: string }> = [];
+  
+  if (contents && contents.length > 0) {
+    // 从后往前找最新的 function response
+    for (let i = contents.length - 1; i >= 0; i -= 1) {
+      const c = contents[i];
+      if (!isRecord(c)) continue;
+      const role = typeof c.role === "string" ? c.role : "unknown";
+      if ((role === "function" || role === "model") && Array.isArray(c.parts)) {
+        for (const part of c.parts) {
+          if (!isRecord(part)) continue;
+          if (part.functionResponse && isRecord(part.functionResponse)) {
+            const funcResp = part.functionResponse;
+            const funcName = typeof funcResp.name === "string" ? funcResp.name : "unknown";
+            const response = funcResp.response;
+            let respStr = "";
+            if (typeof response === "string") {
+              respStr = response;
+            } else if (response && typeof response === "object") {
+              respStr = JSON.stringify(response, null, 2);
+            }
+            latestFuncResponses.unshift({ funcName, response: respStr });
+          }
+        }
+      } else if (role === "user") {
+        // 遇到 user 消息，说明已经找到了最新一轮的 function response
+        break;
+      }
+    }
+    
+    if (latestFuncResponses.length > 0) {
+      if (latestToolResults.length === 0) {
+        lines.push("");
+        lines.push(isZh ? "=== 🎯 最新 Function Responses (本轮函数执行结果) ===" : "=== 🎯 Latest Function Responses ===");
+      }
+      for (let i = 0; i < latestFuncResponses.length; i += 1) {
+        const fr = latestFuncResponses[i];
+        lines.push(`\n[Function Response #${i + 1}] ${fr.funcName}`);
+        lines.push(fr.response || (isZh ? "(空)" : "(empty)"));
+      }
+    } else if (latestToolResults.length === 0 && toolResultCount === 0) {
+      if (latestToolResults.length === 0) {
+        lines.push("");
+        lines.push(isZh ? "=== 📋 Function Responses ===" : "=== 📋 Function Responses ===");
+      }
+      lines.push(isZh ? "(本次请求没有 tool result，这是首次 LLM 调用或 LLM 继续生成)" : "(No tool results - this is initial LLM call or continuation)");
+    }
+  }
+
+  // 🆕 显示完整的 contents（Google Generative AI format）- 默认折叠
+  if (contents && contents.length > 0) {
+    lines.push("");
+    lines.push(isZh ? "=== 📚 完整对话历史 (可折叠) ===" : "=== 📚 Full Conversation History (Collapsible) ===");
+    lines.push(isZh ? `(共 ${contents.length} 条消息，点击"查看全文"按钮展开查看)` : `(${contents.length} messages total, click "Show full" to expand)`);
+    lines.push("");
+    lines.push(isZh ? "💡 提示：重点关注上方的「最新 Tool Results」部分" : "💡 Tip: Focus on the 'Latest Tool Results' section above");
+  }
+
+  // 显示其他消息（user/assistant）- 简化版本
+  if (messages && messages.length > 0) {
+    lines.push("");
+    lines.push(isZh ? "=== 💬 对话摘要 ===" : "=== 💬 Conversation Summary ===");
+    let userCount = 0;
+    let assistantCount = 0;
+    let toolCount = 0;
+    for (const m of messages) {
+      if (!isRecord(m)) continue;
+      const role = typeof m.role === "string" ? m.role : "unknown";
+      if (role === "user") userCount++;
+      else if (role === "assistant") assistantCount++;
+      else if (role === "tool" || role === "toolResult") toolCount++;
+    }
+    lines.push(isZh 
+      ? `用户消息: ${userCount} 条 | AI 回复: ${assistantCount} 条 | Tool Results: ${toolCount} 条`
+      : `User: ${userCount} | Assistant: ${assistantCount} | Tool Results: ${toolCount}`);
   }
 
   const out = lines.join("\n").trimEnd();
@@ -213,9 +489,40 @@ export function renderLlmApprovalPrompt(state: AppViewState) {
         </div>
 
         <div class="exec-approval-body">
-          <div class="exec-approval-command mono">
-            ${request.bodySummary ?? request.method ?? "request"}
-          </div>
+          ${(() => {
+            // 🎯 优先显示 tool result 的详细内容（如果有）
+            const toolResultDetail = request.bodyText ? extractLatestToolResult(request.bodyText, isZh) : null;
+            if (toolResultDetail) {
+              return html`
+                <div class="exec-approval-tool-result">
+                  <div class="exec-approval-tool-result-label">
+                    ${isZh ? "🛠️ 工具执行结果" : "🛠️ Tool Execution Result"}
+                  </div>
+                  <pre class="exec-approval-tool-result-content">${toolResultDetail}</pre>
+                </div>
+              `;
+            }
+            
+            // 🎯 如果没有 tool result，检查是否有 tool call（LLM 即将调用的工具）
+            const toolCallDetail = request.bodyText ? extractLatestToolCalls(request.bodyText, isZh) : null;
+            if (toolCallDetail) {
+              return html`
+                <div class="exec-approval-tool-result" style="background: var(--bg-warning, #fffbeb); border-color: var(--warning, #f59e0b);">
+                  <div class="exec-approval-tool-result-label" style="color: var(--warning, #f59e0b);">
+                    ${isZh ? "🔧 AI 即将调用工具" : "🔧 AI Will Call Tools"}
+                  </div>
+                  <pre class="exec-approval-tool-result-content">${toolCallDetail}</pre>
+                </div>
+              `;
+            }
+            
+            // 降级：显示简短的 bodySummary
+            return html`
+              <div class="exec-approval-command mono">
+                ${request.bodySummary ?? request.method ?? "request"}
+              </div>
+            `;
+          })()}
           <div class="exec-approval-meta">
             ${renderMetaRow(isZh ? "提供方" : "Provider", request.provider)}
             ${renderMetaRow(isZh ? "模型" : "Model", request.modelId)}

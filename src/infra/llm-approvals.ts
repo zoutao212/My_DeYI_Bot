@@ -183,11 +183,76 @@ export function shouldAskLlmApproval(params: {
   const approvals = normalizeLlmApprovals(params.approvals);
   if (approvals.enabled === false) return { ask: false };
   if (approvals.ask === "off") return { ask: false };
-  if (approvals.ask === "always") return { ask: true };
+  
+  // 🆕 检查请求是否包含 tool result
+  // 只有包含 tool result 的请求才需要审批（tool call 执行完要发回 LLM 的请求）
+  // 不包含 tool result 的请求（初始请求、LLM 返回 tool call）不需要审批
+  const hasToolResult = checkHasToolResult(params.request);
+  
+  // 如果配置为 "always"，但请求不包含 tool result，则跳过审批
+  if (approvals.ask === "always") {
+    if (!hasToolResult) {
+      console.log(`[llm-approval] ⏭️ 跳过审批：请求不包含 tool result（初始请求或 LLM 返回 tool call）`);
+      return { ask: false };
+    }
+    return { ask: true };
+  }
+  
   const rules = approvals.rules ?? [];
   const hit = rules.find((rule) => matchLlmRule({ rule, request: params.request }));
   if (hit) return { ask: false, matchedRuleId: hit.id };
+  
+  // 如果没有匹配的规则，检查是否包含 tool result
+  if (!hasToolResult) {
+    console.log(`[llm-approval] ⏭️ 跳过审批：请求不包含 tool result（初始请求或 LLM 返回 tool call）`);
+    return { ask: false };
+  }
+  
   return { ask: true };
+}
+
+// 🆕 检查请求体中是否包含 tool result
+function checkHasToolResult(request: LlmApprovalRequestPayload): boolean {
+  if (!request.bodyText) return false;
+  
+  try {
+    const parsed = JSON.parse(request.bodyText);
+    if (!parsed || typeof parsed !== "object") return false;
+    
+    // OpenAI format: messages[].role="tool"
+    if (Array.isArray(parsed.messages)) {
+      for (const msg of parsed.messages) {
+        if (typeof msg === "object" && msg !== null) {
+          const role = (msg as Record<string, unknown>).role;
+          if (role === "tool" || role === "toolResult") {
+            return true;
+          }
+        }
+      }
+    }
+    
+    // Google Generative AI format: contents[].parts[].functionResponse
+    if (Array.isArray(parsed.contents)) {
+      for (const content of parsed.contents) {
+        if (typeof content === "object" && content !== null) {
+          const parts = (content as Record<string, unknown>).parts;
+          if (Array.isArray(parts)) {
+            for (const part of parts) {
+              if (typeof part === "object" && part !== null) {
+                if ((part as Record<string, unknown>).functionResponse) {
+                  return true;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 export function addAllowAlwaysRule(params: {

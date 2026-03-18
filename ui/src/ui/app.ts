@@ -568,6 +568,8 @@ export class ClawdbotApp extends LitElement {
   async handleLlmApprovalDecision(decision: "allow-once" | "allow-always" | "deny") {
     const active = this.llmApprovalQueue[0];
     if (!active || !this.client || this.llmApprovalBusy) return;
+    console.log(`[UI] 🎯 用户决策：${decision}, 审批ID=${active.id}`);
+    console.log(`[UI] 📊 决策前队列长度：${this.llmApprovalQueue.length}`);
     this.llmApprovalBusy = true;
     this.llmApprovalError = null;
     try {
@@ -575,13 +577,18 @@ export class ClawdbotApp extends LitElement {
         id: active.id,
         decision,
       });
+      console.log(`[UI] ✅ 决策已发送到后端`);
       this.llmApprovalQueue = this.llmApprovalQueue.filter((entry) => entry.id !== active.id);
+      console.log(`[UI] 📊 本地移除后队列长度：${this.llmApprovalQueue.length}`);
       if (this.llmApprovalQueue.length === 0) {
         this.llmApprovalShowFullPayload = false;
         this.llmApprovalDisplayMode = "pretty";
+      } else {
+        console.log(`[UI] 🔔 队列中还有 ${this.llmApprovalQueue.length} 个待审批，应该显示下一个`);
       }
     } catch (err) {
       this.llmApprovalError = `LLM approval failed: ${String(err)}`;
+      console.error(`[UI] ❌ 决策发送失败：${String(err)}`);
     } finally {
       this.llmApprovalBusy = false;
     }

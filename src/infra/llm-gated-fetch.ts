@@ -74,14 +74,173 @@ function summarizeBody(params: { bodyText?: string | null; bodyJson?: unknown })
     const messagesCount = Array.isArray(obj.messages) ? obj.messages.length : null;
     const toolsCount = Array.isArray(obj.tools) ? obj.tools.length : null;
 
+    // 🆕 提取用户最后一条消息的内容（前 200 字符）
+    let userPromptPreview: string | null = null;
+    if (Array.isArray(obj.messages) && obj.messages.length > 0) {
+      const lastMessage = obj.messages[obj.messages.length - 1] as Record<string, unknown>;
+      if (lastMessage.role === "user") {
+        const content = lastMessage.content;
+        if (typeof content === "string") {
+          userPromptPreview = truncateText(content.replace(/\s+/g, " "), 200);
+        } else if (Array.isArray(content) && content.length > 0) {
+          const textPart = content.find((p: unknown) => 
+            typeof p === "object" && p !== null && (p as Record<string, unknown>).type === "text"
+          ) as Record<string, unknown> | undefined;
+          if (textPart && typeof textPart.text === "string") {
+            userPromptPreview = truncateText(textPart.text.replace(/\s+/g, " "), 200);
+          }
+        }
+      }
+    }
+
+    // 🆕 提取 Google Generative AI 格式的用户消息
+    if (!userPromptPreview && Array.isArray(obj.contents) && obj.contents.length > 0) {
+      const lastContent = obj.contents[obj.contents.length - 1] as Record<string, unknown>;
+      if (lastContent.role === "user" && Array.isArray(lastContent.parts)) {
+        const textPart = lastContent.parts.find((p: unknown) => 
+          typeof p === "object" && p !== null && typeof (p as Record<string, unknown>).text === "string"
+        ) as Record<string, unknown> | undefined;
+        if (textPart && typeof textPart.text === "string") {
+          userPromptPreview = truncateText(textPart.text.replace(/\s+/g, " "), 200);
+        }
+      }
+    }
+
+    // 🆕 提取工具名称列表
+    let toolNames: string[] = [];
+    if (Array.isArray(obj.tools)) {
+      for (const tool of obj.tools) {
+        if (typeof tool === "object" && tool !== null) {
+          const toolObj = tool as Record<string, unknown>;
+          // OpenAI format: tools[].function.name
+          if (typeof toolObj.function === "object" && toolObj.function !== null) {
+            const funcName = (toolObj.function as Record<string, unknown>).name;
+            if (typeof funcName === "string") {
+              toolNames.push(funcName);
+            }
+          }
+          // Google Generative AI format: tools[].functionDeclarations[].name
+          if (Array.isArray(toolObj.functionDeclarations)) {
+            for (const decl of toolObj.functionDeclarations) {
+              if (typeof decl === "object" && decl !== null) {
+                const declName = (decl as Record<string, unknown>).name;
+                if (typeof declName === "string") {
+                  toolNames.push(declName);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // 🆕 提取 tool result 信息（OpenAI format: messages[].role="tool"）
+    let toolResultsCount = 0;
+    const toolResultSummaries: string[] = [];
+    if (Array.isArray(obj.messages)) {
+      for (const msg of obj.messages) {
+        if (typeof msg === "object" && msg !== null) {
+          const msgObj = msg as Record<string, unknown>;
+          if (msgObj.role === "tool" || msgObj.role === "toolResult") {
+            toolResultsCount++;
+            const toolName = typeof msgObj.name === "string" ? msgObj.name : 
+                            typeof msgObj.toolName === "string" ? msgObj.toolName : "unknown";
+            const content = msgObj.content;
+            let contentPreview = "";
+            if (typeof content === "string") {
+              // 🔧 增加预览长度到 300 字符，提取关键信息
+              contentPreview = truncateText(content.replace(/\s+/g, " "), 300);
+            } else if (Array.isArray(content) && content.length > 0) {
+              const textPart = content.find((p: unknown) => 
+                typeof p === "object" && p !== null && (p as Record<string, unknown>).type === "text"
+              ) as Record<string, unknown> | undefined;
+              if (textPart && typeof textPart.text === "string") {
+                contentPreview = truncateText(textPart.text.replace(/\s+/g, " "), 300);
+              }
+            }
+            // 🔧 显示所有 tool result（不限制数量）
+            toolResultSummaries.push(`${toolName}: ${contentPreview || "(empty)"}`);
+          }
+        }
+      }
+    }
+
+    // 🆕 提取 Google Generative AI 格式的 function response
+    if (Array.isArray(obj.contents)) {
+      for (const content of obj.contents) {
+        if (typeof content === "object" && content !== null) {
+          const contentObj = content as Record<string, unknown>;
+          if (contentObj.role === "function" || contentObj.role === "model") {
+            if (Array.isArray(contentObj.parts)) {
+              for (const part of contentObj.parts) {
+                if (typeof part === "object" && part !== null) {
+                  const partObj = part as Record<string, unknown>;
+                  if (partObj.functionResponse && typeof partObj.functionResponse === "object") {
+                    toolResultsCount++;
+                    const funcResp = partObj.functionResponse as Record<string, unknown>;
+                    const funcName = typeof funcResp.name === "string" ? funcResp.name : "unknown";
+                    const response = funcResp.response;
+                    let responsePreview = "";
+                    if (typeof response === "string") {
+                      responsePreview = truncateText(response.replace(/\s+/g, " "), 300);
+                    } else if (response && typeof response === "object") {
+                      // 🔧 提取 response 对象的关键字段
+                      const respObj = response as Record<string, unknown>;
+                      if (respObj.content && Array.isArray(respObj.content)) {
+                        // 提取 content[].text
+                        const texts = respObj.content
+                          .filter((c: unknown) => typeof c === "object" && c !== null && (c as Record<string, unknown>).type === "text")
+                          .map((c: unknown) => (c as Record<string, unknown>).text)
+                          .filter((t): t is string => typeof t === "string");
+                        if (texts.length > 0) {
+                          responsePreview = truncateText(texts.join(" ").replace(/\s+/g, " "), 300);
+                        }
+                      }
+                      if (!responsePreview) {
+                        responsePreview = truncateText(JSON.stringify(response).replace(/\s+/g, " "), 300);
+                      }
+                    }
+                    // 🔧 显示所有 tool result（不限制数量）
+                    toolResultSummaries.push(`${funcName}: ${responsePreview || "(empty)"}`);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
     const parts: string[] = [];
     if (model) parts.push(`model=${model}`);
     if (messagesCount != null) parts.push(`messages=${messagesCount}`);
     if (toolsCount != null) parts.push(`tools=${toolsCount}`);
+    
+    // 🔧 优先显示 tool result（如果有）
+    if (toolResultsCount > 0) {
+      parts.push(`tool_results=${toolResultsCount}`);
+      // 🔧 直接显示 tool result 内容，不再用 results_preview 包裹
+      for (const summary of toolResultSummaries) {
+        parts.push(summary);
+      }
+    }
+    
+    // 🆕 显示工具名称（最多前 5 个）- 只在没有 tool result 时显示
+    if (toolNames.length > 0 && toolResultsCount === 0) {
+      const toolNamesPreview = toolNames.slice(0, 5).join(", ");
+      const moreTools = toolNames.length > 5 ? ` +${toolNames.length - 5} more` : "";
+      parts.push(`tool_names=[${toolNames.length > 5 ? toolNamesPreview + moreTools : toolNames.join(", ")}]`);
+    }
+    
     if (stream != null) parts.push(`stream=${stream ? "yes" : "no"}`);
     if (store != null) parts.push(`store=${store ? "yes" : "no"}`);
     if (maxTokens != null) parts.push(`max_tokens=${maxTokens}`);
     if (reasoning) parts.push(`reasoning=${reasoning}`);
+    
+    // 🆕 显示用户 prompt 预览 - 只在没有 tool result 时显示
+    if (userPromptPreview && toolResultsCount === 0) {
+      parts.push(`prompt="${userPromptPreview}"`);
+    }
 
     const summary = parts.join(" · ").trim();
     return summary || "json";

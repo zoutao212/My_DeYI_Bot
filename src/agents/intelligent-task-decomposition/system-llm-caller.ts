@@ -18,7 +18,6 @@ import { FailoverError } from "../failover-error.js";
 import { runWithModelFallback } from "../model-fallback.js";
 import type { LLMCaller } from "./batch-executor.js";
 import { buildPromptProfileSystemPrompt } from "../pi-embedded-runner/prompt-profiles.js";
-import { withApproval } from "../../infra/llm-approval-wrapper.js";
 import crypto from "node:crypto";
 
 /**
@@ -133,28 +132,11 @@ export function createSystemLLMCaller(params?: SystemLLMCallerConfig): LLMCaller
 
   return {
     async call(prompt: string): Promise<string> {
-      // 🔒 LLM 请求人工审批检查
-      const approvalPayload = {
-        provider,
-        modelId,
-        source: "system_llm_caller",
-        toolName: "system-llm-caller",
-        sessionKey: null,
-        runId: null,
-        url: "internal://system-llm-caller/call",
-        method: "POST",
-        headers: {},
-        bodyText: prompt.slice(0, 10000),
-        bodySummary: `系统 LLM 调用 (prompt 长度：${prompt.length}, model: ${provider}/${modelId})`,
-      };
-      
-      // 使用 withApproval 包装器进行审批检查（避免双重检查）
-      await withApproval(
-        async () => {
-          console.log(`[SystemLLMCaller] ✅ 审批检查完成，准备执行 LLM 调用`);
-        },
-        () => approvalPayload,
-      );
+      // 🔧 移除 withApproval 包装器
+      // 原因：llm-gated-fetch 已经在 fetch() 层面做了完整的审批检查
+      // withApproval 的 payload 不完整（只有 prompt 前 10000 字符），无法正确判断是否包含 tool result
+      // 这会导致审批被错误触发（即使请求不包含 tool result）
+      console.log(`[SystemLLMCaller] ℹ️ 审批检查由 llm-gated-fetch 统一处理`);
       
       const base = await buildPromptProfileSystemPrompt("deyi_mini_base");
       const effectivePrompt = base ? `${base}\n\n${prompt}` : prompt;
