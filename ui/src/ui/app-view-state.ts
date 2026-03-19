@@ -145,6 +145,7 @@ export type AppViewState = {
   llmApprovalError: string | null;
   llmApprovalShowFullPayload: boolean;
   llmApprovalDisplayMode: "pretty" | "raw";
+  llmApprovalBatchMode: boolean;
   handleLlmApprovalDecision: (decision: "allow-once" | "allow-always" | "deny") => Promise<void>;
   configLoading: boolean;
   configRaw: string;

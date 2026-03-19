@@ -200,6 +200,7 @@ export class ClawdbotApp extends LitElement {
   @state() llmApprovalError: string | null = null;
   @state() llmApprovalShowFullPayload = true; // 默认展开显示完整内容
   @state() llmApprovalDisplayMode: "pretty" | "raw" = "pretty";
+  @state() llmApprovalBatchMode = true; // 默认启用批量审批模式
 
   @state() configLoading = false;
   @state() configRaw = "{\n}\n";

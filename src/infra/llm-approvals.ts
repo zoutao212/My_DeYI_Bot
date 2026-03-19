@@ -45,6 +45,8 @@ export type LlmApprovalRequestPayload = {
   bodyText?: string | null;
   bodyJson?: unknown;
   bodySummary?: string | null;
+  /** 上一次 LLM 响应中包含的 tool call 数据（用于在审批 UI 中展示） */
+  lastLlmToolCalls?: string | null;
 };
 
 export type LlmApprovalRequest = {

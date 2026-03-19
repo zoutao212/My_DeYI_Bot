@@ -437,6 +437,25 @@ export async function startGatewayServer(
   const llmApprovalManager = new LlmApprovalManager();
   const llmApprovalHandlers = createLlmApprovalHandlers(llmApprovalManager);
 
+  // 🆕 初始化 Tool 审批管理器
+  // 复用 LLM 审批管理器，让 Tool 审批也能通过 Control UI 展示
+  const { setToolApprovalManager, setToolApprovalConfig, setToolApprovalBroadcast } = await import(
+    "../infra/tool-approval-manager.js"
+  );
+  setToolApprovalManager(llmApprovalManager);
+  setToolApprovalBroadcast(broadcast); // 注入广播函数
+  
+  // 从配置读取 Tool 审批设置
+  if (cfgAtStart.approvals?.tools) {
+    setToolApprovalConfig({
+      enabled: cfgAtStart.approvals.tools.enabled ?? false,
+      mode: (cfgAtStart.approvals.tools.mode as "before-and-after" | "after-only" | "off") ?? "after-only",
+    });
+    log.info(
+      `gateway: Tool 审批已配置: enabled=${cfgAtStart.approvals.tools.enabled}, mode=${cfgAtStart.approvals.tools.mode}`,
+    );
+  }
+
   // 注册全局审批处理器，连接 llm-approval-wrapper 和网关广播系统
   registerGlobalApprovalRequestHandler(async (payload) => {
     const timeout = payload.expiresAtMs - payload.createdAtMs;

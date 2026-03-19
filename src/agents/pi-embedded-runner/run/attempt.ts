@@ -274,6 +274,22 @@ export async function runEmbeddedAttempt(
     const tools = sanitizeToolsForGoogle({ tools: toolsAllowed, provider: params.provider });
     logToolSchemasForGoogle({ tools, provider: params.provider });
 
+    // 🆕 Tool 审批包装：如果启用审批，包装所有 tools
+    // 这样用户可以看到所有 tool 的执行过程（参数和结果）
+    const { wrapToolsWithApproval } = await import("../../tools/tool-wrapper.js");
+    const { getToolApprovalConfig } = await import("../../../infra/tool-approval-manager.js");
+    const approvalConfig = getToolApprovalConfig();
+    const toolsWithApproval =
+      approvalConfig.enabled && approvalConfig.mode !== "off"
+        ? wrapToolsWithApproval(tools)
+        : tools;
+    
+    if (approvalConfig.enabled && approvalConfig.mode !== "off") {
+      log.info(
+        `[attempt] 🔐 Tool 审批已启用: mode=${approvalConfig.mode}, tools=${toolsWithApproval.length}`,
+      );
+    }
+
     const machineName = await getMachineDisplayName();
     const runtimeChannel = normalizeMessageChannel(params.messageChannel ?? params.messageProvider);
     let runtimeCapabilities = runtimeChannel
@@ -729,7 +745,7 @@ export async function runEmbeddedAttempt(
         runtimeInfo,
         messageToolHints,
         sandboxInfo,
-        tools,
+        tools: toolsWithApproval,
         modelAliasLines: buildModelAliasLines(params.config),
         userTimezone,
         userTime,
@@ -759,7 +775,7 @@ export async function runEmbeddedAttempt(
         bootstrapFiles: hookAdjustedBootstrapFiles,
         injectedFiles: contextFiles,
         skillsPrompt,
-        tools,
+        tools: toolsWithApproval,
       });
       const systemPrompt = createSystemPromptOverride(appendPrompt);
 
@@ -778,7 +794,7 @@ export async function runEmbeddedAttempt(
       });
 
       const { builtInTools: _builtInToolsRaw, customTools } = splitSdkTools({
-        tools,
+        tools: toolsWithApproval,
         sandboxEnabled: !!sandbox?.enabled,
       });
       // 文本工具模式下，工具已通过 system prompt 文本描述传递，
@@ -996,7 +1012,7 @@ export async function runEmbeddedAttempt(
             runtimeInfo,
             messageToolHints,
             sandboxInfo,
-            tools,
+            tools: toolsWithApproval,
             modelAliasLines: buildModelAliasLines(params.config),
             userTimezone,
             userTime,
@@ -1377,7 +1393,7 @@ export async function runEmbeddedAttempt(
               runtimeInfo,
               messageToolHints,
               sandboxInfo,
-              tools,
+              tools: toolsWithApproval,
               modelAliasLines: buildModelAliasLines(params.config),
               userTimezone,
               userTime,

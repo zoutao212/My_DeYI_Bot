@@ -1512,10 +1512,11 @@
 }
 
 .exec-approval-command--raw {
-  white-space: pre;
+  white-space: pre-wrap; /* 改为 pre-wrap 以支持自动换行 */
   overflow-x: auto;
   overflow-y: auto;
-  overflow-wrap: normal;
+  overflow-wrap: break-word; /* 改为 break-word 以支持长单词换行 */
+  word-break: break-word; /* 额外添加以确保换行 */
 }
 
 .exec-approval-meta {

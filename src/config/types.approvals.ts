@@ -31,7 +31,21 @@ export type LlmApprovalConfig = {
   autoApprove?: boolean;
 };
 
+export type ToolApprovalConfig = {
+  /** 是否启用 Tool 审批。默认 false（不审批，自动允许）。 */
+  enabled?: boolean;
+  /** 
+   * 审批模式：
+   * - "before-and-after": 执行前后都审批（阻塞执行）
+   * - "after-only": 只在执行后展示（不阻塞，推荐）
+   * - "off": 关闭审批
+   * 默认 "after-only"
+   */
+  mode?: "before-and-after" | "after-only" | "off";
+};
+
 export type ApprovalsConfig = {
   exec?: ExecApprovalForwardingConfig;
   llm?: LlmApprovalConfig;
+  tools?: ToolApprovalConfig;
 };

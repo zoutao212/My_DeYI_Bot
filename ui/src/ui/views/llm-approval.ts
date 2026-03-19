@@ -1,7 +1,8 @@
-import { html, nothing } from "lit";
+﻿import { html, nothing } from "lit";
 
 import type { AppViewState } from "../app-view-state";
 import { getUiL10n } from "../ui-l10n";
+import type { LlmApprovalRequest } from "../controllers/llm-approval";
 
 function formatRemaining(ms: number): string {
   const remaining = Math.max(0, ms);
@@ -414,6 +415,54 @@ function collapseBlankLines(text: string): string {
   return text.replace(/\n{4,}/g, "\n\n\n");
 }
 
+/**
+ * 检测是否为批量 tool calls（短时间内的多个工具审批）
+ * 返回批量信息或 null
+ */
+function detectBatchToolCalls(queue: LlmApprovalRequest[]): {
+  count: number;
+  tools: Array<{ name: string; phase: string; summary: string }>;
+} | null {
+  if (queue.length < 2) return null;
+  
+  // 检查前 N 个请求是否都是 tool 审批
+  const BATCH_WINDOW_MS = 2000; // 2 秒内的请求视为一批
+  const MAX_BATCH_SIZE = 10; // 最多聚合 10 个
+  
+  const first = queue[0];
+  const firstTime = first.createdAtMs;
+  const batchItems: Array<{ name: string; phase: string; summary: string }> = [];
+  
+  for (let i = 0; i < Math.min(queue.length, MAX_BATCH_SIZE); i++) {
+    const item = queue[i];
+    
+    // 检查时间窗口
+    if (item.createdAtMs - firstTime > BATCH_WINDOW_MS) {
+      break;
+    }
+    
+    // 检查是否是 tool 审批（URL 以 tool:// 开头）
+    if (!item.request.url?.startsWith("tool://")) {
+      break;
+    }
+    
+    // 提取工具信息
+    const toolName = item.request.url.replace("tool://", "");
+    const phase = item.request.headers?.["X-Tool-Phase"] || "unknown";
+    const summary = item.request.bodySummary || toolName;
+    
+    batchItems.push({ name: toolName, phase, summary });
+  }
+  
+  // 至少 2 个才算批量
+  if (batchItems.length < 2) return null;
+  
+  return {
+    count: batchItems.length,
+    tools: batchItems,
+  };
+}
+
 export function renderLlmApprovalPrompt(state: AppViewState) {
   const active = state.llmApprovalQueue[0];
   if (!active) return nothing;
@@ -426,6 +475,9 @@ export function renderLlmApprovalPrompt(state: AppViewState) {
   const displayMode = state.llmApprovalDisplayMode ?? "pretty"; // 默认 pretty
   const isZh = state.settings.uiLanguage === "zh";
   const l10n = getUiL10n(state.settings.uiLanguage);
+
+  // 🆕 检测批量 tool calls（只有在批量模式启用时才检测）
+  const batchInfo = state.llmApprovalBatchMode ? detectBatchToolCalls(state.llmApprovalQueue) : null;
 
   const truncated =
     typeof request.bodyText === "string" && request.bodyText.includes("... truncated (") ? "yes" : "no";
@@ -446,7 +498,7 @@ export function renderLlmApprovalPrompt(state: AppViewState) {
 
   const fullText = (() => {
     if (displayMode === "raw") {
-      return visualizeFormatting(payloadText);
+      return payloadText; // 直接返回原始文本，保留真实换行符
     }
 
     const prettyBody = request.bodyText
@@ -476,7 +528,12 @@ export function renderLlmApprovalPrompt(state: AppViewState) {
       <div class="exec-approval-card">
         <div class="exec-approval-header">
           <div>
-            <div class="exec-approval-title">${isZh ? "需要 LLM 审批" : "LLM approval needed"}</div>
+            <div class="exec-approval-title">
+              ${isZh ? "需要 LLM 审批" : "LLM approval needed"}
+              ${batchInfo ? html`<span style="color: var(--warning, #f59e0b); margin-left: 8px;">
+                ${isZh ? `批量 (${batchInfo.count} 个工具)` : `Batch (${batchInfo.count} tools)`}
+              </span>` : nothing}
+            </div>
             <div class="exec-approval-sub">
               ${isZh
                 ? `${remaining} · 失败后最多自动重试 1 次（超过将被阻断）`
@@ -489,8 +546,111 @@ export function renderLlmApprovalPrompt(state: AppViewState) {
         </div>
 
         <div class="exec-approval-body">
+          ${batchInfo ? html`
+            <div class="exec-approval-batch-summary" style="
+              background: var(--bg-warning, #fffbeb);
+              border: 1px solid var(--warning, #f59e0b);
+              border-radius: 4px;
+              padding: 12px;
+              margin-bottom: 12px;
+            ">
+              <div style="font-weight: 600; color: var(--warning, #f59e0b); margin-bottom: 8px;">
+                ${isZh ? `🔧 LLM 想要执行 ${batchInfo.count} 个工具：` : `🔧 LLM wants to execute ${batchInfo.count} tools:`}
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 6px;">
+                ${batchInfo.tools.map((tool, index) => html`
+                  <div style="
+                    display: flex;
+                    align-items: flex-start;
+                    gap: 8px;
+                    padding: 6px;
+                    background: var(--bg, white);
+                    border-radius: 3px;
+                    font-size: 13px;
+                  ">
+                    <span style="
+                      min-width: 20px;
+                      font-weight: 600;
+                      color: var(--text-muted, #666);
+                    ">${index + 1}.</span>
+                    <div style="flex: 1; min-width: 0;">
+                      <div style="font-weight: 600; color: var(--text, #000);">
+                        ${tool.name}
+                        <span style="
+                          margin-left: 6px;
+                          font-size: 11px;
+                          font-weight: normal;
+                          color: var(--text-muted, #666);
+                          background: var(--bg-secondary, #f3f4f6);
+                          padding: 2px 6px;
+                          border-radius: 3px;
+                        ">${tool.phase === "before" ? (isZh ? "执行前" : "before") : isZh ? "执行后" : "after"}</span>
+                      </div>
+                      <div style="
+                        margin-top: 4px;
+                        font-size: 12px;
+                        color: var(--text-muted, #666);
+                        white-space: pre-wrap;
+                        word-break: break-word;
+                      ">${tool.summary.replace(/\\n/g, "\n")}</div>
+                    </div>
+                  </div>
+                `)}
+              </div>
+              <div style="
+                margin-top: 12px;
+                padding-top: 12px;
+                border-top: 1px solid var(--border, #e5e7eb);
+                display: flex;
+                gap: 8px;
+                flex-wrap: wrap;
+              ">
+                <button
+                  class="btn primary"
+                  style="flex: 1; min-width: 120px;"
+                  ?disabled=${state.llmApprovalBusy}
+                  @click=${async () => {
+                    // 批量批准所有工具
+                    for (let i = 0; i < batchInfo.count; i++) {
+                      if (state.llmApprovalQueue.length > 0) {
+                        await state.handleLlmApprovalDecision("allow-once");
+                      }
+                    }
+                  }}
+                >
+                  ${isZh ? `✅ 全部批准 (${batchInfo.count})` : `✅ Approve All (${batchInfo.count})`}
+                </button>
+                <button
+                  class="btn danger"
+                  style="flex: 1; min-width: 120px;"
+                  ?disabled=${state.llmApprovalBusy}
+                  @click=${async () => {
+                    // 批量拒绝所有工具
+                    for (let i = 0; i < batchInfo.count; i++) {
+                      if (state.llmApprovalQueue.length > 0) {
+                        await state.handleLlmApprovalDecision("deny");
+                      }
+                    }
+                  }}
+                >
+                  ${isZh ? `❌ 全部拒绝 (${batchInfo.count})` : `❌ Deny All (${batchInfo.count})`}
+                </button>
+                <button
+                  class="btn"
+                  style="min-width: 100px;"
+                  @click=${() => {
+                    // 切换到逐个审批模式（关闭批量视图）
+                    state.llmApprovalBatchMode = false;
+                  }}
+                >
+                  ${isZh ? "逐个审批" : "Review One by One"}
+                </button>
+              </div>
+            </div>
+          ` : nothing}
+          
           ${(() => {
-            // 🎯 优先显示 tool result 的详细内容（如果有）
+            // 🎯 优先检查 tool result（工具执行结果）
             const toolResultDetail = request.bodyText ? extractLatestToolResult(request.bodyText, isZh) : null;
             if (toolResultDetail) {
               return html`
@@ -498,7 +658,7 @@ export function renderLlmApprovalPrompt(state: AppViewState) {
                   <div class="exec-approval-tool-result-label">
                     ${isZh ? "🛠️ 工具执行结果" : "🛠️ Tool Execution Result"}
                   </div>
-                  <pre class="exec-approval-tool-result-content">${toolResultDetail}</pre>
+                  <pre class="exec-approval-tool-result-content" style="white-space: pre-wrap; word-wrap: break-word; overflow-wrap: break-word;">${toolResultDetail}</pre>
                 </div>
               `;
             }
@@ -511,7 +671,7 @@ export function renderLlmApprovalPrompt(state: AppViewState) {
                   <div class="exec-approval-tool-result-label" style="color: var(--warning, #f59e0b);">
                     ${isZh ? "🔧 AI 即将调用工具" : "🔧 AI Will Call Tools"}
                   </div>
-                  <pre class="exec-approval-tool-result-content">${toolCallDetail}</pre>
+                  <pre class="exec-approval-tool-result-content" style="white-space: pre-wrap; word-wrap: break-word; overflow-wrap: break-word;">${toolCallDetail}</pre>
                 </div>
               `;
             }
@@ -532,6 +692,30 @@ export function renderLlmApprovalPrompt(state: AppViewState) {
             ${renderMetaRow("URL", request.url)}
             ${renderMetaRow(isZh ? "是否截断" : "Truncated", truncated)}
           </div>
+          
+          ${request.bodySummary ? html`
+            <div style="
+              margin: 12px 0;
+              padding: 12px;
+              background: var(--bg-secondary, #f3f4f6);
+              border-radius: 4px;
+              border-left: 3px solid var(--primary, #3b82f6);
+            ">
+              <div style="font-weight: 600; margin-bottom: 8px; color: var(--text, #000);">
+                ${isZh ? "📋 请求摘要" : "📋 Request Summary"}
+              </div>
+              <pre style="
+                margin: 0;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+                font-family: monospace;
+                font-size: 13px;
+                line-height: 1.5;
+                color: var(--text, #000);
+              ">${request.bodySummary}</pre>
+            </div>
+          ` : nothing}
+          
           <div style="display:flex; gap:8px; align-items:center; flex-wrap: wrap;">
             <button class="btn" @click=${() => (state.llmApprovalShowFullPayload = !showFull)}>
               ${showFull ? (isZh ? "查看摘要" : "Show summary") : isZh ? "查看全文" : "Show full"}
@@ -542,11 +726,11 @@ export function renderLlmApprovalPrompt(state: AppViewState) {
               title=${
                 displayMode === "raw"
                   ? isZh
-                    ? "当前：原文（单行+横向滚动）"
-                    : "Current: raw (single-line + horizontal scroll)"
+                    ? "当前：原文（保留格式）"
+                    : "Current: raw (preserve formatting)"
                   : isZh
-                    ? "当前：美化（自动换行）"
-                    : "Current: pretty (wrapped)"
+                    ? "当前：美化（结构化显示）"
+                    : "Current: pretty (structured)"
               }
             >
               ${displayMode === "raw" ? (isZh ? "切到美化" : "Pretty") : isZh ? "切到原文" : "Raw"}
@@ -562,22 +746,19 @@ export function renderLlmApprovalPrompt(state: AppViewState) {
               ·
               ${displayMode === "raw"
                 ? isZh
-                  ? "原文（单行）"
-                  : "Raw (single line)"
+                  ? "原文（保留格式）"
+                  : "Raw (formatted)"
                 : isZh
-                  ? "美化（换行）"
-                  : "Pretty (wrapped)"}
+                  ? "美化（结构化）"
+                  : "Pretty (structured)"}
             </span>
           </div>
           ${showFull
             ? html`<pre
                 class="exec-approval-command exec-approval-command--scroll exec-approval-command--${displayMode} mono"
-              >${fullText}</pre>`
-            : request.bodySummary
-              ? html`<pre
-                  class="exec-approval-command exec-approval-command--scroll exec-approval-command--pretty mono"
-                >${request.bodySummary}</pre>`
-              : nothing}
+                style="white-space: pre-wrap; word-wrap: break-word; overflow-wrap: break-word;"
+              >${displayMode === "pretty" ? fullText : fullText}</pre>`
+            : nothing}
           ${state.llmApprovalError
             ? html`<div class="exec-approval-error">${state.llmApprovalError}</div>`
             : nothing}

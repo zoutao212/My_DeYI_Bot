@@ -184,6 +184,28 @@ export function createSystemLLMCaller(params?: SystemLLMCallerConfig): LLMCaller
           }, 15_000);
 
           try {
+            // 🆕 SystemLLM 审批：在调用前记录请求
+            const { shouldRequireToolApproval, logToolExecution } = await import(
+              "../../infra/tool-approval-manager.js"
+            );
+            const llmCallTimestamp = Date.now();
+            const shouldApprove = shouldRequireToolApproval("after");
+            
+            if (shouldApprove) {
+              logToolExecution({
+                toolName: "system_llm_call",
+                params: {
+                  provider: attemptProvider,
+                  model: attemptModelId,
+                  promptLength: effectivePrompt.length,
+                  maxTokens,
+                  temperature,
+                },
+                phase: "before",
+                timestamp: llmCallTimestamp,
+              });
+            }
+
             const res = await completeSimple(
               model,
               {
@@ -205,6 +227,24 @@ export function createSystemLLMCaller(params?: SystemLLMCallerConfig): LLMCaller
 
             const text = extractText(res as { content: Array<{ type: string; text?: string; thinking?: string }> });
             console.log(`[SystemLLMCaller] LLM 响应长度: ${text.length}`);
+
+            // 🆕 SystemLLM 审批：记录响应结果
+            if (shouldApprove) {
+              logToolExecution({
+                toolName: "system_llm_call",
+                params: {
+                  provider: attemptProvider,
+                  model: attemptModelId,
+                  promptLength: effectivePrompt.length,
+                },
+                result: {
+                  responseLength: text.length,
+                  response: text.slice(0, 500), // 只记录前 500 字符
+                },
+                phase: "after",
+                timestamp: llmCallTimestamp,
+              });
+            }
 
             if (text) return text;
 

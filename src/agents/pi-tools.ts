@@ -19,6 +19,7 @@ import { listChannelAgentTools } from "./channel-tools.js";
 import { createClawdbotTools } from "./clawdbot-tools.js";
 import type { ModelAuthMode } from "./model-auth.js";
 import { wrapToolWithAbortSignal } from "./pi-tools.abort.js";
+import { wrapToolsWithApproval } from "./pi-tools.approval.js";
 import {
   filterToolsByPolicy,
   isToolAllowedByPolicies,
@@ -468,8 +469,12 @@ export function createClawdbotCodingTools(options?: {
     ? normalized.map((tool) => wrapToolWithAbortSignal(tool, options.abortSignal))
     : normalized;
 
+  // 🆕 添加 Tool 审批包装器
+  // 在工具执行前后拦截，展示审批 UI
+  const withApproval = wrapToolsWithApproval(withAbort);
+
   // NOTE: Keep canonical (lowercase) tool names here.
   // pi-ai's Anthropic OAuth transport remaps tool names to Claude Code-style names
   // on the wire and maps them back for tool dispatch.
-  return withAbort;
+  return withApproval;
 }

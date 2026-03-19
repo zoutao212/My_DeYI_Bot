@@ -8,6 +8,9 @@ import { createHash } from "node:crypto";
 import { registerUnhandledRejectionHandler } from "./unhandled-rejections.js";
 import { formatErrorMessage } from "./errors.js";
 
+/** 存储上一次 LLM 响应中的 tool call 数据（用于在审批 UI 中展示） */
+let lastLlmToolCallsData: string | null = null;
+
 function toPlainHeaders(headers: HeadersInit | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   if (!headers) return out;
@@ -297,6 +300,7 @@ async function buildApprovalPayload(params: {
     bodyText: bodyTextTruncated,
     bodyJson: bodyJson ?? undefined,
     bodySummary,
+    lastLlmToolCalls: lastLlmToolCallsData,
   };
 }
 
@@ -853,6 +857,47 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
               const hasFunctionCall = bodyText.includes("functionCall");
               const hasToolCalls = bodyText.includes("tool_calls");
               console.warn(`[llm-gated-fetch] 🔍 RAW RESPONSE from ${reqUrl.replace(/\?.*/, "")}: status=${response.status} hasFunctionCall=${hasFunctionCall} hasToolCalls=${hasToolCalls} bodyPreview=${preview}`);
+              
+              // 💾 存储 tool call 数据（用于下一次审批 UI 展示）
+              if (hasFunctionCall || hasToolCalls) {
+                try {
+                  // 提取所有 functionCall/tool_calls 数据
+                  const toolCalls: unknown[] = [];
+                  
+                  // Gemini 格式：functionCall
+                  const geminiMatch = bodyText.match(/"functionCall":\{[^}]+\}/g);
+                  if (geminiMatch) {
+                    for (const m of geminiMatch) {
+                      try {
+                        const fc = JSON.parse(`{${m.slice(15)}`);
+                        toolCalls.push(fc);
+                      } catch {
+                        // 解析失败，跳过
+                      }
+                    }
+                  }
+                  
+                  // OpenAI 格式：tool_calls
+                  const openaiMatch = bodyText.match(/"tool_calls":\[[^\]]+\]/g);
+                  if (openaiMatch) {
+                    for (const m of openaiMatch) {
+                      try {
+                        const tc = JSON.parse(`{${m.slice(13)}`);
+                        toolCalls.push(...tc);
+                      } catch {
+                        // 解析失败，跳过
+                      }
+                    }
+                  }
+                  
+                  if (toolCalls.length > 0) {
+                    lastLlmToolCallsData = JSON.stringify(toolCalls, null, 2);
+                    console.warn(`[llm-gated-fetch] 💾 存储 tool call 数据：${toolCalls.length} 条`);
+                  }
+                } catch (extractError) {
+                  console.warn(`[llm-gated-fetch] 💾 提取 tool call 失败:`, extractError);
+                }
+              }
             }).catch((err) => {
               console.warn(`[llm-gated-fetch] 🔍 RAW RESPONSE read failed:`, err);
             });
