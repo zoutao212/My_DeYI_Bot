@@ -7,6 +7,7 @@
 
 import { Type } from "@sinclair/typebox";
 import type { Static } from "@sinclair/typebox";
+import type { AnyAgentTool } from "clawdbot/plugin-sdk";
 import {
   SuperMemoryClient,
   SuperMemoryError,
@@ -131,7 +132,11 @@ export type ToolDependencies = {
 /**
  * Creates the three Agent tools for SuperAgentMemory.
  */
-export function createTools(deps: ToolDependencies) {
+export function createTools(deps: ToolDependencies): {
+  storeTool: AnyAgentTool;
+  recallTool: AnyAgentTool;
+  forgetTool: AnyAgentTool;
+} {
   const { client, config, getSessionKey } = deps;
 
   // --------------------------------------------------------------------------

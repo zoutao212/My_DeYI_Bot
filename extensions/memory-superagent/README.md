@@ -23,12 +23,26 @@ Neural-network-style long-term memory for Clawdbot, powered by [SuperAgentMemory
 
 ```bash
 # From the SuperAgentMemory project directory
+cd E:\SuperAgentMemory
 pip install -r requirements.txt
 python scripts/init_db.py
+
+# Option A: No authentication (development)
+python scripts/run_server.py --host 0.0.0.0 --port 8080
+
+# Option B: With API key (production)
+export AGENT_MEMORY_API__API_KEY="your-secure-api-key"
 python scripts/run_server.py --host 0.0.0.0 --port 8080
 ```
 
-### 2. Configure the Plugin
+### 2. Install Plugin Dependencies
+
+```bash
+cd E:\myclawdbot
+pnpm install
+```
+
+### 3. Configure the Plugin
 
 Add to your `clawdbot.json`:
 
@@ -51,13 +65,28 @@ Add to your `clawdbot.json`:
 }
 ```
 
-Or set the API key as an environment variable:
+### 4. Configure API Key (if authentication enabled)
+
+**If SuperAgentMemory has no API key configured (default)**: Leave `apiKey` empty or omit it.
+
+**If SuperAgentMemory has API key configured**: Set the same key in your environment:
 
 ```bash
-export SUPERAGENT_MEMORY_API_KEY="your-api-key"
+# Option 1: Environment variable (recommended for production)
+export SUPERAGENT_MEMORY_API_KEY="your-secure-api-key"
+
+# Option 2: Direct in config (not recommended for production)
+# "apiKey": "your-secure-api-key"
 ```
 
+The API key must match what's configured in SuperAgentMemory:
+- Environment variable: `AGENT_MEMORY_API__API_KEY`
+- Config file: `config/system_config.yaml` → `api.api_key`
+- CLI argument: `--api-key`
+
 ## Agent Tools
+
+The plugin registers three Agent tools that are automatically injected into the LLM's toolcall system via `api.registerTool()`:
 
 ### `supermemory_store`
 
@@ -69,6 +98,9 @@ Save important information to long-term memory.
 | `importance` | number | No | Importance 0-1 (default: 0.7) |
 | `tags` | string[] | No | Tags for categorization |
 
+**Tool Description (visible to LLM)**:
+> Save important information in SuperAgentMemory — a neural-network-style long-term memory system with ripple retrieval. Use for user preferences, important facts, decisions, or any information worth remembering long-term. Automatically deduplicates and creates synapse connections to related memories.
+
 ### `supermemory_recall`
 
 Search memories using ripple retrieval.
@@ -79,6 +111,9 @@ Search memories using ripple retrieval.
 | `maxResults` | number | No | Max results (default: 10) |
 | `maxDepth` | number | No | Ripple depth 1-5 (default: 3) |
 
+**Tool Description (visible to LLM)**:
+> Search through SuperAgentMemory using ripple retrieval — a neural-network-inspired search that follows synapse connections to discover related memories across multiple hops. Better than simple keyword search for finding contextually related information. Use when you need context about user preferences, past decisions, or previously discussed topics.
+
 ### `supermemory_forget`
 
 Delete specific memories.
@@ -87,6 +122,19 @@ Delete specific memories.
 |-----------|------|----------|-------------|
 | `memoryId` | number | No | Direct delete by ID |
 | `query` | string | No | Search for candidates first |
+
+**Tool Description (visible to LLM)**:
+> Delete specific memories from SuperAgentMemory. Provide a memoryId for direct deletion, or a query to find candidates first.
+
+### How Tools Are Injected
+
+1. Plugin registration calls `api.registerTool(storeTool, { name: "supermemory_store" })` etc.
+2. The tool objects (with `name`, `label`, `description`, `parameters`, `execute`) are added to the plugin registry
+3. `resolvePluginTools()` in `src/plugins/tools.ts` loads all plugin tools
+4. The tools are automatically included in the toolcall system's tool list
+5. The LLM receives tool descriptions and can invoke them as needed
+
+**Note**: The tools are available to the LLM by default. No additional configuration is needed beyond enabling the plugin in `clawdbot.json`.
 
 ## CLI Commands
 

@@ -1,0 +1,17 @@
+{
+  "name": "@clawdbot/memory-superagent",
+  "version": "2026.1.25",
+  "type": "module",
+  "description": "Clawdbot SuperAgentMemory-backed neural-network-style long-term memory plugin with ripple retrieval",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.47"
+  },
+  "peerDependencies": {
+    "clawdbot": "workspace:*"
+  },
+  "clawdbot": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

@@ -5,9 +5,18 @@
   "type": "module",
   "main": "dist/index.js",
   "exports": {
-    ".": "./dist/index.js",
-    "./plugin-sdk": "./dist/plugin-sdk/index.js",
-    "./plugin-sdk/*": "./dist/plugin-sdk/*"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./plugin-sdk": {
+      "types": "./dist/plugin-sdk/index.d.ts",
+      "default": "./dist/plugin-sdk/index.js"
+    },
+    "./plugin-sdk/*": {
+      "types": "./dist/plugin-sdk/*.d.ts",
+      "default": "./dist/plugin-sdk/*"
+    }
   },
   "bin": {
     "clawdbot": "dist/entry.js"
