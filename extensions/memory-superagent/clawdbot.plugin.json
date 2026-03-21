@@ -1,0 +1,96 @@
+{
+  "id": "memory-superagent",
+  "kind": "memory",
+  "uiHints": {
+    "server.baseUrl": {
+      "label": "Server URL",
+      "placeholder": "http://localhost:8080",
+      "help": "SuperAgentMemory API server URL"
+    },
+    "server.apiKey": {
+      "label": "API Key",
+      "sensitive": true,
+      "placeholder": "your-api-key (or use ${SUPERAGENT_MEMORY_API_KEY})",
+      "help": "API key for SuperAgentMemory authentication"
+    },
+    "autoRecall": {
+      "label": "Auto-Recall",
+      "help": "Automatically inject relevant memories before agent starts"
+    },
+    "autoCapture": {
+      "label": "Auto-Capture",
+      "help": "Automatically capture important information after agent ends"
+    },
+    "defaults.maxResults": {
+      "label": "Max Results",
+      "advanced": true,
+      "help": "Default max results for recall (default: 10)"
+    },
+    "defaults.maxDepth": {
+      "label": "Ripple Depth",
+      "advanced": true,
+      "help": "Default ripple retrieval depth 1-5 (default: 3)"
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "server": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "baseUrl": {
+            "type": "string"
+          },
+          "apiKey": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "apiKey"
+        ]
+      },
+      "autoCapture": {
+        "type": "boolean"
+      },
+      "autoRecall": {
+        "type": "boolean"
+      },
+      "defaults": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "maxResults": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 50
+          },
+          "maxDepth": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "importance": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "decayFactor": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "minStrength": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      }
+    },
+    "required": [
+      "server"
+    ]
+  }
+}
