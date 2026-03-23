@@ -7,7 +7,15 @@
  * @module memory/query-expander-enhanced
  */
 
-import { QueryExpander as LocalQueryExpander, QueryType, type QueryAnalysis, type ExpandedQuery } from "./query-expander.js";
+import {
+  QueryExpander as LocalQueryExpander,
+  QueryType,
+  type QueryAnalysis,
+  type ExpandedQuery,
+  expandQuery,
+  analyzeQuery,
+  getFusionWeights,
+} from "./query-expander.js";
 import { NLPClient, getNLPClient, EntityType, QueryType as NLPQueryType } from "./nlp-client.js";
 
 // ============================================================================
