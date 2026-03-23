@@ -15,6 +15,7 @@ import { superMemoryConfigSchema, type SuperMemoryConfig } from "./config.js";
 import { SuperMemoryClient, SuperMemoryError } from "./client.js";
 import { createTools } from "./tools.js";
 import { findCapturableTexts } from "./capture.js";
+import { QueryExpander, type ExpandedQuery, getFusionWeights } from "./query-expander.js";
 
 // ============================================================================
 // Plugin Definition
@@ -60,41 +61,110 @@ const memoryPlugin = {
     api.registerTool(forgetTool, { name: "supermemory_forget" });
 
     // ========================================================================
-    // Auto-Recall Hook: inject relevant memories before agent starts
+    // Auto-Recall Hook: Intelligent proactive memory retrieval
     // ========================================================================
 
     if (cfg.autoRecall) {
+      // Create Query Expander instance
+      const queryExpander = new QueryExpander(
+        cfg.activeRecall?.maxExpansions ?? 5,
+        0.8,
+        cfg.activeRecall?.enableQueryExpansion ?? true
+      );
+
       api.on("before_agent_start", async (event, ctx) => {
-        if (!event.prompt || event.prompt.length < 5) return;
+        const activeRecallCfg = cfg.activeRecall;
+        const minLen = activeRecallCfg?.minQueryLength ?? 5;
+
+        // Skip if query too short
+        if (!event.prompt || event.prompt.length < minLen) return;
 
         // Track session key for this turn
         currentSessionKey = ctx.sessionKey;
 
         try {
-          const result = await client.retrieve({
-            query: event.prompt,
-            agent_id: ctx.sessionKey,
-            max_results: 3,
-            max_depth: cfg.defaults.maxDepth,
-            decay_factor: cfg.defaults.decayFactor,
-            min_strength: cfg.defaults.minStrength,
-          });
+          // ========================================
+          // Step 1: Query Analysis & Expansion
+          // ========================================
+          const analysis = queryExpander.analyze(event.prompt);
+          const searchQueries = queryExpander.getSearchQueries(event.prompt);
 
-          if (result.results.length === 0) return;
+          if (activeRecallCfg?.debugStrategy) {
+            api.logger.info?.(
+              `memory-superagent: query analysis - type=${analysis.queryType}, ` +
+                `entities=[${analysis.entities.join(", ")}], focus="${analysis.focus}", ` +
+                `strategy=${analysis.searchStrategy}`
+            );
+            api.logger.info?.(
+              `memory-superagent: expanded to ${searchQueries.length} queries: ` +
+                `[${searchQueries.slice(0, 5).map((q) => `"${q.text}"`).join(", ")}]`
+            );
+          }
 
-          const memoryContext = result.results
-            .map(
-              (r) =>
-                `- [${r.keywords?.join(",") ?? r.tags?.join(",") ?? "general"}] ${r.content}`,
-            )
-            .join("\n");
+          // ========================================
+          // Step 2: Multi-Query Parallel Retrieval
+          // ========================================
+          const maxQueries = activeRecallCfg?.maxParallelQueries ?? 3;
+          const topQueries = searchQueries.slice(0, maxQueries);
+
+          // Execute multi-query retrieval
+          const multiResult = await client.multiRetrieve(
+            topQueries.map((q) => q.text),
+            {
+              agent_id: ctx.sessionKey,
+              max_results: activeRecallCfg?.maxContextMemories ?? 5,
+              max_depth: cfg.defaults.maxDepth,
+              decay_factor: cfg.defaults.decayFactor,
+              min_strength: cfg.defaults.minStrength,
+            },
+            {
+              maxParallel: maxQueries,
+              fuseStrategy: "rrf", // Reciprocal Rank Fusion
+            }
+          );
+
+          // Fallback to simple retrieval if multi-retrieve returns nothing
+          if (multiResult.results.length === 0) {
+            const simpleResult = await client.retrieve({
+              query: event.prompt,
+              agent_id: ctx.sessionKey,
+              max_results: 3,
+              max_depth: cfg.defaults.maxDepth,
+              decay_factor: cfg.defaults.decayFactor,
+              min_strength: cfg.defaults.minStrength,
+            });
+
+            if (simpleResult.results.length === 0) return;
+
+            const memoryContext = simpleResult.results
+              .map((r) => formatMemoryLine(r))
+              .join("\n");
+
+            api.logger.info?.(
+              `memory-superagent: injecting ${simpleResult.results.length} memories (simple mode)`
+            );
+
+            return {
+              prependContext: buildMemoryContext(memoryContext, analysis),
+            };
+          }
+
+          // ========================================
+          // Step 3: Build Context for LLM
+          // ========================================
+          const maxMemories = activeRecallCfg?.maxContextMemories ?? 5;
+          const topResults = multiResult.results.slice(0, maxMemories);
+
+          const memoryContext = topResults.map((r) => formatMemoryLine(r)).join("\n");
 
           api.logger.info?.(
-            `memory-superagent: injecting ${result.results.length} memories (depth: ${result.results.map((r) => r.depth).join(",")})`,
+            `memory-superagent: injecting ${topResults.length} memories ` +
+              `(from ${multiResult.queryCount} queries, fusion=${multiResult.fusionMethod}) ` +
+              `depths: [${topResults.map((r) => r.depth).join(", ")}]`
           );
 
           return {
-            prependContext: `<superagent-memories>\nThe following memories from SuperAgentMemory may be relevant:\n${memoryContext}\n</superagent-memories>`,
+            prependContext: buildMemoryContext(memoryContext, analysis),
           };
         } catch (err) {
           if (err instanceof SuperMemoryError && err.code === "CONNECTION_ERROR") {
@@ -109,6 +179,30 @@ const memoryPlugin = {
           // Graceful degradation: return no context
         }
       });
+    }
+
+    // Helper: Format a single memory line
+    function formatMemoryLine(r: { id: string; content: string; score: number; keywords?: string[]; tags?: string[]; depth: number }): string {
+      const score = (r.score * 100).toFixed(0);
+      const tags = r.keywords?.length ? `[${r.keywords.join(", ")}]` :
+                   r.tags?.length ? `[${r.tags.join(", ")}]` : "";
+      return `- [ID:${r.id}] (${score}%) ${tags}\n  ${r.content.slice(0, 150)}${r.content.length > 150 ? "..." : ""}`;
+    }
+
+    // Helper: Build memory context XML block
+    function buildMemoryContext(memoryContext: string, analysis: { queryType: string; entities: string[]; focus: string; searchStrategy: string }): string {
+      const entityHint = analysis.entities.length > 0
+        ? `\nDetected entities: ${analysis.entities.join(", ")}`
+        : "";
+      const focusHint = analysis.focus
+        ? `\nQuery focus: ${analysis.focus}`
+        : "";
+
+      return `<superagent-memories>
+The following memories from SuperAgentMemory may be relevant to your query:
+${memoryContext}
+${entityHint}${focusHint}
+</superagent-memories>`;
     }
 
     // ========================================================================

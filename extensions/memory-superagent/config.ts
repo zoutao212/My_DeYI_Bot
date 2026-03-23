@@ -21,10 +21,33 @@ export type SuperMemoryDefaultsConfig = {
   minStrength: number;
 };
 
+/**
+ * Active recall strategy configuration
+ * Controls how the system proactively retrieves relevant memories
+ */
+export type ActiveRecallConfig = {
+  /** Enable intelligent query expansion before retrieval */
+  enableQueryExpansion: boolean;
+  /** Maximum number of expanded queries to execute in parallel */
+  maxParallelQueries: number;
+  /** Maximum number of sub-queries to generate */
+  maxExpansions: number;
+  /** Minimum query length to trigger active recall (skip short queries) */
+  minQueryLength: number;
+  /** Inject retrieved memories as context for LLM */
+  injectContext: boolean;
+  /** Maximum memories to inject into context */
+  maxContextMemories: number;
+  /** Show search strategy in logs for debugging */
+  debugStrategy: boolean;
+};
+
 export type SuperMemoryConfig = {
   server: SuperMemoryServerConfig;
   autoCapture: boolean;
   autoRecall: boolean;
+  /** Active recall strategy configuration (enhanced autoRecall) */
+  activeRecall?: ActiveRecallConfig;
   defaults: SuperMemoryDefaultsConfig;
 };
 
@@ -38,6 +61,17 @@ const DEFAULT_MAX_DEPTH = 3;
 const DEFAULT_IMPORTANCE = 0.7;
 const DEFAULT_DECAY_FACTOR = 0.6;
 const DEFAULT_MIN_STRENGTH = 0.3;
+
+/** Default active recall configuration */
+const DEFAULT_ACTIVE_RECALL: ActiveRecallConfig = {
+  enableQueryExpansion: true,
+  maxParallelQueries: 3,
+  maxExpansions: 5,
+  minQueryLength: 5,
+  injectContext: true,
+  maxContextMemories: 5,
+  debugStrategy: false,
+};
 
 // ============================================================================
 // Validation helpers
@@ -76,7 +110,7 @@ export const superMemoryConfigSchema = {
     const cfg = value as Record<string, unknown>;
     assertAllowedKeys(
       cfg,
-      ["server", "autoCapture", "autoRecall", "defaults"],
+      ["server", "autoCapture", "autoRecall", "activeRecall", "defaults"],
       "memory-superagent config",
     );
 
@@ -121,6 +155,39 @@ export const superMemoryConfigSchema = {
           : DEFAULT_MIN_STRENGTH,
     };
 
+    // Parse activeRecall config
+    const activeRecallConfig = cfg.activeRecall as Record<string, unknown> | undefined;
+    const parsedActiveRecall: ActiveRecallConfig = {
+      enableQueryExpansion:
+        typeof activeRecallConfig?.enableQueryExpansion === "boolean"
+          ? activeRecallConfig.enableQueryExpansion
+          : DEFAULT_ACTIVE_RECALL.enableQueryExpansion,
+      maxParallelQueries:
+        typeof activeRecallConfig?.maxParallelQueries === "number"
+          ? Math.max(1, Math.min(10, activeRecallConfig.maxParallelQueries))
+          : DEFAULT_ACTIVE_RECALL.maxParallelQueries,
+      maxExpansions:
+        typeof activeRecallConfig?.maxExpansions === "number"
+          ? Math.max(1, Math.min(10, activeRecallConfig.maxExpansions))
+          : DEFAULT_ACTIVE_RECALL.maxExpansions,
+      minQueryLength:
+        typeof activeRecallConfig?.minQueryLength === "number"
+          ? Math.max(1, Math.min(50, activeRecallConfig.minQueryLength))
+          : DEFAULT_ACTIVE_RECALL.minQueryLength,
+      injectContext:
+        typeof activeRecallConfig?.injectContext === "boolean"
+          ? activeRecallConfig.injectContext
+          : DEFAULT_ACTIVE_RECALL.injectContext,
+      maxContextMemories:
+        typeof activeRecallConfig?.maxContextMemories === "number"
+          ? Math.max(1, Math.min(20, activeRecallConfig.maxContextMemories))
+          : DEFAULT_ACTIVE_RECALL.maxContextMemories,
+      debugStrategy:
+        typeof activeRecallConfig?.debugStrategy === "boolean"
+          ? activeRecallConfig.debugStrategy
+          : DEFAULT_ACTIVE_RECALL.debugStrategy,
+    };
+
     return {
       server: {
         baseUrl,
@@ -128,6 +195,7 @@ export const superMemoryConfigSchema = {
       },
       autoCapture: cfg.autoCapture !== false,
       autoRecall: cfg.autoRecall !== false,
+      activeRecall: parsedActiveRecall,
       defaults: parsedDefaults,
     };
   },
@@ -151,6 +219,31 @@ export const superMemoryConfigSchema = {
     autoRecall: {
       label: "Auto-Recall",
       help: "Automatically inject relevant memories before agent starts",
+    },
+    "activeRecall.enableQueryExpansion": {
+      label: "Enable Query Expansion",
+      advanced: true,
+      help: "Use intelligent query expansion for better recall accuracy",
+    },
+    "activeRecall.maxParallelQueries": {
+      label: "Max Parallel Queries",
+      advanced: true,
+      help: "Maximum number of expanded queries to execute in parallel",
+    },
+    "activeRecall.maxExpansions": {
+      label: "Max Expansions",
+      advanced: true,
+      help: "Maximum number of query expansions to generate",
+    },
+    "activeRecall.minQueryLength": {
+      label: "Min Query Length",
+      advanced: true,
+      help: "Minimum query length to trigger active recall",
+    },
+    "activeRecall.maxContextMemories": {
+      label: "Max Context Memories",
+      advanced: true,
+      help: "Maximum memories to inject into context",
     },
     "defaults.maxResults": {
       label: "Max Results",

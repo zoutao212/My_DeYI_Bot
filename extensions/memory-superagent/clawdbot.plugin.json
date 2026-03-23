@@ -21,6 +21,36 @@
       "label": "Auto-Capture",
       "help": "Automatically capture important information after agent ends"
     },
+    "activeRecall.enableQueryExpansion": {
+      "label": "Enable Query Expansion",
+      "advanced": true,
+      "help": "Use intelligent query expansion for better recall accuracy"
+    },
+    "activeRecall.maxParallelQueries": {
+      "label": "Max Parallel Queries",
+      "advanced": true,
+      "help": "Maximum number of expanded queries to execute in parallel"
+    },
+    "activeRecall.maxExpansions": {
+      "label": "Max Expansions",
+      "advanced": true,
+      "help": "Maximum number of query expansions to generate"
+    },
+    "activeRecall.minQueryLength": {
+      "label": "Min Query Length",
+      "advanced": true,
+      "help": "Minimum query length to trigger active recall"
+    },
+    "activeRecall.maxContextMemories": {
+      "label": "Max Context Memories",
+      "advanced": true,
+      "help": "Maximum memories to inject into context"
+    },
+    "activeRecall.debugStrategy": {
+      "label": "Debug Strategy",
+      "advanced": true,
+      "help": "Show search strategy in logs for debugging"
+    },
     "defaults.maxResults": {
       "label": "Max Results",
       "advanced": true,
@@ -54,6 +84,48 @@
       },
       "autoRecall": {
         "type": "boolean"
+      },
+      "activeRecall": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enableQueryExpansion": {
+            "type": "boolean",
+            "default": true
+          },
+          "maxParallelQueries": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 10,
+            "default": 3
+          },
+          "maxExpansions": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 10,
+            "default": 5
+          },
+          "minQueryLength": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 5
+          },
+          "injectContext": {
+            "type": "boolean",
+            "default": true
+          },
+          "maxContextMemories": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 20,
+            "default": 5
+          },
+          "debugStrategy": {
+            "type": "boolean",
+            "default": false
+          }
+        }
       },
       "defaults": {
         "type": "object",

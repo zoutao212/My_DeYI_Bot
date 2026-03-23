@@ -232,6 +232,133 @@ export class SuperMemoryClient {
     return this.request<HealthResponse>("GET", "/health");
   }
 
+  /**
+   * Multi-query parallel retrieval
+   * Executes multiple retrieval queries in parallel and fuses results
+   *
+   * @param queries Array of query strings to execute
+   * @param baseParams Base parameters for all queries
+   * @returns Fused and deduplicated results
+   */
+  async multiRetrieve(
+    queries: string[],
+    baseParams: Omit<RetrieveRequest, "query">,
+    options?: {
+      maxParallel?: number;
+      fuseStrategy?: "weighted" | "rrf"; // Reciprocal Rank Fusion
+    }
+  ): Promise<RetrieveResponse & { queryCount: number; fusionMethod: string }> {
+    const maxParallel = options?.maxParallel ?? 3;
+    const fuseStrategy = options?.fuseStrategy ?? "weighted";
+
+    // Limit parallel requests
+    const batches: string[][] = [];
+    for (let i = 0; i < queries.length; i += maxParallel) {
+      batches.push(queries.slice(i, i + maxParallel));
+    }
+
+    // Execute batches in parallel
+    const allResults: Map<string, RetrieveResultItem[]> = new Map();
+    let totalQueries = 0;
+
+    for (const batch of batches) {
+      const batchResults = await Promise.all(
+        batch.map((query) =>
+          this.retrieve({ ...baseParams, query }).catch((err) => {
+            // Log error but continue with other queries
+            console.warn(`Multi-retrieve query "${query}" failed:`, err);
+            return {
+              object: "retrieve_response",
+              query,
+              results: [],
+              total_results: 0
+            } as RetrieveResponse;
+          })
+        )
+      );
+
+      for (let i = 0; i < batch.length; i++) {
+        const query = batch[i];
+        const result = batchResults[i];
+        if (result.results.length > 0) {
+          allResults.set(query, result.results);
+        }
+        totalQueries++;
+      }
+    }
+
+    // Fuse results
+    const fusedResults = this.fuseResults(allResults, fuseStrategy);
+
+    return {
+      object: "multi_retrieve_response",
+      query: queries[0], // Primary query
+      results: fusedResults.slice(0, baseParams.max_results ?? 10),
+      total_results: fusedResults.length,
+      queryCount: totalQueries,
+      fusionMethod: fuseStrategy,
+    };
+  }
+
+  /**
+   * Fuse results from multiple queries
+   * Uses weighted or RRF (Reciprocal Rank Fusion) strategy
+   */
+  private fuseResults(
+    resultsByQuery: Map<string, RetrieveResultItem[]>,
+    strategy: "weighted" | "rrf"
+  ): RetrieveResultItem[] {
+    // Track scores for each unique result (by id)
+    const scoreMap: Map<string, { item: RetrieveResultItem; score: number; sources: string[] }> =
+      new Map();
+
+    const rrfK = 60; // RRF constant
+
+    for (const [query, results] of resultsByQuery) {
+      results.forEach((item, rank) => {
+        const existing = scoreMap.get(item.id);
+
+        if (strategy === "rrf") {
+          // Reciprocal Rank Fusion: 1 / (k + rank)
+          const rrfScore = 1 / (rrfK + rank);
+          if (existing) {
+            existing.score += rrfScore;
+            existing.sources.push(query);
+          } else {
+            scoreMap.set(item.id, {
+              item,
+              score: rrfScore,
+              sources: [query],
+            });
+          }
+        } else {
+          // Weighted: use original score with decay
+          const weight = 1.0 / (rank + 1);
+          const weightedScore = item.score * weight;
+          if (existing) {
+            existing.score += weightedScore;
+            existing.sources.push(query);
+          } else {
+            scoreMap.set(item.id, {
+              item,
+              score: weightedScore,
+              sources: [query],
+            });
+          }
+        }
+      });
+    }
+
+    // Sort by fused score
+    const sorted = Array.from(scoreMap.values()).sort((a, b) => b.score - a.score);
+
+    // Boost items found by multiple queries
+    return sorted.map((entry) => ({
+      ...entry.item,
+      score: Math.min(1.0, entry.score * (1 + Math.log(entry.sources.length) * 0.1)),
+    }));
+  }
+
   // ========================================================================
   // Internal HTTP helpers
   // ========================================================================
