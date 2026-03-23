@@ -85,7 +85,7 @@ const memoryPlugin = {
           const memoryContext = result.results
             .map(
               (r) =>
-                `- [${r.atom.tags?.join(",") ?? "general"}] ${r.atom.content}`,
+                `- [${r.keywords?.join(",") ?? r.tags?.join(",") ?? "general"}] ${r.content}`,
             )
             .join("\n");
 
@@ -212,16 +212,17 @@ const memoryPlugin = {
                 return;
               }
 
-              console.log(`Found ${result.total_found} memories:\n`);
+              console.log(`Found ${result.total_results ?? result.total_found ?? result.results.length} memories:\n`);
               for (let i = 0; i < result.results.length; i++) {
                 const r = result.results[i];
                 const score = (r.score * 100).toFixed(0);
-                const tags = r.atom.tags?.length ? ` [${r.atom.tags.join(", ")}]` : "";
+                const tags = r.keywords?.length ? ` [${r.keywords.join(", ")}]` : 
+                             r.tags?.length ? ` [${r.tags.join(", ")}]` : "";
                 console.log(
-                  `${i + 1}. [ID:${r.atom.id}] (${score}%)${tags} depth=${r.depth}`,
+                  `${i + 1}. [ID:${r.id}] (${score}%)${tags} depth=${r.depth}`,
                 );
-                console.log(`   ${r.atom.content.slice(0, 200)}`);
-                if (r.path.length > 0) {
+                console.log(`   ${r.content.slice(0, 200)}`);
+                if (r.path && r.path.length > 0) {
                   console.log(`   Path: ${r.path.join(" → ")}`);
                 }
                 console.log();

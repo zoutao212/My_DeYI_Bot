@@ -82,10 +82,14 @@ export const superMemoryConfigSchema = {
 
     // Parse server config
     const server = cfg.server as Record<string, unknown> | undefined;
-    if (!server || typeof server.apiKey !== "string" || !server.apiKey.trim()) {
-      throw new Error("server.apiKey is required");
+    if (!server) {
+      throw new Error("server config is required");
     }
     assertAllowedKeys(server, ["baseUrl", "apiKey"], "server config");
+
+    // apiKey is optional for local testing (when server has no auth)
+    const apiKey =
+      typeof server.apiKey === "string" ? resolveEnvVars(server.apiKey.trim()) : "";
 
     const baseUrl =
       typeof server.baseUrl === "string" && server.baseUrl.trim()
@@ -120,7 +124,7 @@ export const superMemoryConfigSchema = {
     return {
       server: {
         baseUrl,
-        apiKey: resolveEnvVars(server.apiKey.trim()),
+        apiKey,
       },
       autoCapture: cfg.autoCapture !== false,
       autoRecall: cfg.autoRecall !== false,

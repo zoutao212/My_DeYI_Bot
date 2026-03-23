@@ -82,20 +82,36 @@ const ForgetParams = Type.Object({
 // ============================================================================
 
 function formatStoreResult(result: StoreResponse): string {
-  if (result.is_duplicate) {
+  // 处理重复情况
+  if (result.duplicate || result.is_duplicate) {
     const similar = result.similar_atoms
       ?.map((a) => `  - [${a.id}] "${a.content.slice(0, 80)}..." (${(a.similarity * 100).toFixed(0)}%)`)
       .join("\n");
-    return `Similar memory already exists:\n${similar}`;
+    return similar ? `Similar memory already exists:\n${similar}` : "Similar memory already exists.";
   }
 
-  const atom = result.atom;
-  let text = `Memory stored (ID: ${atom.id})\n`;
-  text += `Content: "${atom.content.slice(0, 100)}${atom.content.length > 100 ? "..." : ""}"\n`;
-  if (result.synapses_created && result.synapses_created > 0) {
-    text += `Auto-linked: ${result.synapses_created} synapses created\n`;
+  // 新格式：直接返回 id 和 content
+  if (result.id && result.content) {
+    let text = `Memory stored (ID: ${result.id})\n`;
+    text += `Content: "${result.content.slice(0, 100)}${result.content.length > 100 ? "..." : ""}"\n`;
+    if (result.synapses_count && result.synapses_count > 0) {
+      text += `Auto-linked: ${result.synapses_count} synapses\n`;
+    }
+    return text;
   }
-  return text;
+
+  // 兼容旧格式
+  if (result.atom) {
+    const atom = result.atom;
+    let text = `Memory stored (ID: ${atom.id})\n`;
+    text += `Content: "${atom.content.slice(0, 100)}${atom.content.length > 100 ? "..." : ""}"\n`;
+    if (result.synapses_created && result.synapses_created > 0) {
+      text += `Auto-linked: ${result.synapses_created} synapses created\n`;
+    }
+    return text;
+  }
+
+  return "Memory stored successfully.";
 }
 
 function formatRecallResult(result: RetrieveResponse): string {
@@ -103,15 +119,16 @@ function formatRecallResult(result: RetrieveResponse): string {
     return "No relevant memories found.";
   }
 
-  let text = `Found ${result.total_found} memories (showing ${result.results.length}):\n\n`;
+  const total = result.total_results ?? result.total_found ?? result.results.length;
+  let text = `Found ${total} memories (showing ${result.results.length}):\n\n`;
   for (let i = 0; i < result.results.length; i++) {
     const r = result.results[i];
-    const atom = r.atom;
     const score = (r.score * 100).toFixed(0);
-    const tags = atom.tags?.length ? ` [${atom.tags.join(", ")}]` : "";
-    text += `${i + 1}. [ID:${atom.id}] (${score}%)${tags}\n`;
-    text += `   ${atom.content.slice(0, 200)}${atom.content.length > 200 ? "..." : ""}\n`;
-    if (r.path.length > 0) {
+    const tags = r.keywords?.length ? ` [${r.keywords.join(", ")}]` : 
+                 r.tags?.length ? ` [${r.tags.join(", ")}]` : "";
+    text += `${i + 1}. [ID:${r.id}] (${score}%)${tags}\n`;
+    text += `   ${r.content.slice(0, 200)}${r.content.length > 200 ? "..." : ""}\n`;
+    if (r.path && r.path.length > 0) {
       text += `   Path: ${r.path.join(" → ")} (depth ${r.depth})\n`;
     }
     text += "\n";
@@ -168,9 +185,9 @@ export function createTools(deps: ToolDependencies): {
         return {
           content: [{ type: "text" as const, text: formatStoreResult(result) }],
           details: {
-            action: result.is_duplicate ? "duplicate" : "created",
-            id: result.atom.id,
-            synapsesCreated: result.synapses_created ?? 0,
+            action: result.duplicate || result.is_duplicate ? "duplicate" : "created",
+            id: result.id ? parseInt(result.id) : result.atom?.id,
+            synapsesCreated: result.synapses_count ?? result.synapses_created ?? 0,
           },
         };
       } catch (err) {
@@ -210,18 +227,18 @@ export function createTools(deps: ToolDependencies): {
 
         // Strip heavy fields for details
         const sanitizedResults = result.results.map((r) => ({
-          id: r.atom.id,
-          content: r.atom.content,
+          id: r.id,
+          content: r.content,
           score: r.score,
           depth: r.depth,
-          tags: r.atom.tags,
+          tags: r.keywords ?? r.tags,
         }));
 
         return {
           content: [{ type: "text" as const, text: formatRecallResult(result) }],
           details: {
             count: result.results.length,
-            totalFound: result.total_found,
+            totalFound: result.total_results ?? result.total_found,
             memories: sanitizedResults,
           },
         };
@@ -272,11 +289,12 @@ export function createTools(deps: ToolDependencies): {
 
           // Single high-confidence match → auto-delete
           if (result.results.length === 1 && result.results[0].score > 0.9) {
-            const atom = result.results[0].atom;
-            await client.delete(atom.id, true);
+            const r = result.results[0];
+            const memoryId = parseInt(r.id);
+            await client.delete(memoryId, true);
             return {
-              content: [{ type: "text" as const, text: `Forgotten: "${atom.content.slice(0, 80)}..."` }],
-              details: { action: "deleted", id: atom.id },
+              content: [{ type: "text" as const, text: `Forgotten: "${r.content.slice(0, 80)}..."` }],
+              details: { action: "deleted", id: memoryId },
             };
           }
 
@@ -284,7 +302,7 @@ export function createTools(deps: ToolDependencies): {
           const list = result.results
             .map(
               (r) =>
-                `- [ID:${r.atom.id}] (${(r.score * 100).toFixed(0)}%) "${r.atom.content.slice(0, 80)}..."`,
+                `- [ID:${r.id}] (${(r.score * 100).toFixed(0)}%) "${r.content.slice(0, 80)}..."`,
             )
             .join("\n");
 
@@ -298,8 +316,8 @@ export function createTools(deps: ToolDependencies): {
             details: {
               action: "candidates",
               candidates: result.results.map((r) => ({
-                id: r.atom.id,
-                content: r.atom.content,
+                id: parseInt(r.id),
+                content: r.content,
                 score: r.score,
               })),
             },

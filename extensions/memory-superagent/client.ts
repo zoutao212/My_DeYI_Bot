@@ -37,9 +37,29 @@ export type StoreRequest = {
   deduplicate?: boolean;
 };
 
+// 服务端实际返回的 store 格式
 export type StoreResponse = {
-  success: boolean;
-  atom: MemoryAtom;
+  // 服务端实际返回的字段
+  id: string;
+  object: string;
+  created: boolean;
+  content?: string;
+  content_hash?: string;
+  keywords?: string[];
+  embedding?: number[];
+  metadata?: Record<string, unknown>;
+  depth_level?: number;
+  agent_id?: string;
+  importance?: number;
+  synapses_count?: number;
+  prev_id?: string;
+  next_id?: string;
+  created_at?: string;
+  // 重复检测相关
+  duplicate?: boolean;
+  // 兼容旧格式
+  success?: boolean;
+  atom?: MemoryAtom;
   synapses_created?: number;
   is_duplicate?: boolean;
   similar_atoms?: Array<{
@@ -61,17 +81,43 @@ export type RetrieveRequest = {
   session_branch_path?: string[];
 };
 
+// 服务端实际返回的结果格式（平铺结构）
+export type RetrieveResultItem = {
+  id: string;
+  object: string;
+  content: string;
+  score: number;
+  depth: number;
+  path: string[];
+  keywords?: string[];
+  metadata?: Record<string, unknown>;
+  agent_id?: string;
+  session_id?: string;
+  context_before?: string;
+  context_after?: string;
+  synapse_path?: string[];
+  tags?: string[];  // 兼容旧格式
+};
+
 export type RetrieveResponse = {
-  success: boolean;
+  object: string;
   query: string;
-  results: Array<{
-    atom: MemoryAtom;
-    score: number;
-    path: string[];
-    depth: number;
-  }>;
-  total_found: number;
-  retrieval_depth: number;
+  results: RetrieveResultItem[];
+  total_results: number;
+  search_config?: {
+    agent_id?: string;
+    accessible_agent_ids?: string[];
+    session_branch_path?: string[];
+  };
+  ripple_stats?: {
+    layers_explored: number;
+    atoms_visited: number;
+    synapses_activated: number;
+  };
+  // 兼容旧格式字段
+  success?: boolean;
+  total_found?: number;
+  retrieval_depth?: number;
 };
 
 export type UpdateRequest = {
@@ -137,7 +183,23 @@ export class SuperMemoryClient {
 
   /** Retrieve memories using ripple search */
   async retrieve(req: RetrieveRequest): Promise<RetrieveResponse> {
-    return this.request<RetrieveResponse>("POST", "/v1/memory/retrieve", req);
+    // Build query params (FastAPI expects Query parameters, not JSON body)
+    const params = new URLSearchParams();
+    params.append("query", req.query);
+    if (req.agent_id) params.append("agent_id", req.agent_id);
+    if (req.session_id) params.append("session_id", req.session_id);
+    if (req.max_results) params.append("max_results", String(req.max_results));
+    if (req.max_depth) params.append("max_depth", String(req.max_depth));
+    if (req.decay_factor) params.append("decay_factor", String(req.decay_factor));
+    if (req.min_strength) params.append("min_strength", String(req.min_strength));
+    if (req.accessible_agent_ids?.length) {
+      params.append("accessible_agent_ids", req.accessible_agent_ids.join(","));
+    }
+    if (req.session_branch_path?.length) {
+      params.append("session_branch_path", req.session_branch_path.join(","));
+    }
+
+    return this.request<RetrieveResponse>("POST", `/v1/memory/retrieve?${params.toString()}`);
   }
 
   /** Get a single memory atom by ID */

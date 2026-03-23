@@ -47,9 +47,7 @@
             "type": "string"
           }
         },
-        "required": [
-          "apiKey"
-        ]
+        "required": []
       },
       "autoCapture": {
         "type": "boolean"
