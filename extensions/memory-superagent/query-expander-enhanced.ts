@@ -16,7 +16,7 @@ import {
   analyzeQuery,
   getFusionWeights,
 } from "./query-expander.js";
-import { NLPClient, getNLPClient, EntityType, QueryType as NLPQueryType } from "./nlp-client.js";
+import { NLPClient, getNLPClient, QueryType as NLPQueryType } from "./nlp-client.js";
 
 // ============================================================================
 // Types
