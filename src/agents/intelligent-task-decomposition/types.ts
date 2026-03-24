@@ -752,6 +752,17 @@ export interface SubTaskMetadata {
   /** 🔧 P51: 章节编号（从 1 开始，用于精准匹配 V7 blueprintChapterSynopses） */
   chapterNumber?: number;
 
+  // 🔧 P113: 追加写入模式相关字段
+
+  /** 是否是追加写入子任务（由 decomposeWritingTaskWithAppend 创建） */
+  isAppendTask?: boolean;
+
+  /** 追加模式标记（与 isAppendTask 配合使用） */
+  appendMode?: boolean;
+
+  /** 追加写入的目标文件名（所有追加子任务写入同一文件） */
+  appendTargetFile?: string;
+
   // 🆕 V5: 大文本 Map-Reduce 分析（大文件 → 分 chunk 阅读 → 逐级汇总 → 最终产出）
 
   /** 是否是 chunk 处理子任务（由 decomposeIntoMapReduce 创建） */

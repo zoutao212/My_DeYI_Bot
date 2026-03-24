@@ -161,6 +161,177 @@ export class FileManager {
   }
 
   /**
+   * 🔧 P112: 统一输出路径管理
+   * 
+   * 解决双重路径逻辑问题：所有文件产出走统一路径。
+   * 
+   * @param subTask 子任务
+   * @param fileName 文件名
+   * @returns 统一的输出文件路径
+   */
+  getUnifiedOutputPath(subTask: SubTask, fileName: string): string {
+    // 分段任务：统一放在 chapters 子目录
+    if (subTask.metadata?.isSegment) {
+      const chaptersDir = path.join(this.taskTreePath, "chapters");
+      return path.join(chaptersDir, fileName);
+    }
+    
+    // 人物卡任务：放在 character_cards 子目录
+    if (subTask.taskType === "writing" && /人物卡|角色卡|人设/.test(subTask.prompt)) {
+      const charsDir = path.join(this.taskTreePath, "character_cards");
+      return path.join(charsDir, fileName);
+    }
+    
+    // chunk 任务：放在 chunks 子目录
+    if (subTask.metadata?.isChunkTask) {
+      const chunksDir = path.join(this.taskTreePath, "chunks");
+      return path.join(chunksDir, fileName);
+    }
+    
+    // 其他任务：放在 deliverables 目录
+    const deliverablesDir = path.join(this.taskTreePath, "deliverables");
+    return path.join(deliverablesDir, fileName);
+  }
+
+  /**
+   * 🔧 P112: 根据任务类型获取推荐的基础目录
+   * 
+   * @param subTask 子任务
+   * @returns 推荐的基础目录路径
+   */
+  getRecommendedBaseDir(subTask: SubTask): string {
+    // 文学创作类任务
+    if (/小说|故事|散文|剧本|创作|续写/.test(subTask.prompt)) {
+      return path.join(this.taskTreePath, "creative_writing");
+    }
+    
+    // 人物卡类任务
+    if (/人物卡|角色卡|人设/.test(subTask.prompt)) {
+      return path.join(this.taskTreePath, "character_cards");
+    }
+    
+    // 分析报告类任务
+    if (/分析|报告|总结|摘要/.test(subTask.prompt)) {
+      return path.join(this.taskTreePath, "reports");
+    }
+    
+    // 默认放在 deliverables 目录
+    return path.join(this.taskTreePath, "deliverables");
+  }
+
+  // ========================================
+  // 🔧 P113: 追加写入模式支持
+  // ========================================
+
+  /**
+   * 🔧 P113: 获取追加写入的目标文件路径
+   *
+   * 追加写入模式下，所有追加子任务共享同一个目标文件。
+   *
+   * @param subTask 追加子任务
+   * @returns 目标文件的完整路径
+   */
+  getAppendTargetPath(subTask: SubTask): string | null {
+    // 优先使用 appendTargetFile
+    const targetFile = subTask.metadata?.appendTargetFile;
+    if (!targetFile) return null;
+
+    // 追加写入的文件放在 append_outputs 目录
+    const appendDir = path.join(this.taskTreePath, "append_outputs");
+    return path.join(appendDir, targetFile);
+  }
+
+  /**
+   * 🔧 P113: 读取追加写入目标文件的现有内容
+   *
+   * @param subTask 追加子任务
+   * @returns 文件现有内容（如果文件不存在则返回空字符串）
+   */
+  async readAppendTargetContent(subTask: SubTask): Promise<string> {
+    const targetPath = this.getAppendTargetPath(subTask);
+    if (!targetPath) return "";
+
+    try {
+      const content = await fs.readFile(targetPath, "utf-8");
+      return content;
+    } catch (err: any) {
+      if (err.code === "ENOENT") {
+        // 文件不存在，返回空字符串
+        return "";
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * 🔧 P113: 追加内容到目标文件
+   *
+   * 如果文件不存在，会自动创建。追加前会确保目录存在。
+   *
+   * @param subTask 追加子任务
+   * @param content 要追加的内容
+   * @returns 追加后的文件路径
+   */
+  async appendToTarget(subTask: SubTask, content: string): Promise<string> {
+    const targetPath = this.getAppendTargetPath(subTask);
+    if (!targetPath) {
+      throw new Error("无法确定追加写入的目标文件路径");
+    }
+
+    // 确保目录存在
+    const targetDir = path.dirname(targetPath);
+    await fs.mkdir(targetDir, { recursive: true });
+
+    // 检查文件是否存在
+    let existingContent = "";
+    try {
+      existingContent = await fs.readFile(targetPath, "utf-8");
+    } catch (err: any) {
+      if (err.code !== "ENOENT") throw err;
+    }
+
+    // 如果已有内容，添加换行分隔
+    const contentToWrite = existingContent
+      ? existingContent.trimEnd() + "\n\n" + content.trimStart()
+      : content;
+
+    // 写入文件
+    await fs.writeFile(targetPath, contentToWrite, "utf-8");
+
+    console.log(
+      `[FileManager] 📝 P113: 追加写入完成 — ${targetPath}\n` +
+      `  原有: ${existingContent.length} 字符\n` +
+      `  新增: ${content.length} 字符\n` +
+      `  总计: ${contentToWrite.length} 字符`
+    );
+
+    return targetPath;
+  }
+
+  /**
+   * 🔧 P113: 获取追加写入任务的上下文摘要
+   *
+   * 用于构建追加任务的 prompt 时，提供前文上下文。
+   *
+   * @param subTask 追加子任务
+   * @param maxChars 最大字符数（默认 2000）
+   * @returns 前文内容摘要
+   */
+  async getAppendContextSummary(subTask: SubTask, maxChars = 2000): Promise<string> {
+    const content = await this.readAppendTargetContent(subTask);
+    if (!content) return "";
+
+    // 如果内容已经足够短，直接返回
+    if (content.length <= maxChars) {
+      return `【已有内容（${content.length} 字）】\n${content}`;
+    }
+
+    // 否则，取最后 maxChars 个字符（因为追加写作主要需要知道结尾）
+    const lastPart = content.slice(-maxChars);
+    return `【已有内容的最后 ${maxChars} 字（全文共 ${content.length} 字）】\n${lastPart}`;
+  }
+
+  /**
    * 初始化目录结构
    */
   async initialize(): Promise<void> {

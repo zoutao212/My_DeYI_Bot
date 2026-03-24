@@ -235,7 +235,10 @@ function renderGroupedMessage(
     .filter(Boolean)
     .join(" ");
 
-  if (!markdown && hasToolCards && isToolResult) {
+  // 🔧 Fix: 同时支持 tool result 消息和 assistant 的 tool call 消息
+  // tool call 消息是 assistant 角色但包含 toolCall 类型的 content
+  const shouldRenderToolCardsOnly = !markdown && hasToolCards && (isToolResult || role === "assistant");
+  if (shouldRenderToolCardsOnly) {
     return html`${toolCards.map((card) =>
       renderToolCardSidebar(card, onOpenSidebar),
     )}`;

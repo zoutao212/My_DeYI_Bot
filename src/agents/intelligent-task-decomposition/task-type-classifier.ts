@@ -512,6 +512,260 @@ export function requiresFileOutput(taskType: TaskType): boolean {
   return ["writing", "coding", "data", "analysis", "research"].includes(taskType);
 }
 
+// ========================================
+// 🆕 任务子类型检测（用于智能分段决策）
+// ========================================
+
+/**
+ * 写作任务子类型
+ * 
+ * 用于更精细地判断任务的内在结构，从而决定是否分段以及如何分段。
+ */
+export type WritingSubtype = 
+  | "character_card"     // 人物卡/角色卡 — 按人物维度分段或不分段
+  | "plot_writing"       // 剧情写作 — 按场景/章节分段
+  | "creative_writing"   // 创意写作（小说、故事）— 按自然段落分段
+  | "technical_doc"      // 技术文档 — 按章节分段
+  | "translation"        // 翻译 — 按段落分段（可并行）
+  | "article"            // 文章/博客 — 按自然段落分段
+  | "generic_writing";   // 通用写作
+
+/**
+ * 任务子类型检测结果
+ */
+export interface SubtypeDetection {
+  /** 检测到的子类型 */
+  subtype: WritingSubtype;
+  /** 检测置信度 0-100 */
+  confidence: number;
+  /** 匹配的关键信号 */
+  matchedSignals: string[];
+  /** 推荐的分段策略 */
+  recommendedStrategy: {
+    shouldSegment: boolean;
+    segmentThreshold: number;     // 触发分段的字数阈值
+    segmentApproach: "chronological" | "character_focused" | "scene_based" | "chapter_based" | "none";
+    allowParallel: boolean;       // 是否允许并行分段
+    // 🔧 P113: 追加写入策略
+    appendMode: boolean;          // 是否使用追加写入模式（节省 token）
+    appendChunkSize: number;      // 每次追加的字数大小
+  };
+}
+
+/**
+ * 写作子类型检测规则
+ */
+const WRITING_SUBTYPE_RULES: Array<{
+  subtype: WritingSubtype;
+  keywords: string[];
+  patterns: RegExp[];
+  threshold: number;
+  approach: "chronological" | "character_focused" | "scene_based" | "chapter_based" | "none";
+  allowParallel: boolean;
+  // 🔧 P113: 追加写入策略
+  appendMode: boolean;      // 是否使用追加模式
+  appendChunkSize: number;  // 每次追加的字数
+}> = [
+  {
+    subtype: "character_card",
+    keywords: [
+      "人物卡", "角色卡", "人设卡", "character card", "character sheet",
+      "人物设定", "角色设定", "人物介绍", "角色介绍",
+      "人物档案", "角色档案", "人物资料", "角色资料",
+    ],
+    patterns: [
+      /(?:人物|角色|人设)\s*(?:卡|设定|介绍|档案|资料)/i,
+      /(?:为|给|创作|写)\s*[^，。！？]+(?:和|与|、)[^，。！？]+\s*(?:写|创作|制作)?\s*(?:人物|角色)\s*卡/i,
+      /(?:双人物卡|多人物卡|母女.*人物卡|父子.*人物卡)/i,
+      /character\s*card/i,
+    ],
+    threshold: 8000,  // 人物卡 8000 字以下不分段
+    approach: "character_focused",  // 按人物维度分段
+    allowParallel: true,  // 不同人物可以并行写作
+    // 🔧 P113: 人物卡使用追加写入模式
+    appendMode: true,
+    appendChunkSize: 2000,  // 每次追加约 2000 字
+  },
+  {
+    subtype: "plot_writing",
+    keywords: [
+      "剧情", "情节", "故事情节", "叙事", "剧情发展",
+      "场景描写", "情节推进", "剧情续写", "故事续写",
+      "plot", "scenario", "scene",
+    ],
+    patterns: [
+      /(?:剧情|情节|故事)\s*(?:写作|创作|续写|描写)/i,
+      /(?:写|创作|续写)\s*[^，。！？]*剧情/i,
+      /(?:第\s*\d+\s*[章节篇])|(?:chapter\s*\d+)/i,
+    ],
+    threshold: 5000,  // 剧情写作 5000 字以下不分段
+    approach: "scene_based",
+    allowParallel: false,  // 剧情需要保持连贯性
+    // 🔧 P113: 剧情写作使用追加写入模式
+    appendMode: true,
+    appendChunkSize: 1500,  // 每次追加约 1500 字（场景为单位）
+  },
+  {
+    subtype: "translation",
+    keywords: [
+      "翻译", "译文", "translate", "translation",
+      "译成", "翻译成", "中译", "英译",
+    ],
+    patterns: [
+      /(?:翻译|translate)\s*(?:成|为|into)?\s*(?:中文|英文|日文|中|英|日)/i,
+      /(?:把|将|把[^，。！？]+)\s*翻译/i,
+    ],
+    threshold: 3000,
+    approach: "chronological",
+    allowParallel: true,  // 翻译可以并行
+    // 翻译不适合追加模式（段落独立性）
+    appendMode: false,
+    appendChunkSize: 0,
+  },
+  {
+    subtype: "technical_doc",
+    keywords: [
+      "文档", "技术文档", "设计文档", "需求文档", "API文档",
+      "说明书", "手册", "指南", "规范", "标准",
+      "document", "documentation", "spec", "specification", "manual",
+    ],
+    patterns: [
+      /(?:技术|设计|需求|API|开发)?\s*文档/i,
+      /(?:编写|撰写|制作)\s*(?:技术|设计|需求)?\s*文档/i,
+    ],
+    threshold: 3000,
+    approach: "chapter_based",
+    allowParallel: true,
+    // 🔧 P113: 技术文档使用追加写入模式
+    appendMode: true,
+    appendChunkSize: 1500,  // 每个章节/小节约 1500 字
+  },
+  {
+    subtype: "article",
+    keywords: [
+      "文章", "博客", "blog", "论文", "essay",
+      "报告", "report", "新闻稿", "press release",
+    ],
+    patterns: [
+      /(?:写|创作|撰写)\s*(?:一篇|一个)?\s*(?:文章|博客|论文|报告)/i,
+      /(?:文章|博客|论文|报告)\s*(?:写作|创作)/i,
+    ],
+    threshold: 4000,
+    approach: "chronological",
+    allowParallel: false,
+    // 文章较短，不启用追加模式
+    appendMode: false,
+    appendChunkSize: 0,
+  },
+  {
+    subtype: "creative_writing",
+    keywords: [
+      "小说", "故事", "散文", "诗歌", "剧本", "童话",
+      "novel", "story", "fiction", "prose", "poem", "script",
+      "创作", "续写", "改写", "仿写",
+    ],
+    patterns: [
+      /(?:写|创作|续写)\s*(?:一个|一篇|一部)?\s*(?:小说|故事|散文|剧本)/i,
+      /(?:小说|故事|散文|剧本)\s*(?:写作|创作)/i,
+    ],
+    threshold: 5000,
+    approach: "chapter_based",
+    allowParallel: false,
+    // 🔧 P113: 创意写作使用追加写入模式
+    appendMode: true,
+    appendChunkSize: 2000,  // 每次追加约 2000 字
+  },
+];
+
+/**
+ * 检测写作任务的子类型
+ * 
+ * 根据任务内容智能判断任务的内在结构，从而决定：
+ * 1. 是否应该分段
+ * 2. 分段阈值应该是多少
+ * 3. 采用什么分段策略
+ * 
+ * @param prompt 任务 prompt
+ * @returns 子类型检测结果
+ */
+export function detectWritingSubtype(prompt: string): SubtypeDetection {
+  const lowerPrompt = prompt.toLowerCase();
+  
+  // 遍历所有子类型规则，找到最佳匹配
+  let bestMatch: SubtypeDetection | null = null;
+  let bestScore = 0;
+  
+  for (const rule of WRITING_SUBTYPE_RULES) {
+    // 关键词匹配
+    const matchedKeywords = rule.keywords.filter(kw => 
+      lowerPrompt.includes(kw.toLowerCase())
+    );
+    
+    // 结构模式匹配
+    const matchedPatterns = rule.patterns.filter(p => p.test(prompt));
+    
+    // 计算得分
+    const keywordScore = matchedKeywords.length * 15;
+    const patternScore = matchedPatterns.length * 25;
+    const totalScore = keywordScore + patternScore;
+    
+    if (totalScore > bestScore) {
+      bestScore = totalScore;
+      bestMatch = {
+        subtype: rule.subtype,
+        confidence: Math.min(100, totalScore + 30),  // 基础置信度 30
+        matchedSignals: [
+          ...matchedKeywords,
+          ...matchedPatterns.map(p => `[pattern:${p.source.substring(0, 20)}]`),
+        ],
+        recommendedStrategy: {
+          shouldSegment: true,  // 后续会根据字数阈值判断
+          segmentThreshold: rule.threshold,
+          segmentApproach: rule.approach,
+          allowParallel: rule.allowParallel,
+          // 🔧 P113: 追加写入策略
+          appendMode: rule.appendMode,
+          appendChunkSize: rule.appendChunkSize,
+        },
+      };
+    }
+  }
+  
+  // 如果没有匹配到特定子类型，返回通用写作
+  if (!bestMatch) {
+    return {
+      subtype: "generic_writing",
+      confidence: 50,
+      matchedSignals: [],
+      recommendedStrategy: {
+        shouldSegment: true,
+        segmentThreshold: 3000,  // 默认阈值 3000
+        segmentApproach: "chronological",
+        allowParallel: false,
+        // 🔧 P113: 默认不使用追加模式
+        appendMode: false,
+        appendChunkSize: 0,
+      },
+    };
+  }
+  
+  return bestMatch;
+}
+
+/**
+ * 获取任务的实际分段阈值
+ * 
+ * 综合考虑任务子类型和字数要求，返回最适合的分段触发阈值。
+ * 
+ * @param prompt 任务 prompt
+ * @param wordCount 字数要求（可选）
+ * @returns 分段阈值
+ */
+export function getSegmentThreshold(prompt: string, wordCount?: number): number {
+  const subtypeDetection = detectWritingSubtype(prompt);
+  return subtypeDetection.recommendedStrategy.segmentThreshold;
+}
+
 /**
  * 判断任务类型是否以文字量为主要质量指标
  */

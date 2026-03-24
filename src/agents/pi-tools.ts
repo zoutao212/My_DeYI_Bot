@@ -458,7 +458,10 @@ export function createClawdbotCodingTools(options?: {
   const minimized = shouldMinimizeForVectorengine
     ? subagentFiltered.filter((tool) => {
         const name = normalizeToolName(tool.name);
-        return name === "exec" || name === "process" || name === "read" || name === "edit" || name === "write";
+        // 核心工具 + supermemory 系列工具
+        const isCoreTool = name === "exec" || name === "process" || name === "read" || name === "edit" || name === "write";
+        const isSupermemoryTool = name.startsWith("supermemory_") || name.startsWith("superrecall");
+        return isCoreTool || isSupermemoryTool;
       })
     : subagentFiltered;
 

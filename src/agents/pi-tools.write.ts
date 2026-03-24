@@ -111,12 +111,15 @@ export function createEnhancedWriteTool(baseTool: AnyAgentTool): AnyAgentTool {
   
   // Update description
   const enhancedDescription = 
-    "Write content to a file with multiple modes: " +
-    "overwrite (default, replaces entire file), " +
-    "append (adds to end), " +
-    "insert (inserts at line), " +
+    "Write content to a file with multiple modes. " +
+    "**IMPORTANT: Use mode='append' to add content to an existing file without overwriting it.** " +
+    "Modes: " +
+    "overwrite (default, replaces entire file - USE WITH CAUTION), " +
+    "append (adds to end of file, preserves existing content), " +
+    "insert (inserts at specific line), " +
     "replace (replaces line range). " +
-    "Auto-creates parent directories.";
+    "Auto-creates parent directories. " +
+    "Example for appending: write(path='file.md', content='new content', mode='append')";
   
   const enhancedSchema = {
     ...schema,

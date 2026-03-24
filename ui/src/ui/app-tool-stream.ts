@@ -228,7 +228,13 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
       const msgs = host.chatMessages as Array<Record<string, unknown>>;
       let prevIdx = -1;
       for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i]._chatroomMsgId === tempKey) { prevIdx = i; break; }
+        const existingId = msgs[i]._chatroomMsgId;
+        const existingMessageId = msgs[i].messageId;
+        // 同时检查 _chatroomMsgId 和 messageId，确保不重复（兼容 chat 事件先创建的情况）
+        if (existingId === tempKey || existingMessageId === tempKey) {
+          prevIdx = i;
+          break;
+        }
       }
       // 如果有独立消息文本（chatroomMessageText），用它显示；否则用累积文本
       const displayText = chatroomMessageText ?? text;
@@ -240,8 +246,15 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
         _chatroomMsgId: tempKey,
       };
       if (prevIdx >= 0) {
+        // 消息已存在，只更新内容
         const next = [...(host.chatMessages as Array<Record<string, unknown>>)];
-        next[prevIdx] = message;
+        const existing = next[prevIdx];
+        next[prevIdx] = {
+          ...existing,
+          ...message,
+          // 保留 messageId 如果已经存在
+          messageId: existing.messageId ?? tempKey,
+        };
         host.chatMessages = next;
       } else {
         host.chatMessages = [...host.chatMessages, message];

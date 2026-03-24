@@ -136,10 +136,61 @@ export function buildSiblingContext(
   }
 
   // 🔧 限制总注入量：最多注入 5 个兄弟任务的上下文，避免 prompt 过长
-  const MAX_SIBLINGS = isContinuationTask ? 2 : 5;
+  // 🔧 P112: 分段子任务注入更多前文（最多 3 个）以保持文学连贯性
+  const MAX_SIBLINGS = isContinuationTask ? 3 : 5;
   if (relevantSiblings.length > MAX_SIBLINGS) {
     // 保留最后 N 个（最近完成的最相关）
     relevantSiblings = relevantSiblings.slice(-MAX_SIBLINGS);
+  }
+
+  // 🔧 P112: 文学创作的累积上下文机制
+  // 对于分段子任务，构建累积的前文内容，而非仅取最后一段
+  let accumulatedContext = "";
+  if (isSegmentTask && relevantSiblings.length > 1) {
+    // 尝试读取所有前序分段的文件内容并累积
+    const fs = require("node:fs");
+    const accumulatedParts: string[] = [];
+    let totalChars = 0;
+    const MAX_ACCUMULATED = 4000; // 累积上下文上限
+    
+    // 从最早的分段开始累积（保持时间顺序）
+    for (const sibling of relevantSiblings) {
+      const producedPaths = sibling.metadata?.producedFilePaths;
+      if (producedPaths && producedPaths.length > 0) {
+        for (const filePath of producedPaths) {
+          try {
+            const content = fs.readFileSync(filePath, "utf-8");
+            if (content.length > 0) {
+              const segmentIndex = (sibling as any)?.metadata?.segmentIndex;
+              const header = `\n--- 【分段 ${segmentIndex}】---\n`;
+              const partContent = header + content;
+              if (totalChars + partContent.length <= MAX_ACCUMULATED) {
+                accumulatedParts.push(partContent);
+                totalChars += partContent.length;
+              } else {
+                // 超出预算，只保留最后部分
+                const remaining = MAX_ACCUMULATED - totalChars;
+                if (remaining > 500) {
+                  accumulatedParts.push(partContent.slice(-remaining));
+                  totalChars = MAX_ACCUMULATED;
+                }
+                break;
+              }
+            }
+          } catch {
+            // 文件读取失败，跳过
+          }
+        }
+      }
+      if (totalChars >= MAX_ACCUMULATED) break;
+    }
+    
+    if (accumulatedParts.length > 0) {
+      accumulatedContext = `\n\n## 📚 累积前文（共 ${accumulatedParts.length} 个分段，${totalChars} 字）\n` +
+        `以下是本章节之前所有分段的内容，请仔细阅读以确保连贯性：\n` +
+        accumulatedParts.join("\n") +
+        `\n\n---\n**请从上文结尾处自然续写，保持风格、人物状态和情节的连贯性。**\n`;
+    }
   }
 
   const lines = relevantSiblings.map((t) => {
@@ -147,7 +198,8 @@ export function buildSiblingContext(
     // 🔧 问题 Q 修复：优先用 metadata.isContinuation 检测，回退到字符串匹配
     const isContinuation = (t as any)?.metadata?.isContinuation || (t as any)?.metadata?.isSegment || t.summary?.includes("续写") || false;
     // 🔧 修复：续写场景大幅增加上下文到 2000 字符
-    const effectiveMaxLen = isContinuation ? 2000 : maxSnippetLen;
+    // 🔧 P112: 如果已有累积上下文，单个分段只需要简短摘要
+    const effectiveMaxLen = accumulatedContext.length > 0 ? 300 : (isContinuation ? 2000 : maxSnippetLen);
 
     // 🆕 V9: 优先使用智能摘要（smartSummary）— 信息密度高且 token 消耗低
     // 智能摘要由 llm_light 在子任务完成后生成，包含：
@@ -192,6 +244,14 @@ export function buildSiblingContext(
       : effectiveOutput;
     return `- [${t.summary ?? "子任务"}]: ${snippet}`;
   });
+
+  // 🔧 P112: 组装最终上下文
+  // 如果有累积上下文，优先使用；否则使用传统的兄弟摘要
+  if (accumulatedContext) {
+    // 累积上下文模式：提供完整前文 + 关键信息提示
+    return accumulatedContext + (lines.length > 0 ? 
+      `\n\n## 关键衔接点\n${lines.slice(-1).join("\n")}` : "");
+  }
 
   return `\n\n## 已完成的关联任务\n${lines.join("\n")}`;
 }

@@ -17,10 +17,10 @@ import {
 // NOTE(steipete): Upstream read now does file-magic MIME detection; we keep the wrapper
 // to normalize payloads and sanitize oversized images before they hit providers.
 
-// P116: read 工具大文件截断上限（字符数）
-// 80K 字符 ≈ 40-50K tokens（CJK），与 V5 CHUNK_TARGET_CHARS 对齐。
-// 当用户未指定 offset/limit 且文件超过此阈值时，截断并提示使用分段读取。
-const MAX_READ_CONTENT_CHARS = 80_000;
+// P116/P117: read 工具大文件截断上限（字符数）
+// 与 session-tool-result-guard.ts 中的 MAX_TOOL_RESULT_CHARS (30K) 对齐
+// 避免读取后再被 session 截断，浪费资源
+const MAX_READ_CONTENT_CHARS = 30_000;
 
 type ToolContentBlock = AgentToolResult<unknown>["content"][number];
 type ImageContentBlock = Extract<ToolContentBlock, { type: "image" }>;

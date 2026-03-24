@@ -186,26 +186,41 @@ export function handleChatEvent(
       state.chatReasoningStream = null;
       
       const msgs = state.chatMessages as Array<Record<string, unknown>>;
+      // 检查是否已存在相同 _chatroomMsgId 的消息（可能由 agent 事件先创建）
       let prevIdx = -1;
       for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i]._chatroomMsgId === chatroomMessageId) {
+        const existingId = msgs[i]._chatroomMsgId;
+        const existingMessageId = msgs[i].messageId;
+        // 同时检查 _chatroomMsgId 和 messageId，确保不重复
+        if (existingId === chatroomMessageId || existingMessageId === chatroomMessageId) {
           prevIdx = i;
           break;
         }
       }
-      const message = {
-        role: "assistant",
-        messageId: chatroomMessageId,
-        content: [{ type: "text", text: chatroomMessageText }],
-        timestamp: Date.now(),
-        _chatroomRunId: payload.runId,
-        _chatroomMsgId: chatroomMessageId,
-      };
+      
+      // 如果消息已存在（由 agent 事件创建），只更新内容，不添加新消息
       if (prevIdx >= 0) {
         const next = [...msgs];
-        next[prevIdx] = message;
+        const existing = next[prevIdx];
+        // 保留原有的时间戳，只更新内容
+        next[prevIdx] = {
+          ...existing,
+          content: [{ type: "text", text: chatroomMessageText }],
+          messageId: chatroomMessageId,
+          _chatroomMsgId: chatroomMessageId,
+          _chatroomRunId: payload.runId,
+        };
         state.chatMessages = next;
       } else {
+        // 消息不存在，添加新消息
+        const message = {
+          role: "assistant",
+          messageId: chatroomMessageId,
+          content: [{ type: "text", text: chatroomMessageText }],
+          timestamp: Date.now(),
+          _chatroomRunId: payload.runId,
+          _chatroomMsgId: chatroomMessageId,
+        };
         state.chatMessages = [...msgs, message];
       }
       return payload.state;

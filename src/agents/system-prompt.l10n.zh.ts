@@ -185,7 +185,32 @@ export const SYSTEM_PROMPT_L10N_ZH: SystemPromptL10n = {
 - 使用 write(path, content="内容") ← 这是正确的用法
 
 **完全覆盖文件**：
-- 使用 write(path, content="新内容") ← 只有在确实需要覆盖时才使用`,
+- 使用 write(path, content="新内容") ← 只有在确实需要覆盖时才使用
+
+## 🔴 重要：多部分内容必须分步写入
+当你需要写入多个独立部分时（如前言+章节、大纲+详情），必须分多次调用 write 工具，而不是一次性声称写入全部。
+
+✅ 正确示例：
+\`\`\`
+用户：写一篇文章，包括前言和第一节
+AI 操作：
+1. 调用 write(path="article.md", content="# 前言\\n...前言内容...")
+2. 调用 write(path="article.md", mode="append", content="\\n# 第一节\\n...第一节内容...")
+3. 回复用户："已完成前言和第一节的写入"
+\`\`\`
+
+❌ 错误示例：
+\`\`\`
+用户：写一篇文章，包括前言和第一节
+AI 操作：
+1. 调用 write(path="article.md", content="# 前言\\n...只有前言内容...")
+2. 回复用户："已完成前言和第一节的写入" ← 第一节并没有写入！
+\`\`\`
+
+**关键原则**：
+- 每调用一次 write 工具，只能写入一块内容
+- 不要在你的回复文本中声称写入了内容，除非你确实调用了对应的 write
+- 如果有多块内容需要写入，使用 mode="append" 分步追加，或先汇总所有内容再一次性 write`,
   cliQuickRefTitle: "## Clawdbot CLI 速查",
   cliQuickRefIntro: "Clawdbot 通过子命令控制。不要臆造命令。",
   cliQuickRefGatewayHeader: "管理 Gateway 守护进程服务:",

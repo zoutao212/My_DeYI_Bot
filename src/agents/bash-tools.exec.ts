@@ -126,15 +126,18 @@ function maybeAutoApproveClaudePrompt(params: {
   }
 }
 
+// P117: 降低默认输出限制，避免 LLM 毫无节制地获取大量数据
+// 原值 200K 太大，与 session 截断限制 30K 差距太大，浪费资源
+// 新值 50K 更合理，接近 session 截断限制
 const DEFAULT_MAX_OUTPUT = clampNumber(
   readEnvInt("PI_BASH_MAX_OUTPUT_CHARS"),
-  200_000,
+  50_000,  // 从 200K 降低到 50K
   1_000,
-  200_000,
+  200_000, // 允许用户通过环境变量调高
 );
 const DEFAULT_PENDING_MAX_OUTPUT = clampNumber(
   readEnvInt("CLAWDBOT_BASH_PENDING_MAX_OUTPUT_CHARS"),
-  200_000,
+  50_000,  // 从 200K 降低到 50K
   1_000,
   200_000,
 );
@@ -1029,6 +1032,53 @@ async function runExecProcess(opts: {
   };
 }
 
+// P117: 检测可能产生大量输出的危险命令
+// 返回警告信息，如果没有警告则返回空字符串
+function detectHighOutputCommand(command: string): string {
+  const cmd = command.toLowerCase();
+  
+  // PowerShell 递归遍历
+  if (cmd.includes("get-childitem") && cmd.includes("-recurse")) {
+    return "Get-ChildItem -Recurse may produce massive output on large directories.";
+  }
+  if (cmd.includes("dir ") && cmd.includes("-recurse")) {
+    return "dir -Recurse may produce massive output on large directories.";
+  }
+  if (cmd.includes("ls ") && cmd.includes("-recurse")) {
+    return "ls -Recurse may produce massive output on large directories.";
+  }
+  if (cmd.includes("tree ") && !cmd.includes("/f")) {
+    // tree /f 会显示文件内容，更危险
+    return "tree command may produce massive output on large directories.";
+  }
+  
+  // Unix 递归遍历
+  if (cmd.includes("find ") && cmd.includes("-type") && !cmd.includes("-maxdepth")) {
+    return "find without -maxdepth may traverse entire filesystem.";
+  }
+  if (cmd.match(/\bfind\s+\//)) {
+    return "find on root directory may traverse entire filesystem.";
+  }
+  
+  // 大文件读取
+  if (cmd.includes("get-content") && !cmd.includes("-first") && !cmd.includes("-head") && !cmd.includes("-totalcount")) {
+    return "Get-Content without -First/-Head may read entire large files.";
+  }
+  if (cmd.match(/\bcat\s+\S+\.(log|txt|json|xml|csv)/i) && !cmd.includes("| head") && !cmd.includes("| select")) {
+    return "cat on large files may produce massive output.";
+  }
+  
+  // 危险的组合
+  if (cmd.includes("|") && cmd.includes("format-table") && !cmd.includes("| select")) {
+    return "Format-Table on large datasets may produce massive output.";
+  }
+  if (cmd.includes("|") && cmd.includes("format-list") && !cmd.includes("| select")) {
+    return "Format-List on large datasets may produce massive output.";
+  }
+  
+  return "";
+}
+
 export function createExecTool(
   defaults?: ExecToolDefaults,
   // biome-ignore lint/suspicious/noExplicitAny: TypeBox schema type from pi-agent-core uses a different module instance.
@@ -1065,7 +1115,8 @@ export function createExecTool(
     label: "exec",
     description:
       "Execute shell commands with background continuation. Use yieldMs/background to continue later via process tool. Use pty=true for TTY-required commands (terminal UIs, coding agents)." +
-      platformHint,
+      platformHint +
+      " Output is limited to ~50K chars; use pagination (| Select-Object -First N) to avoid truncation.",
     parameters: execSchema,
     execute: async (_toolCallId, args, signal, onUpdate) => {
       const params = args as {
@@ -1122,6 +1173,13 @@ export function createExecTool(
       const maxOutput = DEFAULT_MAX_OUTPUT;
       const pendingMaxOutput = DEFAULT_PENDING_MAX_OUTPUT;
       const warnings: string[] = [];
+
+      // P117: 危险命令检测 - 可能产生大量输出的命令
+      const outputWarningHint = detectHighOutputCommand(params.command);
+      if (outputWarningHint) {
+        warnings.push(`${outputWarningHint} Use -Depth, -First, -Head, or | Select-Object -First N to limit output.`);
+      }
+
       const backgroundRequested = params.background === true;
       const yieldRequested = typeof params.yieldMs === "number";
       if (!allowBackground && (backgroundRequested || yieldRequested)) {

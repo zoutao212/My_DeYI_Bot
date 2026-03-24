@@ -33,6 +33,7 @@ import { classifyTaskType, classifyAndEnrich, classifyTaskTypeWithLLM, getBluepr
 import type { ClawdbotConfig } from "../../config/config.js";
 import { getCP0DecomposeSignal, recordDecompositionDecision, type CP2DecisionSource } from "./intent-complexity-analyzer.js";
 import { createV2EnhancedExecutor, type V2EnhancedExecutor } from "./v2-enhanced-executor-v2.js";
+import { generateFileNameFromSummary } from "./filename-utils.js";
 
 /**
  * 任务分解协调器
@@ -1720,11 +1721,35 @@ export class Orchestrator {
     // ── 维度 1: 分类器建议（基于任务类型特征的启发式判断） ──
     const classifierSuggestsDecompose = classification.shouldAutoDecompose;
 
-    // ── 维度 2: 写作分段候选（V4 向后兼容） ──
+    // ── 维度 2: 写作分段候选（V4 向后兼容 + 🔧 P112 智能阈值） ──
     const extractedWordCount = this.qualityReviewer.extractWordCountRequirement(prompt);
+    
+    // 🔧 P112: 使用任务子类型检测来决定分段阈值
+    // 解决问题：人物卡类任务不应该被机械按字数分段
+    let segmentThreshold = 3000;  // 默认阈值提高到 3000（原 1500）
+    let taskSubtypeInfo: string | null = null;
+    
+    if (classification.type === "writing") {
+      try {
+        const { detectWritingSubtype } = require("./task-type-classifier.js") as typeof import("./task-type-classifier.js");
+        const subtypeDetection = detectWritingSubtype(prompt);
+        segmentThreshold = subtypeDetection.recommendedStrategy.segmentThreshold;
+        taskSubtypeInfo = `${subtypeDetection.subtype}(threshold=${segmentThreshold})`;
+        
+        if (subtypeDetection.confidence > 60) {
+          console.log(
+            `[Orchestrator] 🎯 P112: 检测到写作子类型 ${subtypeDetection.subtype} (置信度 ${subtypeDetection.confidence}%), ` +
+            `分段阈值调整为 ${segmentThreshold} 字`
+          );
+        }
+      } catch (err) {
+        console.warn(`[Orchestrator] ⚠️ P112: 子类型检测失败，使用默认阈值:`, err);
+      }
+    }
+    
     const isWritingSegmentCandidate = !!(
       extractedWordCount &&
-      extractedWordCount >= 1500 &&
+      extractedWordCount >= segmentThreshold &&
       classification.type === "writing"
     );
 
@@ -1784,7 +1809,7 @@ export class Orchestrator {
         `[Orchestrator] 📊 V6+UTIL: 子任务 ${subTask.id} type=${classification.type}(${classification.confidence}%) prompt=${promptLen}字符, ` +
         `depth=${subTask.depth ?? 0}/${maxDepth}, ` +
         `signals=[classifier=${classifierSuggestsDecompose}, long=${isLongPrompt}, wordCount=${hasLargeWordCount}, multiStep=${hasMultiStepSignals}` +
-        `, writingSegment=${isWritingSegmentCandidate}(${extractedWordCount ?? 0}字)` +
+        `, writingSegment=${isWritingSegmentCandidate}(${extractedWordCount ?? 0}字, threshold=${segmentThreshold}${taskSubtypeInfo ? `, subtype=${taskSubtypeInfo}` : ''})` +
         `, largeInput=${isLargeInputCandidate}(${detectedFilePath ?? "none"})` +
         `, cp0=${cp0Signal?.source ?? "none"}(lowerThreshold=${cp0LowerThreshold})] → 推荐自动分解`,
       );
@@ -2601,10 +2626,39 @@ export class Orchestrator {
     // 🆕 V4: 写作分段快捷路径 — 跳过 LLM 分解，直接按字数拆分
     // 条件：写作类 prompt + 字数要求 >= 1500 + 非分段子任务
     // 🆕 V6: 用统一分类器替代 isWritingPrompt()
+    // 🔧 P113: 支持追加写入模式
     const subTaskClassification = classifyTaskType(subTask.prompt);
     if (subTaskClassification.type === "writing" && !subTask.metadata?.isSegment) {
       const extractedWC = this.qualityReviewer.extractWordCountRequirement(subTask.prompt);
       if (extractedWC && extractedWC >= 1500) {
+        // 🔧 P113: 检测是否使用追加写入模式
+        let useAppendMode = false;
+        let appendChunkSize = 0;
+        try {
+          const { detectWritingSubtype } = require("./task-type-classifier.js") as typeof import("./task-type-classifier.js");
+          const subtypeDetection = detectWritingSubtype(subTask.prompt);
+          if (subtypeDetection.recommendedStrategy.appendMode) {
+            useAppendMode = true;
+            appendChunkSize = subtypeDetection.recommendedStrategy.appendChunkSize;
+            console.log(
+              `[Orchestrator] 📝 P113: 检测到追加写入模式 — subtype=${subtypeDetection.subtype}, ` +
+              `chunkSize=${appendChunkSize}, target=${extractedWC}字`
+            );
+          }
+        } catch (err) {
+          console.warn(`[Orchestrator] ⚠️ P113: 子类型检测失败，使用传统分段:`, err);
+        }
+
+        if (useAppendMode && appendChunkSize > 0) {
+          // 🔧 P113: 使用追加写入模式分解
+          const segments = await this.decomposeWritingTaskWithAppend(taskTree, subTask, extractedWC, appendChunkSize);
+          if (segments.length > 0) {
+            return segments;
+          }
+          console.log(`[Orchestrator] ℹ️ P113: 追加写入未生成，回退到传统分段`);
+        }
+
+        // 传统分段模式
         console.log(
           `[Orchestrator] 🔪 V4: 写作任务检测到字数要求 ${extractedWC}字，走分段快捷路径`,
         );
@@ -3293,6 +3347,230 @@ export class Orchestrator {
   }
 
   /**
+   * 🔧 P113: 追加写入模式分解
+   *
+   * 与传统分段模式不同，追加写入模式：
+   * 1. 所有分段子任务都写入同一个目标文件
+   * 2. 每个子任务负责追加内容而非重写整个文件
+   * 3. 大幅节省 token（避免每次都生成完整内容）
+   *
+   * 适用场景：
+   * - 人物卡/角色卡（按人物维度追加）
+   * - 剧情写作（按场景追加）
+   * - 技术文档（按章节追加）
+   * - 创意写作（按段落追加）
+   *
+   * @param taskTree 任务树
+   * @param subTask 要拆分的写作子任务
+   * @param targetChars 目标字数
+   * @param chunkSize 每次追加的字数
+   * @returns 创建的追加子任务列表
+   */
+  async decomposeWritingTaskWithAppend(
+    taskTree: TaskTree,
+    subTask: SubTask,
+    targetChars: number,
+    chunkSize: number,
+  ): Promise<SubTask[]> {
+    // 1. 计算追加次数
+    const appendCount = Math.max(2, Math.ceil(targetChars / chunkSize));
+    const charsPerAppend = Math.ceil(targetChars / appendCount);
+
+    // 2. 提取目标文件名
+    const fileNamePatterns = [
+      /文件\s*[`"'\u201C\u300C]+([^\s`"'\u201D\u300D\u3002\uFF0C\/\\]+\.(?:txt|md))/,
+      /文件[名：:]\s*([^\s`"'\u201C\u201D\u300C\u300D\u3002\uFF0C\/\\]+\.(?:txt|md))/,
+      /(?:写入|保存|输出)[^\n]*?[\\\/]([^\s\\\/`"'\u201C\u201D]+\.(?:txt|md))/,
+      /[`"'\u201C\u300C]([^\s`"'\u201C\u201D\u300C\u300D\u3002\uFF0C\/\\]+\.(?:txt|md))[`"'\u201D\u300D]*/,
+    ];
+    // 🔧 P116: 使用工具函数生成安全的文件名
+    let targetFileName = generateFileNameFromSummary(subTask.summary);
+    for (const pattern of fileNamePatterns) {
+      const m = subTask.prompt.match(pattern);
+      if (m?.[1]) {
+        const cleaned = m[1].replace(/^[：:"\u201C\u300C]+/, "");
+        if (cleaned.length > 0 && cleaned.includes(".")) {
+          targetFileName = cleaned;
+          break;
+        }
+      }
+    }
+
+    // 3. 检测写作子类型，决定追加策略
+    let appendStrategy = "sequential"; // 默认顺序追加
+    try {
+      const { detectWritingSubtype } = require("./task-type-classifier.js") as typeof import("./task-type-classifier.js");
+      const subtypeDetection = detectWritingSubtype(subTask.prompt);
+      appendStrategy = subtypeDetection.recommendedStrategy.segmentApproach;
+    } catch {
+      // 使用默认策略
+    }
+
+    console.log(
+      `[Orchestrator] 📝 P113: 追加写入分解 — ${subTask.id}\n` +
+      `  目标文件: ${targetFileName}\n` +
+      `  目标字数: ${targetChars}字, 分 ${appendCount} 次追加\n` +
+      `  每次约 ${charsPerAppend} 字, 策略: ${appendStrategy}`,
+    );
+
+    // 4. 将父任务标记为已分解
+    subTask.decomposed = true;
+    subTask.status = "active";
+    if (!subTask.metadata) subTask.metadata = {};
+    subTask.metadata.isRootTask = false;
+    subTask.metadata.appendTargetFile = targetFileName; // 记录目标文件
+    subTask.waitForChildren = true;
+
+    // 5. 创建追加子任务
+    const appendTasks: SubTask[] = [];
+    for (let i = 0; i < appendCount; i++) {
+      const appendIndex = i + 1;
+      const isFirst = i === 0;
+      const isLast = i === appendCount - 1;
+
+      // 构建追加 prompt
+      const appendPromptParts: string[] = [
+        `【追加写作 — 第 ${appendIndex}/${appendCount} 段】`,
+        ``,
+        `原始任务：${subTask.summary}`,
+      ];
+
+      // 注入章节大纲（如果有）
+      if (subTask.metadata?.chapterOutline) {
+        appendPromptParts.push(
+          ``,
+          `📖 内容大纲：`,
+          subTask.metadata.chapterOutline,
+        );
+      }
+
+      // 🔧 P113: 关键指令 — 追加模式
+      appendPromptParts.push(
+        ``,
+        `📝 **追加写入模式说明**：`,
+        `- 目标文件：「${targetFileName}」`,
+        `- ${isFirst ? "这是**第一段**，需要创建文件并写入开头部分" : "系统会自动读取已有内容，你只需要写**新的部分**"}`,
+        `- 本部分要求：约 ${charsPerAppend} 字`,
+      );
+
+      if (isFirst) {
+        appendPromptParts.push(
+          ``,
+          `你负责**开头部分**。请使用 write 工具创建文件「${targetFileName}」并写入开头内容。`,
+          `注意：文件是新建的，从头开始写。`,
+        );
+      } else {
+        appendPromptParts.push(
+          ``,
+          `你负责**第 ${appendIndex} 部分**。`,
+          `⚠️ 关键指令：`,
+          `- **使用 append 工具**（而非 write 工具）将新内容追加到文件末尾`,
+          `- 系统会自动提供前文内容作为上下文，你只需要写**后续的新内容**`,
+          `- 不要重复前文内容，只写新的部分`,
+          `- 保持风格、语气、人称与前后一致`,
+        );
+      }
+
+      if (isLast) {
+        appendPromptParts.push(
+          ``,
+          `这是**最后一段**，请确保：`,
+          `- 内容完整收束`,
+          `- 整体逻辑通顺`,
+          `- 达到或接近目标字数 ${targetChars} 字`,
+        );
+      }
+
+      // 文学创作指导
+      const isLiteraryWriting = /小说|故事|散文|剧本|创作|续写|剧情|人物|角色/.test(subTask.prompt);
+      if (isLiteraryWriting) {
+        appendPromptParts.push(
+          ``,
+          `🎨 **文学创作指导**：`,
+          `- 注重细节描写，用感官细节增强沉浸感`,
+          `- 展现而非告知：通过对话、行动、表情展现人物内心`,
+          `- 保持人物性格和情感的连贯性`,
+        );
+      }
+
+      // 原始任务参考
+      const originalPromptTruncated = subTask.prompt.length > 1500
+        ? subTask.prompt.substring(0, 1500) + "\n...[已截断]"
+        : subTask.prompt;
+      appendPromptParts.push(
+        ``,
+        `📋 原始任务要求（参考）：`,
+        originalPromptTruncated,
+      );
+
+      const appendPrompt = appendPromptParts.join("\n");
+
+      const appendSubTask: SubTask = {
+        id: `${subTask.id}-append-${appendIndex}`,
+        prompt: appendPrompt,
+        summary: `${subTask.summary}（追加 ${appendIndex}/${appendCount}）`,
+        status: "pending",
+        retryCount: 0,
+        createdAt: Date.now(),
+        parentId: subTask.id,
+        depth: (subTask.depth ?? 0) + 1,
+        children: [],
+        // 🔧 P113: 串行依赖（追加必须按顺序）
+        dependencies: isFirst ? [] : [`${subTask.id}-append-${appendIndex - 1}`],
+        canDecompose: false,
+        decomposed: false,
+        rootTaskId: subTask.rootTaskId,
+        roundId: subTask.roundId,
+        metadata: {
+          complexity: "medium" as const,
+          priority: "medium" as const,
+          isSegment: true,
+          isAppendTask: true,  // 🔧 P113: 标记为追加任务
+          segmentOf: subTask.id,
+          segmentIndex: appendIndex,
+          totalSegments: appendCount,
+          appendTargetFile: targetFileName,  // 🔧 P113: 目标文件
+          appendMode: true,  // 🔧 P113: 追加模式标记
+          segmentTargetChars: charsPerAppend,
+          requiresFileOutput: true,
+          outputContract: {
+            expectedFileName: targetFileName,
+            expectedLanguage: "zh",
+            minChars: Math.floor(charsPerAppend * 0.3),
+            maxChars: charsPerAppend * 2,
+          },
+        },
+      };
+
+      // 添加到任务树
+      await this.taskTreeManager.addSubTask(taskTree, subTask.id, appendSubTask);
+
+      // 加入 Round.subTaskIds
+      if (appendSubTask.rootTaskId) {
+        const round = this.findRound(taskTree, appendSubTask.rootTaskId);
+        if (round && !round.subTaskIds.includes(appendSubTask.id)) {
+          round.subTaskIds.push(appendSubTask.id);
+        }
+      }
+
+      appendTasks.push(appendSubTask);
+    }
+
+    // 6. 保存任务树
+    if (taskTree.metadata) {
+      taskTree.metadata.totalTasks = taskTree.subTasks.length;
+    }
+    await this.taskTreeManager.save(taskTree);
+
+    console.log(
+      `[Orchestrator] ✅ P113: 追加写入分解完成 — ${subTask.id} → ${appendTasks.length} 个追加子任务` +
+      ` (目标文件: ${targetFileName})`,
+    );
+
+    return appendTasks;
+  }
+
+  /**
    * 🆕 V4: 将写作子任务智能拆分为多个分段子任务
    * 
    * 适用场景：用户请求写一章 3000-12000 字的内容，但 maxTokens 限制了单次 LLM 输出。
@@ -3350,7 +3628,8 @@ export class Orchestrator {
       /[`"'\u201C\u300C]([^\s`"'\u201C\u201D\u300C\u300D\u3002\uFF0C\/\\]+\.(?:txt|md))[`"'\u201D\u300D]*/,
     ];
     // 🔧 P69: 默认值从 summary 生成时，清洗 Windows 非法文件名字符（:*?"<>| 和中文冒号：）
-    let chapterFileName = `${(subTask.summary ?? "output").replace(/[：:*?"<>|]/g, "_")}.txt`; // 默认值
+    // 🔧 P116: 使用工具函数生成安全的文件名（自动截断超长 summary）
+    let chapterFileName = generateFileNameFromSummary(subTask.summary);
     for (const pattern of fileNamePatterns) {
       const m = subTask.prompt.match(pattern);
       if (m?.[1]) {
@@ -3449,6 +3728,20 @@ export class Orchestrator {
           ``,
           `📖 章节完整大纲（请严格遵守，本段只写大纲中对应的部分）：`,
           effectiveChapterOutline,
+        );
+      }
+
+      // 🔧 P112: 注入文学创作专用指导（针对创意写作类任务）
+      const isLiteraryWriting = /小说|故事|散文|剧本|创作|续写|剧情|人物|角色/.test(subTask.prompt);
+      if (isLiteraryWriting) {
+        segmentPromptParts.push(
+          ``,
+          `🎨 **文学创作指导**：`,
+          `- 注重细节描写：用感官细节（视觉、听觉、触觉、嗅觉）增强沉浸感`,
+          `- 展现而非告知：通过对话、行动、表情来展现人物内心，避免直接陈述`,
+          `- 节奏控制：本段${isFirst ? '作为开篇，要设置悬念吸引读者' : isLast ? '作为结尾，要收束情感线索，给读者留下深刻印象' : '要推进剧情但保持张力，为后续埋下伏笔'}`,
+          `- 人物一致性：保持人物性格、情感状态的连贯性`,
+          `- 情感层次：注意情感的递进和转折，避免平铺直叙`,
         );
       }
 
@@ -5098,9 +5391,10 @@ ${childOutputs.join("\n\n---\n\n")}
         && task.metadata.requiresFileOutput
         && !task.metadata.outputContract;
       if (needsContract) {
+        // 🔧 P116: 使用工具函数生成安全的文件名
         const expectedName = task.metadata.segmentFileName
           ?? task.metadata.chapterFileName
-          ?? `${(task.summary ?? "output").replace(ILLEGAL_CHARS, "_")}.txt`;
+          ?? generateFileNameFromSummary(task.summary);
         task.metadata.outputContract = {
           expectedFileName: expectedName,
           expectedLanguage: "zh",

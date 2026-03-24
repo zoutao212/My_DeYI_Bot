@@ -382,12 +382,12 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       }
       
       // 🔧 P17 修复：串行队列保证请求间隔，消除 TOCTOU 竞态
-      await new Promise<void>((resolve) => {
-        requestGatePromise = requestGatePromise.then(async () => {
-          await new Promise(r => setTimeout(r, MIN_REQUEST_GAP_MS));
-          resolve();
-        });
+      // 🔧 Fix: 正确的串行队列实现
+      const queuePromise = requestGatePromise.then(async () => {
+        await new Promise(r => setTimeout(r, MIN_REQUEST_GAP_MS));
       });
+      requestGatePromise = queuePromise;
+      await queuePromise;
 
       const payload = await buildApprovalPayload({ input, init });
       if (!payload) {
@@ -560,7 +560,14 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
     
     // 修复 payload 中的格式问题（在发送前修复）
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    const isVectorengine = url.includes("vectorengine");
+    // 🔧 Fix: 区分 vectorengine 的不同 API 类型
+    // - /v1beta + google-generative-ai = Gemini 格式 (需要 thought_signature, functionCall)
+    // - /v1 + openai-completions = OpenAI 格式 (不需要转换，保持原样)
+    const isVectorengineGemini = url.includes("vectorengine") && url.includes("/v1beta");
+    const isVectorengineOpenAI = url.includes("vectorengine") && url.includes("/v1/") && !url.includes("/v1beta");
+    
+    // 🔧 DEBUG: 记录 URL 和判断结果
+    console.warn(`[llm-gated-fetch] [DEBUG] URL: ${url.substring(0, 80)}..., isVectorengineOpenAI=${isVectorengineOpenAI}, isVectorengineGemini=${isVectorengineGemini}`);
     
     if (init?.body && typeof init.body === "string") {
       try {
@@ -568,8 +575,8 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
         if (bodyJson && typeof bodyJson === "object") {
           let fixed = false;
           
-          // 修复 messages：vectorengine 使用 OpenAI 格式，但有特殊要求
-          if (isVectorengine && Array.isArray(bodyJson.messages)) {
+          // 修复 messages：仅对 vectorengine Gemini API 进行格式转换
+          if (isVectorengineGemini && Array.isArray(bodyJson.messages)) {
             // 第一步：找到所有 assistant + tool 对
             const toolCallPairs: Array<{ assistantIndex: number; toolIndex: number }> = [];
             
@@ -764,8 +771,8 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
             }
           }
           
-          // 修复 tools：vectorengine 需要 thought_signature
-          if (isVectorengine && Array.isArray(bodyJson.tools)) {
+          // 修复 tools：仅对 vectorengine Gemini API 添加 thought_signature
+          if (isVectorengineGemini && Array.isArray(bodyJson.tools)) {
             for (let i = 0; i < bodyJson.tools.length; i++) {
               const tool = bodyJson.tools[i];
               
@@ -788,13 +795,328 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
           }
           
           // 删除标记为需要删除的消息（内联后的 tool 消息）
-          if (isVectorengine && Array.isArray(bodyJson.messages)) {
+          if (isVectorengineGemini && Array.isArray(bodyJson.messages)) {
             const originalCount = bodyJson.messages.length;
             bodyJson.messages = bodyJson.messages.filter((msg: any) => !msg._shouldDelete);
             const deletedCount = originalCount - bodyJson.messages.length;
             if (deletedCount > 0) {
               console.warn(`[llm-gated-fetch] 删除了 ${deletedCount} 条内联后的 tool 消息`);
               fixed = true;
+            }
+          }
+          
+          // 🔧 Fix: Grok (vectorengine OpenAI API) 不支持 developer role，转换为 system
+          // 标准 OpenAI API 支持 developer，但很多第三方 API 不支持
+          if (isVectorengineOpenAI && Array.isArray(bodyJson.messages)) {
+            let convertedCount = 0;
+            for (const msg of bodyJson.messages) {
+              if (msg.role === "developer") {
+                msg.role = "system";
+                convertedCount++;
+              }
+            }
+            if (convertedCount > 0) {
+              console.warn(`[llm-gated-fetch] 🔄 Grok: 转换 developer → system role (${convertedCount} 条消息)`);
+              fixed = true;
+            }
+            
+            // 🔧 DISABLED: P121 解包 tool result 可能导致格式问题
+            // 暂时禁用，观察是否能解决超时问题
+            /*
+            let unwrappedCount = 0;
+            for (const msg of bodyJson.messages) {
+              if (msg.role === "tool" && typeof msg.content === "string") {
+                try {
+                  const parsed = JSON.parse(msg.content);
+                  if (parsed && typeof parsed === "object" && "result" in parsed) {
+                    msg.content = typeof parsed.result === "string" 
+                      ? parsed.result 
+                      : JSON.stringify(parsed.result);
+                    unwrappedCount++;
+                  }
+                } catch {
+                  // 不是 JSON，保持原样
+                }
+              }
+            }
+            if (unwrappedCount > 0) {
+              console.warn(`[llm-gated-fetch] 🔄 Grok: 解包 tool result JSON 包装 (${unwrappedCount} 条消息)`);
+              fixed = true;
+            }
+            */
+            
+            // 🔧 DISABLED: P121 压缩历史 tool calls 可能导致格式问题
+            // 暂时禁用，观察是否能解决超时问题
+            /*
+            const toolCallPairsOpenAI: Array<{ assistantIndex: number; toolIndices: number[] }> = [];
+            
+            for (let i = 0; i < bodyJson.messages.length; i++) {
+              const msg = bodyJson.messages[i];
+              if (msg.role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+                const toolIndices: number[] = [];
+                for (let j = i + 1; j < bodyJson.messages.length; j++) {
+                  if (bodyJson.messages[j].role === "tool") {
+                    toolIndices.push(j);
+                  } else {
+                    break;
+                  }
+                }
+                if (toolIndices.length > 0) {
+                  toolCallPairsOpenAI.push({ assistantIndex: i, toolIndices });
+                }
+              }
+            }
+            
+            if (toolCallPairsOpenAI.length > 1) {
+              console.warn(`[llm-gated-fetch] 🔧 Grok: 压缩历史 tool calls (${toolCallPairsOpenAI.length - 1} 对)`);
+              
+              for (let pairIdx = 0; pairIdx < toolCallPairsOpenAI.length - 1; pairIdx++) {
+                const pair = toolCallPairsOpenAI[pairIdx];
+                const assistantMsg = bodyJson.messages[pair.assistantIndex];
+                
+                const summaryParts: string[] = [];
+                
+                if (typeof assistantMsg.content === "string" && assistantMsg.content.trim()) {
+                  summaryParts.push(truncateText(assistantMsg.content.trim(), 200));
+                } else if (Array.isArray(assistantMsg.content)) {
+                  const textContent = assistantMsg.content
+                    .filter((b: any) => b.type === "text" && typeof b.text === "string")
+                    .map((b: any) => b.text)
+                    .join("\n");
+                  if (textContent.trim()) {
+                    summaryParts.push(truncateText(textContent.trim(), 200));
+                  }
+                }
+                
+                if (Array.isArray(assistantMsg.tool_calls)) {
+                  for (let tcIdx = 0; tcIdx < assistantMsg.tool_calls.length; tcIdx++) {
+                    const tc = assistantMsg.tool_calls[tcIdx];
+                    const toolName = tc?.function?.name || "unknown";
+                    
+                    let argsPreview = "";
+                    if (tc?.function?.arguments) {
+                      try {
+                        const args = typeof tc.function.arguments === "string" 
+                          ? JSON.parse(tc.function.arguments) 
+                          : tc.function.arguments;
+                        
+                        if ((toolName === "write" || toolName === "edit") && args.content) {
+                          const contentPreview = typeof args.content === "string" 
+                            ? truncateText(args.content.replace(/\s+/g, " "), 100)
+                            : "[复杂内容]";
+                          argsPreview = ` (content: ${contentPreview})`;
+                        } else if (args.path) {
+                          argsPreview = ` (path: ${args.path})`;
+                        }
+                      } catch {
+                        // 解析失败，忽略
+                      }
+                    }
+                    
+                    let resultPreview = "已完成";
+                    const toolMsgIdx = pair.toolIndices[tcIdx];
+                    if (toolMsgIdx !== undefined) {
+                      const toolMsg = bodyJson.messages[toolMsgIdx];
+                      if (toolMsg && typeof toolMsg.content === "string") {
+                        resultPreview = truncateText(toolMsg.content.replace(/\s+/g, " "), 100);
+                      }
+                    }
+                    
+                    summaryParts.push(`[工具: ${toolName}${argsPreview}] → ${resultPreview}`);
+                  }
+                }
+                
+                assistantMsg.content = summaryParts.join("\n\n");
+                delete assistantMsg.tool_calls;
+                
+                for (const toolIdx of pair.toolIndices) {
+                  (bodyJson.messages[toolIdx] as any)._shouldDelete = true;
+                }
+                
+                fixed = true;
+              }
+              
+              const originalCount = bodyJson.messages.length;
+              bodyJson.messages = bodyJson.messages.filter((msg: any) => !msg._shouldDelete);
+              const deletedCount = originalCount - bodyJson.messages.length;
+              
+              console.warn(`[llm-gated-fetch] 🔧 Grok: 删除了 ${deletedCount} 条压缩后的 tool 消息`);
+            }
+            */
+          }
+          
+          // 🔧 Fix: Grok (vectorengine OpenAI API) tool schema 清理
+          // 某些 JSON Schema 字段可能不被 Grok API 支持，需要移除
+          if (isVectorengineOpenAI && Array.isArray(bodyJson.tools)) {
+            // 定义 Grok 可能不支持的 schema 字段
+            const GROK_UNSUPPORTED_SCHEMA_KEYWORDS = new Set([
+              "$schema", "$id", "$ref", "$defs", "definitions",
+              "examples", "patternProperties", "propertyNames",
+              "minLength", "maxLength", "minimum", "maximum", 
+              "multipleOf", "pattern", "format",
+              "minItems", "maxItems", "uniqueItems",
+              "minProperties", "maxProperties",
+              "if", "then", "else", "dependentSchemas", "dependentRequired",
+              // OpenAI 特有的字段，Grok 可能不支持
+              "strict", "additionalProperties"
+            ]);
+            
+            function cleanSchemaForGrok(schema: unknown): unknown {
+              if (!schema || typeof schema !== "object") return schema;
+              if (Array.isArray(schema)) {
+                return schema.map(cleanSchemaForGrok);
+              }
+              
+              const obj = schema as Record<string, unknown>;
+              const cleaned: Record<string, unknown> = {};
+              
+              for (const [key, value] of Object.entries(obj)) {
+                // 跳过不支持的字段
+                if (GROK_UNSUPPORTED_SCHEMA_KEYWORDS.has(key)) {
+                  continue;
+                }
+                
+                // 递归清理嵌套结构
+                if (key === "properties" && value && typeof value === "object") {
+                  const props = value as Record<string, unknown>;
+                  cleaned[key] = Object.fromEntries(
+                    Object.entries(props).map(([k, v]) => [k, cleanSchemaForGrok(v)])
+                  );
+                } else if (key === "items" && value) {
+                  if (Array.isArray(value)) {
+                    cleaned[key] = value.map(cleanSchemaForGrok);
+                  } else if (typeof value === "object") {
+                    cleaned[key] = cleanSchemaForGrok(value);
+                  } else {
+                    cleaned[key] = value;
+                  }
+                } else if ((key === "anyOf" || key === "oneOf" || key === "allOf") && Array.isArray(value)) {
+                  cleaned[key] = value.map(cleanSchemaForGrok);
+                } else {
+                  cleaned[key] = value;
+                }
+              }
+              
+              return cleaned;
+            }
+            
+            let cleanedToolCount = 0;
+            for (let i = 0; i < bodyJson.tools.length; i++) {
+              const tool = bodyJson.tools[i];
+              if (tool?.function?.parameters) {
+                const originalParams = tool.function.parameters;
+                const cleanedParams = cleanSchemaForGrok(originalParams);
+                if (JSON.stringify(originalParams) !== JSON.stringify(cleanedParams)) {
+                  tool.function.parameters = cleanedParams;
+                  cleanedToolCount++;
+                }
+              }
+            }
+            
+            if (cleanedToolCount > 0) {
+              console.warn(`[llm-gated-fetch] 🧹 Grok: 清理 tool schema (${cleanedToolCount}/${bodyJson.tools.length} 个工具)`);
+              fixed = true;
+            }
+          }
+          
+          // 🆕 DEBUG: Grok 请求详情日志
+          if (isVectorengineOpenAI) {
+            const hasTools = Array.isArray(bodyJson.tools) && bodyJson.tools.length > 0;
+            const hasStream = bodyJson.stream === true;
+            const modelName = bodyJson.model || "unknown";
+            const isReasoningModel = modelName.includes("reasoning");
+            
+            // 计算消息统计
+            const msgCount = Array.isArray(bodyJson.messages) ? bodyJson.messages.length : 0;
+            let totalContentChars = 0;
+            let maxContentChars = 0;
+            if (Array.isArray(bodyJson.messages)) {
+              for (const msg of bodyJson.messages) {
+                if (typeof msg.content === "string") {
+                  totalContentChars += msg.content.length;
+                  maxContentChars = Math.max(maxContentChars, msg.content.length);
+                } else if (Array.isArray(msg.content)) {
+                  for (const block of msg.content) {
+                    if (block.type === "text" && typeof block.text === "string") {
+                      totalContentChars += block.text.length;
+                      maxContentChars = Math.max(maxContentChars, block.text.length);
+                    }
+                  }
+                }
+              }
+            }
+            
+            console.warn(`[llm-gated-fetch] [DEBUG-Grok] 模型: ${modelName}, 推理模型: ${isReasoningModel}`);
+            console.warn(`[llm-gated-fetch] [DEBUG-Grok] tools数量: ${hasTools ? bodyJson.tools.length : 0}, stream: ${hasStream}`);
+            console.warn(`[llm-gated-fetch] [DEBUG-Grok] 消息统计: ${msgCount}条, 总字符: ${totalContentChars}, 最大单条: ${maxContentChars}`);
+            
+            // 🔧 Fix: Grok reasoning 模型 + tools 的特殊参数配置
+            if (isReasoningModel && hasTools) {
+              console.warn(`[llm-gated-fetch] [DEBUG-Grok] ⚠️ 推理模型 + tools 组合，添加必要参数`);
+              
+              // 添加 tool_choice: auto（让模型自动选择是否调用工具）
+              if (!bodyJson.tool_choice) {
+                bodyJson.tool_choice = "auto";
+                fixed = true;
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok] 添加 tool_choice: auto`);
+              }
+              
+              // 添加 parallel_tool_calls: false（Grok 可能不支持并行工具调用）
+              if (bodyJson.parallel_tool_calls === undefined) {
+                bodyJson.parallel_tool_calls = false;
+                fixed = true;
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok] 添加 parallel_tool_calls: false`);
+              }
+              
+              // 🔧 Fix: 某些 API 在 tool calling 模式下 streaming 可能不工作
+              // 尝试禁用 stream 看看是否能解决问题
+              if (bodyJson.stream === true) {
+                // 不直接禁用，而是记录警告，让用户知道可能的问题
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok] ⚠️ stream=true + tools + reasoning 组合可能导致空响应`);
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok] 如果返回空响应，考虑在配置中禁用该模型的 toolCalling`);
+              }
+            }
+            
+            // 🔍 打印第一个 tool 的 schema 结构（调试用）
+            if (hasTools && bodyJson.tools[0]?.function) {
+              const firstTool = bodyJson.tools[0];
+              const paramKeys = firstTool.function.parameters 
+                ? Object.keys(firstTool.function.parameters as object)
+                : [];
+              console.warn(`[llm-gated-fetch] [DEBUG-Grok] 第一个tool: ${firstTool.function.name}, params字段: [${paramKeys.join(", ")}]`);
+            }
+            
+            // 🔧 Fix: 检查并修复可能不兼容的参数组合
+            // Grok 可能不支持某些 OpenAI 特有的参数
+            const incompatibleParams = ["reasoning_effort", "response_format", "store", "metadata"];
+            for (const param of incompatibleParams) {
+              if (param in bodyJson) {
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok] 移除可能不兼容的参数: ${param}`);
+                delete (bodyJson as Record<string, unknown>)[param];
+                fixed = true;
+              }
+            }
+            
+            // 🆕 P121: Grok reasoning 模型长上下文优化
+            // 当消息数量过多时，保留系统消息 + 最近用户消息 + 最后一次 tool call
+            if (isReasoningModel && Array.isArray(bodyJson.messages)) {
+              const MAX_GROK_MESSAGES = 10; // 最多保留 10 条消息
+              
+              if (bodyJson.messages.length > MAX_GROK_MESSAGES) {
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok] ⚠️ 消息过多 (${bodyJson.messages.length}条)，截断至 ${MAX_GROK_MESSAGES} 条`);
+                
+                // 保留策略：系统消息 + 最近的消息
+                const systemMessages = bodyJson.messages.filter((m: any) => m.role === "system");
+                const nonSystemMessages = bodyJson.messages.filter((m: any) => m.role !== "system");
+                
+                // 保留最近的 N 条非系统消息
+                const recentMessages = nonSystemMessages.slice(-(MAX_GROK_MESSAGES - systemMessages.length));
+                
+                bodyJson.messages = [...systemMessages, ...recentMessages];
+                fixed = true;
+                
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok] 截断后: ${bodyJson.messages.length} 条消息`);
+              }
             }
           }
           
@@ -843,12 +1165,15 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
         }
       }
       
-      // 🔍 DEBUG: 打印原始 API 响应 body（排查 tool call 缺失）
-      // 仅对 Gemini 格式 API（v1beta）生效，异步读取不阻塞主流程
+      // 🔍 DEBUG: 打印原始 API 响应 body（排查 tool call 缺失、空响应等问题）
+      // 对所有 LLM API 生效，异步读取不阻塞主流程
       {
         const reqUrl = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
-        const isGeminiApi = reqUrl.includes("v1beta") || reqUrl.includes("generativelanguage");
-        if (isGeminiApi) {
+        const isLlmApi = reqUrl.includes("v1beta") || 
+                         reqUrl.includes("generativelanguage") || 
+                         reqUrl.includes("/v1/chat/completions") ||
+                         reqUrl.includes("/v1/responses");
+        if (isLlmApi) {
           try {
             const cloned = response.clone();
             // 异步读取，不阻塞返回
@@ -856,7 +1181,25 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
               const preview = bodyText.length > 2000 ? bodyText.slice(0, 2000) + `...(${bodyText.length} chars total)` : bodyText;
               const hasFunctionCall = bodyText.includes("functionCall");
               const hasToolCalls = bodyText.includes("tool_calls");
-              console.warn(`[llm-gated-fetch] 🔍 RAW RESPONSE from ${reqUrl.replace(/\?.*/, "")}: status=${response.status} hasFunctionCall=${hasFunctionCall} hasToolCalls=${hasToolCalls} bodyPreview=${preview}`);
+              const hasReasoning = bodyText.includes("reasoning_content") || bodyText.includes("reasoning_text");
+              const hasThinking = bodyText.includes("thinking");
+              const hasContent = bodyText.includes("content") && !bodyText.includes('"content":[]') && !bodyText.includes('"content":null');
+              const isEmptyChoices = bodyText.includes('"choices":[]') || bodyText.includes('"choices": []');
+              
+              const isGrokApi = reqUrl.includes("vectorengine") && reqUrl.includes("/v1/");
+              
+              console.warn(`[llm-gated-fetch] 🔍 RAW RESPONSE from ${reqUrl.replace(/\?.*/, "")}: status=${response.status} hasFunctionCall=${hasFunctionCall} hasToolCalls=${hasToolCalls} hasReasoning=${hasReasoning} hasThinking=${hasThinking} hasContent=${hasContent} isEmptyChoices=${isEmptyChoices} bodyPreview=${preview}`);
+              
+              // 🆕 DEBUG: Grok API 空响应检测
+              // 🔧 Fix: 正确的空响应判断 - 有 tool_calls/functionCall 的响应不是空响应
+              const hasValidToolResponse = hasFunctionCall || hasToolCalls;
+              const isTrulyEmpty = !hasContent && !hasValidToolResponse && !hasReasoning && !hasThinking;
+              if (isGrokApi && isTrulyEmpty) {
+                console.error(`[llm-gated-fetch] ❌ [DEBUG-Grok] 检测到空响应！可能需要调整请求参数`);
+                console.error(`[llm-gated-fetch] ❌ [DEBUG-Grok] 建议：尝试移除 tools 或设置 stream=false`);
+              } else if (isGrokApi && hasValidToolResponse) {
+                console.warn(`[llm-gated-fetch] ✅ [DEBUG-Grok] 检测到有效 tool 调用响应，非空响应`);
+              }
               
               // 💾 存储 tool call 数据（用于下一次审批 UI 展示）
               if (hasFunctionCall || hasToolCalls) {
@@ -951,6 +1294,12 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       // 重试（使用指数退避）
       const retryDelay = computeRetryDelay(currentAttempt?.failureCount || 1);
       console.warn(`[llm-gated-fetch] 🔄 正在重试 LLM 请求（第 ${currentAttempt?.failureCount || 1} 次失败后重试），等待 ${retryDelay}ms...`);
+      
+      // 🔧 DEBUG: 追踪重试时的参数状态
+      const bodyType = typeof init?.body;
+      const bodyLength = typeof init?.body === "string" ? init.body.length : 0;
+      console.warn(`[llm-gated-fetch] [DEBUG-Retry] input类型=${typeof input}, init.body类型=${bodyType}, init.body长度=${bodyLength}`);
+      
       await new Promise(resolve => setTimeout(resolve, retryDelay));
       return executeRequestWithRetry(attemptKey, input, init);
     }
