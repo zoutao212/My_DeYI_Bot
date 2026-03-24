@@ -343,6 +343,96 @@ function sanitizeAntigravityThinkingBlocks(messages: AgentMessage[]): AgentMessa
   return touched ? out : messages;
 }
 
+/**
+ * 🧹 Grok 专用：将历史消息中的 toolCall 无害化处理
+ * - 将 assistant 消息中的 toolCall blocks 转换为普通文本描述
+ * - 移除对应的 toolResult 消息（因为 toolCall 已转文本，不再需要结果）
+ * - 避免 Grok 推理模型因 toolcall 格式问题卡住
+ */
+function sanitizeGrokToolCalls(messages: AgentMessage[]): AgentMessage[] {
+  const convertedToolCallIds = new Set<string>();
+  const out: AgentMessage[] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i] as AgentMessage;
+    if (!msg || typeof msg !== "object") {
+      out.push(msg);
+      continue;
+    }
+
+    const role = (msg as { role?: unknown }).role;
+
+    // 处理 assistant 消息中的 toolCall blocks
+    if (role === "assistant") {
+      const assistant = msg as Extract<AgentMessage, { role: "assistant" }>;
+      if (Array.isArray(assistant.content)) {
+        type AssistantContentBlock = Extract<AgentMessage, { role: "assistant" }>["content"][number];
+        const nextContent: AssistantContentBlock[] = [];
+        let contentChanged = false;
+
+        for (const block of assistant.content) {
+          if (!block || typeof block !== "object") {
+            nextContent.push(block);
+            continue;
+          }
+
+          const rec = block as { type?: unknown; id?: unknown; name?: unknown; arguments?: unknown };
+
+          // 检测 toolCall 类型
+          if (rec.type === "toolCall" || rec.type === "toolUse" || rec.type === "functionCall") {
+            const toolCallId = typeof rec.id === "string" ? rec.id : "unknown";
+            const toolName = typeof rec.name === "string" ? rec.name : "unknownTool";
+            const args = rec.arguments ? JSON.stringify(rec.arguments) : "{}";
+
+            convertedToolCallIds.add(toolCallId);
+
+            // 转换为文本描述
+            const textBlock = {
+              type: "text" as const,
+              text: `[toolCall: ${toolName}(${args})]`,
+            };
+            nextContent.push(textBlock as AssistantContentBlock);
+            contentChanged = true;
+          } else {
+            nextContent.push(block);
+          }
+        }
+
+        if (contentChanged) {
+          // 如果只有 toolCall，转成文本后变成空（全部被转换了），保留一个空内容或者直接跳过
+          if (nextContent.length === 0) {
+            // 跳过这个 assistant 消息，因为它的内容全部是 toolCall
+            continue;
+          }
+          out.push({ ...assistant, content: nextContent });
+        } else {
+          out.push(msg);
+        }
+        continue;
+      }
+    }
+
+    // 处理 toolResult 消息：移除已被无害化的 toolCall 对应的结果
+    if (role === "toolResult") {
+      const toolResult = msg as Extract<AgentMessage, { role: "toolResult" }>;
+      const toolCallId = (toolResult as { toolCallId?: unknown }).toolCallId;
+      const toolUseId = (toolResult as { toolUseId?: unknown }).toolUseId;
+      const id = typeof toolCallId === "string" ? toolCallId : typeof toolUseId === "string" ? toolUseId : null;
+
+      if (id && convertedToolCallIds.has(id)) {
+        // 跳过这个 toolResult，因为它对应的 toolCall 已被转换为文本
+        continue;
+      }
+      out.push(msg);
+      continue;
+    }
+
+    out.push(msg);
+  }
+
+  return out;
+}
+
 function findUnsupportedSchemaKeywords(schema: unknown, path: string): string[] {
   if (!schema || typeof schema !== "object") return [];
   if (Array.isArray(schema)) {
@@ -886,14 +976,28 @@ export async function sanitizeSessionHistory(params: {
     ? sanitizeToolUseResultPairing(sanitizedThinking)
     : sanitizedThinking;
 
+  // 🧹 Grok 专用：将历史消息中的 toolCall 无害化处理
+  // Grok 推理模型对 toolcall 格式处理有问题，会导致卡住不响应
+  const isGrokProvider =
+    (params.provider && params.provider.toLowerCase().includes("grok")) ||
+    (params.modelId && params.modelId.toLowerCase().includes("grok"));
+  const grokSafeMessages = isGrokProvider ? sanitizeGrokToolCalls(repairedTools) : repairedTools;
+  if (isGrokProvider) {
+    log.info(`[sanitize] 🧹 Grok toolCall 无害化处理完成`, {
+      provider: params.provider,
+      modelId: params.modelId,
+      sessionId: params.sessionId,
+    });
+  }
+
   const shouldEnsureThoughtSignatures = shouldEnsureGeminiToolThoughtSignatures({
     provider: params.provider,
     modelApi: params.modelApi,
     modelId: params.modelId,
   });
   const ensured = shouldEnsureThoughtSignatures
-    ? ensureGeminiToolThoughtSignatures(repairedTools)
-    : { messages: repairedTools, report: { added: 0, byTool: {} } };
+    ? ensureGeminiToolThoughtSignatures(grokSafeMessages)
+    : { messages: grokSafeMessages, report: { added: 0, byTool: {} } };
   if (shouldEnsureThoughtSignatures && ensured.report.added > 0) {
     log.info("gemini tool thoughtSignature: filled missing signatures", {
       provider: params.provider,

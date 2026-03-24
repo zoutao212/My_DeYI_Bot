@@ -1175,13 +1175,12 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
                 console.warn(`[llm-gated-fetch] [DEBUG-Grok] 添加 parallel_tool_calls: false`);
               }
               
-              // 🔧 Fix: 某些 API 在 tool calling 模式下 streaming 可能不工作
-              // 检测风险组合并记录警告，但不强制禁用 stream
-              // ⚠️ P131 已禁用：stream=false 会导致 Grok 直接卡死，保持 stream=true
-              if (bodyJson.stream === true) {
-                console.warn(`[llm-gated-fetch] [DEBUG-Grok] ⚠️ stream=true + tools + reasoning 组合，可能导致问题但保持 stream=true`);
-                // bodyJson.stream = false; // ❌ 已禁用：会导致直接卡死
-                // fixed = true;
+              // 🔧 Fix: 推理模型 + tools 默认使用非流式，避免空响应问题
+              // 直接设置 stream=false，因为 stream=true 会先返回空响应再降级，浪费时间
+              if (bodyJson.stream !== false) {
+                bodyJson.stream = false;
+                fixed = true;
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok] 🔧 默认设置 stream=false（推理模型+tools）`);
               }
             }
             
@@ -1379,8 +1378,21 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       
       // 🔧 P131: 当 forceNonStream=true 时，需要将非流式响应转换为 SSE 格式
       // OpenAI SDK 的 streamOpenAICompletions 期望 SSE 格式，不处理非流式 JSON
-      if (forceNonStream && response.ok) {
-        const reqUrl = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+      // 另外：如果检测到 Grok 推理模型 + tools，也要强制转换（因为 stream=false 直接返回非流式响应）
+      // 注意：reqUrl 和 isGrokApi 已在 P127 段声明，这里直接使用
+      
+      // 检测是否需要强制转换：forceNonStream 或者 Grok推理模型+tools
+      let p131BodyJson: any = {};
+      try {
+        if (typeof actualInit?.body === "string") {
+          p131BodyJson = JSON.parse(actualInit.body);
+        }
+      } catch {}
+      const isReasoningModelWithTools = isGrokApi &&
+        typeof p131BodyJson.model === "string" && p131BodyJson.model.includes("reasoning") &&
+        Array.isArray(p131BodyJson.tools) && p131BodyJson.tools.length > 0;
+      
+      if ((forceNonStream || isReasoningModelWithTools) && response.ok) {
         const isOpenAICompletions = reqUrl.includes("/v1/chat/completions");
         
         if (isOpenAICompletions) {
@@ -1409,37 +1421,58 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
                       index: idx,
                       id: tc.id || "",
                       type: tc.type || "function",
-                      function: tc.function || { name: "", arguments: "" }
+                      function: {
+                        name: tc.function?.name || "",
+                        arguments: tc.function?.arguments || "",
+                        parameters: tc.function?.parameters  // 保留 parameters 字段！
+                      }
                     }));
                   }
                   
-                  // 创建 delta 格式的 chunk
-                  const delta: Record<string, unknown> = {
+                  const hasToolCalls = deltaToolCalls && deltaToolCalls.length > 0;
+                  const hasContent = choice.message.content && choice.message.content.trim().length > 0;
+                  const finishReason = choice.finish_reason || "stop";
+                  
+                  // 🧩 2-chunk 格式：第一个chunk包含所有内容，第二个chunk只包含finish_reason
+                  // 这样 SDK 可以正确累积 tool_calls 数据
+                  
+                  // Chunk 1: 所有内容 + finish_reason: null（让 SDK 继续等待）
+                  const delta1: Record<string, unknown> = {
                     role: "assistant",
                   };
-                  
-                  // 只有有内容时才添加 content
-                  if (choice.message.content) {
-                    delta.content = choice.message.content;
+                  if (hasContent) {
+                    delta1.content = choice.message.content;
+                  }
+                  if (hasToolCalls) {
+                    delta1.tool_calls = deltaToolCalls;
                   }
                   
-                  // 只有有 tool_calls 时才添加
-                  if (deltaToolCalls && deltaToolCalls.length > 0) {
-                    delta.tool_calls = deltaToolCalls;
-                  }
-                  
-                  const sseChunk = {
+                  const chunk1 = {
                     id: nonStreamResponse.id || `chatcmpl-${Date.now()}`,
                     object: "chat.completion.chunk",
                     created: nonStreamResponse.created || Math.floor(Date.now() / 1000),
                     model: nonStreamResponse.model || "unknown",
                     choices: [{
                       index: choice.index || 0,
-                      delta: delta,
-                      finish_reason: choice.finish_reason || "stop"
+                      delta: delta1,
+                      finish_reason: null  // null 让 SDK 知道还有更多数据
                     }]
                   };
-                  sseChunks.push(`data: ${JSON.stringify(sseChunk)}`);
+                  sseChunks.push(`data: ${JSON.stringify(chunk1)}`);
+                  
+                  // Chunk 2: 只有 finish_reason（告诉 SDK 数据结束）
+                  const chunk2 = {
+                    id: nonStreamResponse.id,
+                    object: "chat.completion.chunk",
+                    created: nonStreamResponse.created,
+                    model: nonStreamResponse.model,
+                    choices: [{
+                      index: choice.index || 0,
+                      delta: {},
+                      finish_reason: finishReason
+                    }]
+                  };
+                  sseChunks.push(`data: ${JSON.stringify(chunk2)}`);
                 }
               }
             }
