@@ -1069,11 +1069,13 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
               }
               
               // 🔧 Fix: 某些 API 在 tool calling 模式下 streaming 可能不工作
-              // 尝试禁用 stream 看看是否能解决问题
+              // 检测风险组合并记录详细警告
               if (bodyJson.stream === true) {
-                // 不直接禁用，而是记录警告，让用户知道可能的问题
-                console.warn(`[llm-gated-fetch] [DEBUG-Grok] ⚠️ stream=true + tools + reasoning 组合可能导致空响应`);
-                console.warn(`[llm-gated-fetch] [DEBUG-Grok] 如果返回空响应，考虑在配置中禁用该模型的 toolCalling`);
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok] ⚠️ stream=true + tools + reasoning 组合可能导致卡死或空响应`);
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok] 建议：`);
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok]   1. 在模型配置中设置 "disableStreaming": true`);
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok]   2. 或在 clawdbot.json 中添加: "modelSettings": { "grok-4-1-fast-reasoning": { "stream": false } }`);
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok]   3. 或减少历史消息数量（当前 ${bodyJson.messages?.length || 0} 条）`);
               }
             }
             
@@ -1098,24 +1100,71 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
             }
             
             // 🆕 P121: Grok reasoning 模型长上下文优化
-            // 当消息数量过多时，保留系统消息 + 最近用户消息 + 最后一次 tool call
+            // 当消息数量过多时，保留系统消息 + 最后一次完整的 tool call 对 + 最近消息
             if (isReasoningModel && Array.isArray(bodyJson.messages)) {
               const MAX_GROK_MESSAGES = 10; // 最多保留 10 条消息
               
               if (bodyJson.messages.length > MAX_GROK_MESSAGES) {
-                console.warn(`[llm-gated-fetch] [DEBUG-Grok] ⚠️ 消息过多 (${bodyJson.messages.length}条)，截断至 ${MAX_GROK_MESSAGES} 条`);
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok] ⚠️ 消息过多 (${bodyJson.messages.length}条)，智能截断至 ${MAX_GROK_MESSAGES} 条`);
                 
-                // 保留策略：系统消息 + 最近的消息
-                const systemMessages = bodyJson.messages.filter((m: any) => m.role === "system");
-                const nonSystemMessages = bodyJson.messages.filter((m: any) => m.role !== "system");
+                // 🔧 修复：保留完整的 tool call 对（assistant + tool result）
+                // 找到最后一对完整的 tool call（assistant + tool results）
+                let lastToolCallPair: { assistantIdx: number; toolIndices: number[] } | null = null;
+                for (let i = bodyJson.messages.length - 1; i >= 0; i--) {
+                  const msg = bodyJson.messages[i];
+                  if (msg.role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+                    const toolIndices: number[] = [];
+                    // 找到紧跟其后的所有 tool 消息
+                    for (let j = i + 1; j < bodyJson.messages.length; j++) {
+                      if (bodyJson.messages[j].role === "tool") {
+                        toolIndices.push(j);
+                      } else {
+                        break;
+                      }
+                    }
+                    if (toolIndices.length > 0) {
+                      lastToolCallPair = { assistantIdx: i, toolIndices };
+                      break;
+                    }
+                  }
+                }
                 
-                // 保留最近的 N 条非系统消息
-                const recentMessages = nonSystemMessages.slice(-(MAX_GROK_MESSAGES - systemMessages.length));
+                // 构建保留的消息列表
+                const preservedIndices = new Set<number>();
                 
-                bodyJson.messages = [...systemMessages, ...recentMessages];
+                // 1. 保留系统消息
+                for (let i = 0; i < bodyJson.messages.length; i++) {
+                  if (bodyJson.messages[i].role === "system") {
+                    preservedIndices.add(i);
+                  }
+                }
+                
+                // 2. 保留最后一次完整的 tool call 对
+                if (lastToolCallPair) {
+                  preservedIndices.add(lastToolCallPair.assistantIdx);
+                  for (const idx of lastToolCallPair.toolIndices) {
+                    preservedIndices.add(idx);
+                  }
+                  console.warn(`[llm-gated-fetch] [DEBUG-Grok] 保留 tool call 对: assistant[${lastToolCallPair.assistantIdx}] + tools[${lastToolCallPair.toolIndices.join(",")}]`);
+                }
+                
+                // 3. 从最近的用户消息开始填充，直到达到限制
+                const remainingSlots = MAX_GROK_MESSAGES - preservedIndices.size;
+                if (remainingSlots > 0) {
+                  // 从后向前添加最近的消息
+                  for (let i = bodyJson.messages.length - 1; i >= 0 && preservedIndices.size < MAX_GROK_MESSAGES; i--) {
+                    if (!preservedIndices.has(i)) {
+                      preservedIndices.add(i);
+                    }
+                  }
+                }
+                
+                // 按原始顺序重建消息数组
+                const sortedIndices = Array.from(preservedIndices).sort((a, b) => a - b);
+                bodyJson.messages = sortedIndices.map(i => bodyJson.messages[i]);
                 fixed = true;
                 
-                console.warn(`[llm-gated-fetch] [DEBUG-Grok] 截断后: ${bodyJson.messages.length} 条消息`);
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok] 截断后: ${bodyJson.messages.length} 条消息（保留完整 tool call 对）`);
               }
             }
           }
