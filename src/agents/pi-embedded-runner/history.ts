@@ -83,7 +83,9 @@ export function limitHistoryTurns(
 /**
  * Compresses tool call chains to reduce token usage.
  * 
- * 🆕 V2: 基于年龄的渐进式压缩
+ * 🆕 V3: 修复 OpenAI API 格式问题
+ * - 保持 assistant + tool 消息的独立结构（API 要求）
+ * - 仅压缩 tool result 的 content 长度，不合并消息
  * - 最近 2 个 user turn 内的 tool result: 完整保留（≤5000 字符）
  * - 3-5 个 user turn 前: 截断到 500 字符
  * - 5+ 个 user turn 前: 截断到 200 字符（仅工具名+状态摘要）
@@ -93,14 +95,16 @@ export function limitHistoryTurns(
  */
 function compressToolCallChains(messages: AgentMessage[]): AgentMessage[] {
   // 快速检查：如果没有任何 tool call 链，直接返回原始引用（避免无谓的对象创建）
+  // 🆕 V3: 同时检查 toolResult 和 tool（OpenAI 格式）
   const hasAnyToolChain = messages.some((msg, idx) => {
     if (msg.role !== "assistant" || !("content" in msg) || !Array.isArray(msg.content)) return false;
     const hasToolCalls = msg.content.some(
       (block: any) => block.type === "toolCall" || block.type === "toolUse" || block.type === "functionCall",
     );
     if (!hasToolCalls) return false;
-    // 确认后面跟着 toolResult
-    return idx + 1 < messages.length && messages[idx + 1].role === "toolResult";
+    // 确认后面跟着 toolResult 或 tool（OpenAI 格式）
+    const nextRole = idx + 1 < messages.length ? (messages[idx + 1] as any).role : null;
+    return nextRole === "toolResult" || nextRole === "tool";
   });
   if (!hasAnyToolChain) return messages;
 
@@ -120,26 +124,31 @@ function compressToolCallChains(messages: AgentMessage[]): AgentMessage[] {
       );
       
       if (hasToolCalls) {
+        // 首先保留 assistant 消息（不修改）
+        compressed.push(msg);
+        
         // Find all tool results that follow this message
-        const toolResults: AgentMessage[] = [];
+        // 🆕 V3: 同时支持 toolResult（内部格式）和 tool（OpenAI 格式）
         let j = i + 1;
         
-        while (j < messages.length && messages[j].role === "toolResult") {
-          toolResults.push(messages[j]);
+        while (j < messages.length) {
+          const nextRole = (messages[j] as any).role;
+          if (nextRole !== "toolResult" && nextRole !== "tool") break;
+          
+          const toolResult = messages[j];
+          
+          // 基于年龄决定压缩程度
+          const age = ageMap.get(j) ?? 999;
+          const maxChars = resolveMaxCharsForAge(age);
+          
+          // 压缩单个 tool result（保持独立消息）
+          const compressedToolResult = compressSingleToolResult(toolResult, maxChars);
+          compressed.push(compressedToolResult);
+          
           j++;
         }
         
-        // 基于年龄决定压缩程度
-        const age = ageMap.get(i) ?? 999;
-        const maxChars = resolveMaxCharsForAge(age);
-        
-        // Compress the tool call chain into a single assistant message
-        const compressedMessage = compressToolCallChain(msg, toolResults, maxChars);
-        if (compressedMessage) {
-          compressed.push(compressedMessage);
-        }
-        
-        // Skip the tool result messages
+        // 移动到 tool results 之后
         i = j;
         continue;
       }
@@ -187,185 +196,92 @@ function resolveMaxCharsForAge(age: number): number {
 }
 
 /**
- * Compresses a single tool call chain into a natural language description.
+ * 压缩单个 tool result 消息（保持独立结构，不合并到 assistant）
  * 
  * @param maxChars 基于年龄的最大字符数限制，越旧的消息限制越小
  */
-function compressToolCallChain(
-  assistantMsg: AgentMessage,
-  toolResults: AgentMessage[],
-  maxChars: number = 5000,
-): AgentMessage | null {
-  if (!("content" in assistantMsg) || !Array.isArray(assistantMsg.content)) return assistantMsg;
+function compressSingleToolResult(
+  toolResult: AgentMessage,
+  maxChars: number
+): AgentMessage {
+  if (!("content" in toolResult) || !toolResult.content) {
+    return toolResult;
+  }
   
-  const compressedContent: TextContent[] = [];
-  
-  // 保留 assistant 消息中的纯文本块（LLM 的自然语言回复）
-  for (const block of assistantMsg.content) {
-    if (!block || typeof block !== "object") continue;
-    const item = block as any;
-    if (item.type === "text" && typeof item.text === "string" && item.text.trim()) {
-      // 自然语言文本也按年龄截断，但保留更多（2x maxChars）
-      const textLimit = Math.min(maxChars * 2, 10000);
-      const text = item.text.length > textLimit
-        ? item.text.slice(0, textLimit) + "\n...(文本已截断)"
-        : item.text;
-      compressedContent.push({ type: "text", text });
+  // Extract the result content
+  let resultText = "";
+  if (typeof toolResult.content === "string") {
+    resultText = toolResult.content;
+  } else if (Array.isArray(toolResult.content)) {
+    for (const item of toolResult.content) {
+      if (item && typeof item === "object" && "text" in item) {
+        resultText += (item as any).text;
+      }
     }
   }
   
-  // Extract tool calls from the assistant message
-  for (const block of assistantMsg.content) {
-    if (!block || typeof block !== "object") continue;
-    
-    const toolCall = block as any;
-    if (toolCall.type !== "toolCall" && toolCall.type !== "toolUse" && toolCall.type !== "functionCall") {
-      continue;
+  // 🆕 尝试从 JSON 包装中提取纯文本
+  if (resultText.startsWith("{") && resultText.includes('"result"')) {
+    try {
+      const parsed = JSON.parse(resultText);
+      if (typeof parsed.result === "string") {
+        resultText = parsed.result;
+      }
+    } catch {
+      // 不是 JSON，保持原样
     }
-    
-    const toolName = toolCall.name || "unknown";
-    const toolId = toolCall.id;
-    
-    // Find the corresponding tool result
-    const toolResult = toolResults.find((tr: any) => {
-      return tr.toolCallId === toolId || tr.toolUseId === toolId;
-    });
-    
-    if (!toolResult || !("content" in toolResult)) continue;
-    
-    // Extract the result content
-    let resultText = "";
-    if (typeof toolResult.content === "string") {
-      resultText = toolResult.content;
-    } else if (Array.isArray(toolResult.content)) {
-      for (const item of toolResult.content) {
-        if (item && typeof item === "object" && "text" in item) {
-          resultText += item.text;
-        }
-      }
-    }
-    
-    // 🆕 尝试从 JSON 包装中提取纯文本（sanitizeSessionHistory 会把 toolResult 
-    // 包装成 {"tool":"name","result":"..."} 格式）
-    if (resultText.startsWith("{") && resultText.includes('"result"')) {
-      try {
-        const parsed = JSON.parse(resultText);
-        if (typeof parsed.result === "string") {
-          resultText = parsed.result;
-        }
-      } catch {
-        // 不是 JSON，保持原样
-      }
-    }
-    
-    // Compress based on tool name + 年龄限制
-    let compressedText = "";
-    
-    if (toolName === "read") {
-      const path = (toolCall.arguments as any)?.path || "unknown";
-      const fileName = path.split(/[/\\]/).pop() || path;
-      if (maxChars <= 200) {
-        // 极旧：只保留文件名
-        compressedText = `[读取文件: ${fileName}] (${resultText.length} 字符)`;
-      } else {
-        const truncated = resultText.length > maxChars
-          ? resultText.slice(0, maxChars) + `\n...(已截断, 原始 ${resultText.length} 字符)`
-          : resultText;
-        compressedText = `[读取文件: ${fileName}]\n${truncated}`;
-      }
-    } else if (toolName === "exec") {
-      const command = (toolCall.arguments as any)?.command || "unknown";
-      const shortCommand = command.length > 80 ? command.slice(0, 80) + "..." : command;
-      if (maxChars <= 200) {
-        compressedText = `[执行命令: ${shortCommand}] → ${resultText.length > 100 ? resultText.slice(0, 100) + "..." : resultText}`;
-      } else {
-        const truncated = resultText.length > maxChars
-          ? resultText.slice(0, maxChars) + `\n...(输出已截断, 原始 ${resultText.length} 字符)`
-          : resultText;
-        compressedText = `[执行命令: ${shortCommand}]\n${truncated}`;
-      }
-    } else if (toolName === "grep" || toolName === "find" || toolName === "ls") {
-      if (maxChars <= 200) {
-        compressedText = `[搜索结果: ${resultText.length} 字符]`;
-      } else {
-        const truncated = resultText.length > maxChars
-          ? resultText.slice(0, maxChars) + `\n...(已截断)`
-          : resultText;
-        compressedText = `[搜索结果]\n${truncated}`;
-      }
-    } else if (toolName === "write" || toolName === "edit") {
-      const path = (toolCall.arguments as any)?.path || "unknown";
-      const fileName = path.split(/[/\\]/).pop() || path;
-      compressedText = `[已写入文件: ${fileName}]`;
-    } else if (toolName === "enqueue_task") {
-      const summary = (toolCall.arguments as any)?.summary || "unknown";
-      compressedText = `[已加入任务: ${summary}]`;
-    } else if (toolName === "web_fetch" || toolName === "web_search") {
-      // 网络请求结果通常很大，积极压缩
-      if (maxChars <= 500) {
-        compressedText = `[${toolName}: 已完成, ${resultText.length} 字符]`;
-      } else {
-        const truncated = resultText.length > maxChars
-          ? resultText.slice(0, maxChars) + `\n...(已截断)`
-          : resultText;
-        compressedText = `[${toolName}]\n${truncated}`;
-      }
-    } else if (toolName === "memory_search" || toolName === "memory_deep_search" || toolName === "memory_get" || toolName === "memory_list") {
-      // 记忆搜索结果可以积极压缩
-      if (maxChars <= 500) {
-        compressedText = `[${toolName}: 已完成]`;
-      } else {
-        const truncated = resultText.length > maxChars
-          ? resultText.slice(0, maxChars) + `\n...(已截断)`
-          : resultText;
-        compressedText = `[${toolName}]\n${truncated}`;
-      }
-    } else if (toolName === "process") {
-      // process 工具通常是日志操作，结果价值低
-      const action = (toolCall.arguments as any)?.action || "unknown";
-      compressedText = `[process: ${action}] ✓`;
-    } else if (toolName === "novel_reference_search" || toolName === "novel_assets_list") {
-      // 小说相关工具
-      if (maxChars <= 500) {
-        compressedText = `[${toolName}: 已完成]`;
-      } else {
-        const truncated = resultText.length > maxChars
-          ? resultText.slice(0, maxChars) + `\n...(已截断)`
-          : resultText;
-        compressedText = `[${toolName}]\n${truncated}`;
-      }
+  }
+  
+  // 获取 tool name
+  const toolName = (toolResult as any).toolName || "unknown";
+  
+  // 如果内容在限制内，直接返回
+  if (resultText.length <= maxChars) {
+    return toolResult;
+  }
+  
+  // 根据工具类型生成压缩后的摘要
+  let compressedText = "";
+  
+  if (toolName === "read") {
+    if (maxChars <= 200) {
+      compressedText = `[文件读取完成，${resultText.length} 字符]`;
     } else {
-      // For other tools
-      if (maxChars <= 200) {
-        compressedText = `[工具: ${toolName}] → 已完成`;
-      } else {
-        const truncated = resultText.length > maxChars
-          ? resultText.slice(0, maxChars) + `\n...(已截断)`
-          : resultText;
-        compressedText = `[工具: ${toolName}]\n${truncated}`;
-      }
+      const headLen = Math.floor(maxChars * 0.7);
+      const tailLen = Math.floor(maxChars * 0.2);
+      compressedText = resultText.substring(0, headLen) 
+        + `\n...(已截断，原始 ${resultText.length} 字符)\n`
+        + resultText.substring(resultText.length - tailLen);
     }
-    
-    compressedContent.push({
-      type: "text",
-      text: compressedText
-    });
+  } else if (toolName === "exec") {
+    if (maxChars <= 200) {
+      compressedText = `[命令执行完成，输出 ${resultText.length} 字符]`;
+    } else {
+      const headLen = Math.floor(maxChars * 0.7);
+      const tailLen = Math.floor(maxChars * 0.2);
+      compressedText = resultText.substring(0, headLen) 
+        + `\n...(输出已截断，原始 ${resultText.length} 字符)\n`
+        + resultText.substring(resultText.length - tailLen);
+    }
+  } else {
+    // 其他工具
+    if (maxChars <= 200) {
+      compressedText = `[${toolName}: 已完成，${resultText.length} 字符]`;
+    } else {
+      const headLen = Math.floor(maxChars * 0.7);
+      const tailLen = Math.floor(maxChars * 0.2);
+      compressedText = resultText.substring(0, headLen) 
+        + `\n...(已截断，原始 ${resultText.length} 字符)\n`
+        + resultText.substring(resultText.length - tailLen);
+    }
   }
   
-  // If no tool calls were found, return the original message
-  if (compressedContent.length === 0) {
-    return assistantMsg;
-  }
-  
-  // Return a new assistant message with compressed content
-  if (assistantMsg.role === "assistant") {
-    return {
-      ...assistantMsg,
-      content: compressedContent
-    };
-  }
-  
-  return assistantMsg;
+  // 返回压缩后的 tool result（保持 role: "toolResult"）
+  // 使用类型断言确保 TypeScript 正确识别类型
+  return {
+    ...toolResult,
+    content: [{ type: "text" as const, text: compressedText }]
+  } as AgentMessage;
 }
 
 /**

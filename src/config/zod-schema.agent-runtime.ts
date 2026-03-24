@@ -278,6 +278,10 @@ export const MemorySearchSchema = z
   .object({
     enabled: z.boolean().optional(),
     sources: z.array(z.union([z.literal("memory"), z.literal("sessions")])).optional(),
+    /** 外部记忆目录（如 C:\Users\zouta\clawd\memory），支持按需检索而非强制预索引 */
+    externalDirs: z.array(z.string()).optional(),
+    /** 是否延迟加载外部目录（默认 true，按需检索时才加载） */
+    lazyLoadExternal: z.boolean().optional(),
     experimental: z
       .object({
         sessionMemory: z.boolean().optional(),

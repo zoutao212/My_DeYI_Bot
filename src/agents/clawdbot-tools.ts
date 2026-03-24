@@ -92,6 +92,7 @@ export function createClawdbotTools(options?: {
         workspaceDir: options.workspaceDir,
       })
     : null;
+
   const tools: AnyAgentTool[] = [
     createBrowserTool({
       defaultControlUrl: options?.browserControlUrl,

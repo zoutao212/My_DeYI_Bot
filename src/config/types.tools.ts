@@ -213,6 +213,18 @@ export type MemorySearchConfig = {
   enabled?: boolean;
   /** Sources to index and search (default: ["memory"]). */
   sources?: Array<"memory" | "sessions">;
+  /** 
+   * P121: 外部记忆目录列表（如 C:\Users\zouta\clawd\memory）
+   * 这些目录不会在启动时强制索引，而是在检索时按需加载
+   * 支持通过环境变量 CLAWDBOT_EXTERNAL_MEMORY_DIRS 配置（分号/逗号/换行分隔）
+   */
+  externalDirs?: string[];
+  /** 
+   * 是否延迟加载外部目录（默认 true）
+   * true: 只在检索时按需扫描外部目录
+   * false: 在同步时也扫描外部目录（适合少量静态内容）
+   */
+  lazyLoadExternal?: boolean;
   /** Experimental memory search settings. */
   experimental?: {
     /** Enable session transcript indexing (experimental, default: false). */

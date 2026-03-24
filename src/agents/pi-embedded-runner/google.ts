@@ -797,7 +797,20 @@ export async function sanitizeSessionHistory(params: {
       
       // Convert to OpenAI format
       msg.role = "tool" as any;
-      msgAny.tool_call_id = `call_${toolName}_${i}`;
+      
+      // 🔧 P126: 使用原始 toolCallId，而不是生成假的 ID
+      // OpenAI 格式要求 tool_call_id 必须与 assistant.tool_calls[].id 匹配！
+      const originalToolCallId = msgAny.toolCallId || msgAny.tool_call_id;
+      if (originalToolCallId && typeof originalToolCallId === "string") {
+        msgAny.tool_call_id = originalToolCallId;
+        log.info(`✓ P126: Using original toolCallId="${originalToolCallId}" (toolName="${toolName}", index=${i})`);
+      } else {
+        // 没有 toolCallId，生成假的 ID（这可能导致 API 错误）
+        // 🔧 P130: 改进假 ID 格式，包含更多上下文信息便于后续匹配
+        msgAny.tool_call_id = `call_${toolName}_${i}`;
+        log.error(`❌ P126+P130: No toolCallId found for tool="${toolName}" (index=${i}), generated fake ID="${msgAny.tool_call_id}" - this will likely cause API error!`);
+        log.error(`❌ P126+P130: 请检查消息保存逻辑，确保 toolResult.toolCallId 与 assistant.tool_calls[].id 匹配！`);
+      }
       
       // ✅ 关键：将 toolName 保存到 content 中
       // 这样 convertOpenAIToGeminiFormat 可以提取出来
@@ -815,12 +828,23 @@ export async function sanitizeSessionHistory(params: {
         contentStr = JSON.stringify(content);
       }
       
-      // ✅ 将 toolName 包装到 content 中（JSON 格式）
-      // convertOpenAIToGeminiFormat 会从 content 中提取 "tool" 字段
-      msgAny.content = JSON.stringify({
-        tool: toolName,  // ← 关键字段，用于 functionResponse.name
-        result: contentStr
-      });
+      // 🔧 P129: 根据 API 类型决定 content 格式
+      // - Gemini API: 需要 JSON 包装 {"tool": name, "result": content}
+      // - OpenAI API (Grok): 直接使用纯文本 content
+      const isGeminiApi = params.modelApi === "gemini" || params.provider?.includes("google") || params.provider?.includes("gemini");
+      
+      if (isGeminiApi) {
+        // Gemini API: 包装成 JSON 格式
+        msgAny.content = JSON.stringify({
+          tool: toolName,
+          result: contentStr
+        });
+        log.debug(`✓ P129: Gemini API - wrapped tool content with toolName="${toolName}"`);
+      } else {
+        // OpenAI API (Grok等): 直接使用纯文本
+        msgAny.content = contentStr;
+        log.debug(`✓ P129: OpenAI API - using plain text content for toolName="${toolName}"`);
+      }
       
       toolResultCount++;
       log.debug(`✓ Converted toolResult → tool: name="${toolName}", index=${i}, sessionId=${params.sessionId}`);
@@ -832,6 +856,14 @@ export async function sanitizeSessionHistory(params: {
   if (toolResultCount > 0) {
     log.info(`[sanitize] Converted ${toolResultCount} toolResult messages to OpenAI format (sessionId: ${params.sessionId})`);
   }
+  
+  // 🔍 调试：显示所有消息角色
+  const roleCounts = params.messages.reduce((acc, m) => {
+    const role = (m as any).role || "unknown";
+    acc[role] = (acc[role] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+  log.info(`[sanitize] 🔍 Messages before policy processing: ${params.messages.length} (${Object.entries(roleCounts).map(([r, c]) => `${r}:${c}`).join(", ")})`);
   
   const policy =
     params.policy ??
@@ -900,15 +932,23 @@ export async function sanitizeSessionHistory(params: {
     });
   }
 
-  if (!policy.applyGoogleTurnOrdering) {
-    return sanitizedOpenAI;
-  }
-
-  return applyGoogleTurnOrderingFix({
-    messages: sanitizedOpenAI,
-    modelApi: params.modelApi,
-    sessionManager: params.sessionManager,
-    sessionId: params.sessionId,
-    isQueueTask: params.isQueueTask,
-  }).messages;
+  const finalMessages = policy.applyGoogleTurnOrdering
+    ? applyGoogleTurnOrderingFix({
+        messages: sanitizedOpenAI,
+        modelApi: params.modelApi,
+        sessionManager: params.sessionManager,
+        sessionId: params.sessionId,
+        isQueueTask: params.isQueueTask,
+      }).messages
+    : sanitizedOpenAI;
+  
+  // 🔍 调试：显示返回前的所有消息角色
+  const finalRoleCounts = finalMessages.reduce((acc, m) => {
+    const role = (m as any).role || "unknown";
+    acc[role] = (acc[role] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+  log.info(`[sanitize] 🔍 Messages returned: ${finalMessages.length} (${Object.entries(finalRoleCounts).map(([r, c]) => `${r}:${c}`).join(", ")})`);
+  
+  return finalMessages;
 }

@@ -432,6 +432,37 @@ export async function analyzeIntentComplexity(
   provider?: string,
   modelId?: string,
 ): Promise<IntentComplexityResult> {
+  // 🔧 P128: 暂时禁用 LLM 预判（Grok 推理模型兼容性问题）
+  // 直接返回默认结果，跳过所有 LLM 调用
+  const CP0_LLM_PREDICTION_DISABLED = true;
+  
+  if (CP0_LLM_PREDICTION_DISABLED) {
+    // 规则前置过滤仍然生效
+    if (shouldSkipAnalysis(userMessage)) {
+      return {
+        complexity: "simple",
+        strategy: "direct",
+        reason: "规则跳过：消息过短或匹配简单交互模式",
+        source: "rule_skip",
+      };
+    }
+    
+    // 模板加速仍然生效
+    const templateResult = tryTemplateMatch(userMessage);
+    if (templateResult) {
+      return templateResult;
+    }
+    
+    // LLM 预判已禁用，返回默认值
+    console.log(`[IntentComplexityAnalyzer] 🔒 P128: LLM 预判已禁用，返回默认值`);
+    return {
+      complexity: "moderate",
+      strategy: "direct",
+      reason: "P128: LLM 预判暂时禁用（Grok 推理模型兼容性问题）",
+      source: "rule_skip",
+    };
+  }
+  
   // 规则前置过滤（极短/简单交互）
   if (shouldSkipAnalysis(userMessage)) {
     return {

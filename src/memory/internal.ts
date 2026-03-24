@@ -76,12 +76,18 @@ async function walkDir(
 
 export async function listMemoryFiles(
   workspaceDir: string,
-  options?: { extraDirs?: string[]; extensions?: string[] },
+  options?: { 
+    extraDirs?: string[]; 
+    extensions?: string[];
+    /** P121: 是否跳过外部目录的预扫描（按需检索时设为 true） */
+    skipExternalDirs?: boolean;
+  },
 ): Promise<string[]> {
   const result: string[] = [];
   const extensions = options?.extensions && options.extensions.length > 0
     ? options.extensions
     : DEFAULT_MEMORY_EXTENSIONS;
+  const skipExternal = options?.skipExternalDirs ?? false;
 
   // 顶层记忆文件
   const memoryFile = path.join(workspaceDir, "MEMORY.md");
@@ -111,7 +117,8 @@ export async function listMemoryFiles(
   }
 
   // 额外扫描目录（可配置）
-  if (options?.extraDirs) {
+  // P121: 当 skipExternalDirs=true 时，跳过外部目录预扫描（改为按需检索）
+  if (!skipExternal && options?.extraDirs) {
     for (const extraDir of options.extraDirs) {
       if (await exists(extraDir)) {
         await walkDir(extraDir, result, extensions);

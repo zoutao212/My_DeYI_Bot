@@ -9,6 +9,10 @@ import { resolveAgentConfig } from "./agent-scope.js";
 export type ResolvedMemorySearchConfig = {
   enabled: boolean;
   sources: Array<"memory" | "sessions">;
+  /** 外部记忆目录（按需检索，不强制预索引） */
+  externalDirs: string[];
+  /** 是否延迟加载外部目录（默认 true） */
+  lazyLoadExternal: boolean;
   provider: "openai" | "local" | "gemini" | "auto";
   remote?: {
     baseUrl?: string;
@@ -155,6 +159,18 @@ function mergeConfig(
     modelCacheDir: overrides?.local?.modelCacheDir ?? defaults?.local?.modelCacheDir,
   };
   const sources = normalizeSources(overrides?.sources ?? defaults?.sources, sessionMemory);
+  
+  // P121: 外部记忆目录配置（支持环境变量 + 配置文件）
+  const envExternalDirs = process.env.CLAWDBOT_EXTERNAL_MEMORY_DIRS?.trim();
+  const envExternalDirsList = envExternalDirs
+    ? envExternalDirs.split(/[;,\n]+/).map((d) => d.trim()).filter(Boolean)
+    : [];
+  const configExternalDirs = [...(overrides?.externalDirs ?? []), ...(defaults?.externalDirs ?? [])];
+  const externalDirs = [...new Set([...envExternalDirsList, ...configExternalDirs])].map((d) =>
+    resolveUserPath(d)
+  );
+  const lazyLoadExternal = overrides?.lazyLoadExternal ?? defaults?.lazyLoadExternal ?? true;
+  
   const vector = {
     enabled: overrides?.store?.vector?.enabled ?? defaults?.store?.vector?.enabled ?? true,
     extensionPath:
@@ -244,6 +260,8 @@ function mergeConfig(
   return {
     enabled,
     sources,
+    externalDirs,
+    lazyLoadExternal,
     provider,
     remote,
     experimental: {

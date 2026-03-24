@@ -406,12 +406,17 @@ export class MemoryIndexManager {
 
   /**
    * M6: 本地 grep 搜索通道 — 零远程依赖的关键词匹配
+   * P121: 同时搜索外部记忆目录（按需检索）
    */
   private async searchLocalGrep(
     query: string,
     limit: number,
   ): Promise<HybridGrepResult[]> {
     const dirs = getDefaultMemoryDirs(this.workspaceDir);
+    // P121: 如果配置了外部目录且启用了延迟加载，则在此处按需检索
+    if (this.settings.externalDirs.length > 0 && this.settings.lazyLoadExternal) {
+      dirs.push(...this.settings.externalDirs);
+    }
     const results = await localGrepSearch(query, {
       dirs,
       maxResults: limit,
@@ -1065,9 +1070,21 @@ export class MemoryIndexManager {
       || path.join(path.resolve(os.homedir(), "clawd"), "NovelsChunkAssets");
     const textEtlBooksDir = path.join(chunkAssetsDir, "books");
 
+    // P121: 外部目录处理 - 根据 lazyLoadExternal 决定是否预扫描
+    const extraDirs: string[] = [];
+    if (textEtlEnabled) {
+      extraDirs.push(textEtlBooksDir);
+    }
+    // 当 lazyLoadExternal=false 时，才在同步时扫描外部目录
+    const shouldScanExternal = !this.settings.lazyLoadExternal && this.settings.externalDirs.length > 0;
+    if (shouldScanExternal) {
+      extraDirs.push(...this.settings.externalDirs);
+    }
+
     const files = await listMemoryFiles(this.workspaceDir, {
-      extraDirs: textEtlEnabled ? [textEtlBooksDir] : undefined,
+      extraDirs: extraDirs.length > 0 ? extraDirs : undefined,
       extensions: textEtlEnabled ? [".md", ".txt", ".jsonl"] : undefined,
+      skipExternalDirs: this.settings.lazyLoadExternal,
     });
     const fileEntries = await Promise.all(
       files.map(async (file) => buildFileEntry(file, this.workspaceDir)),

@@ -947,7 +947,11 @@ export async function runEmbeddedAttempt(
           policy: transcriptPolicy,
           isQueueTask,  // 🆕 传递 isQueueTask 标记
         });
-        log.info(`[attempt] 🔍 After sanitizeSessionHistory: ${prior.length} messages (user: ${prior.filter(m => m.role === "user").length}, assistant: ${prior.filter(m => m.role === "assistant").length})`);
+        const roleCounts = prior.reduce((acc, m) => {
+          acc[m.role] = (acc[m.role] || 0) + 1;
+          return acc;
+        }, {} as Record<string, number>);
+        log.info(`[attempt] 🔍 After sanitizeSessionHistory: ${prior.length} messages (${Object.entries(roleCounts).map(([r, c]) => `${r}:${c}`).join(", ")})`);
         
         // 🆕 智能上下文剪枝：在 sanitize 之后、validate/limit 之前，
         // 识别旧任务段落并压缩为摘要，防止旧上下文污染当前任务。
@@ -977,7 +981,11 @@ export async function runEmbeddedAttempt(
           validated,
           getDmHistoryLimitFromSessionKey(params.sessionKey, params.config),
         );
-        log.info(`[attempt] 🔍 After limitHistoryTurns: ${limited.length} messages (user: ${limited.filter(m => m.role === "user").length}, assistant: ${limited.filter(m => m.role === "assistant").length})`);
+        const limitedRoleCounts = limited.reduce((acc, m) => {
+          acc[m.role] = (acc[m.role] || 0) + 1;
+          return acc;
+        }, {} as Record<string, number>);
+        log.info(`[attempt] 🔍 After limitHistoryTurns: ${limited.length} messages (${Object.entries(limitedRoleCounts).map(([r, c]) => `${r}:${c}`).join(", ")})`);
         
         cacheTrace?.recordStage("session:limited", { messages: limited });
         if (limited.length > 0) {

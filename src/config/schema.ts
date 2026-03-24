@@ -221,6 +221,8 @@ const FIELD_LABELS: Record<string, string> = {
   "agents.defaults.memorySearch": "Memory Search",
   "agents.defaults.memorySearch.enabled": "Enable Memory Search",
   "agents.defaults.memorySearch.sources": "Memory Search Sources",
+  "agents.defaults.memorySearch.externalDirs": "External Memory Directories",
+  "agents.defaults.memorySearch.lazyLoadExternal": "Lazy Load External Directories",
   "agents.defaults.memorySearch.experimental.sessionMemory":
     "Memory Search Session Index (Experimental)",
   "agents.defaults.memorySearch.provider": "Memory Search Provider",
@@ -495,6 +497,10 @@ const FIELD_HELP: Record<string, string> = {
     "Vector search over MEMORY.md and memory/*.md (per-agent overrides supported).",
   "agents.defaults.memorySearch.sources":
     'Sources to index for memory search (default: ["memory"]; add "sessions" to include session transcripts).',
+  "agents.defaults.memorySearch.externalDirs":
+    "External memory directories to search on-demand (not pre-indexed). Supports env var CLAWDBOT_EXTERNAL_MEMORY_DIRS.",
+  "agents.defaults.memorySearch.lazyLoadExternal":
+    "When true, external directories are searched on-demand instead of being pre-indexed (default: true).",
   "agents.defaults.memorySearch.experimental.sessionMemory":
     "Enable experimental session transcript indexing for memory search (default: false).",
   "agents.defaults.memorySearch.provider": 'Embedding provider ("openai", "gemini", or "local").',

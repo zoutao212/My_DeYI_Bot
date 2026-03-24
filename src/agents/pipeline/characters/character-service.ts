@@ -59,14 +59,21 @@ export interface FullCharacterConfig {
     files: string[];
   };
 
+  // 场景配置（新增）
+  scenes?: {
+    files: string[];
+  };
+
   // 文件路径配置（新增）
   files?: {
     persona?: string;
     systemPrompt?: string;
     profile?: string;
     knowledge?: string[];
+    scenes?: string[]; // 新增
     coreMemories?: string;
     sessionArchiveDir?: string;
+    sceneArchiveDir?: string; // 新增
   };
 
   // Workspace 文件覆盖声明（新增）
@@ -98,6 +105,14 @@ export interface CharacterProfile {
 export interface CharacterKnowledge {
   files: Record<string, string>;
   combinedContent: string;
+  /** 知识库文件名列表（用于延迟加载/检索指引） */
+  fileNames: string[];
+}
+
+export interface CharacterScenes {
+  files: Record<string, string>;
+  combinedContent: string;
+  fileNames: string[];
 }
 
 export interface CharacterMemories {
@@ -118,6 +133,7 @@ export interface LoadedCharacter {
   config: FullCharacterConfig;
   profile: CharacterProfile;
   knowledge: CharacterKnowledge;
+  scenes: CharacterScenes; // 新增
   memories: CharacterMemories;
   persona: CharacterPersona;
   systemPromptTemplate: string;
@@ -226,8 +242,22 @@ export class CharacterService {
       // 2. 加载角色档案
       const profile = await this.loadProfile(characterDir);
 
-      // 3. 加载知识库
-      const knowledge = await this.loadKnowledge(characterDir, config.knowledge?.files ?? []);
+      // 3. 加载知识库 (custom-aiji: 延迟加载模式，只记录文件列表)
+      const isCustomAiji = config.type === "custom-aiji";
+      const knowledgeFiles = config.knowledge?.files ?? config.files?.knowledge ?? [];
+      const knowledge = await this.loadKnowledge(
+        characterDir,
+        knowledgeFiles,
+        !isCustomAiji // 如果是 custom-aiji，不加载内容
+      );
+
+      // 3.5 加载场景库
+      const sceneFiles = config.scenes?.files ?? config.files?.scenes ?? [];
+      const scenes = await this.loadScenes(
+        characterDir,
+        sceneFiles,
+        !isCustomAiji
+      );
 
       // 4. 加载记忆
       const memories = await this.loadMemories(characterDir, config.memory ?? { coreMemoriesFile: "core-memories.md", sessionArchiveDir: "sessions", maxRetrievalResults: 10 });
@@ -243,6 +273,7 @@ export class CharacterService {
         config,
         profile,
         knowledge,
+        scenes,
         memories,
         persona,
       });
@@ -258,6 +289,7 @@ export class CharacterService {
         config,
         profile,
         knowledge,
+        scenes,
         memories,
         persona,
         systemPromptTemplate,
@@ -518,14 +550,20 @@ export class CharacterService {
     }
   }
 
-  private async loadKnowledge(characterDir: string, files: string[]): Promise<CharacterKnowledge> {
+  private async loadKnowledge(
+    characterDir: string,
+    files: string[],
+    loadContent: boolean = true,
+  ): Promise<CharacterKnowledge> {
     const knowledge: CharacterKnowledge = {
       files: {},
       combinedContent: "",
+      fileNames: files,
     };
 
-    const knowledgeDir = join(characterDir, "knowledge");
+    if (!loadContent) return knowledge;
 
+    const knowledgeDir = join(characterDir, "knowledge");
     for (const file of files) {
       try {
         const filePath = join(knowledgeDir, file);
@@ -538,6 +576,34 @@ export class CharacterService {
 
     knowledge.combinedContent = Object.values(knowledge.files).join("\n\n---\n\n");
     return knowledge;
+  }
+
+  private async loadScenes(
+    characterDir: string,
+    files: string[],
+    loadContent: boolean = true,
+  ): Promise<CharacterScenes> {
+    const scenes: CharacterScenes = {
+      files: {},
+      combinedContent: "",
+      fileNames: files,
+    };
+
+    if (!loadContent) return scenes;
+
+    const scenesDir = join(characterDir, "scenes");
+    for (const file of files) {
+      try {
+        const filePath = join(scenesDir, file);
+        const content = await readFile(filePath, "utf-8");
+        scenes.files[file] = content;
+      } catch {
+        // 文件不存在，跳过
+      }
+    }
+
+    scenes.combinedContent = Object.values(scenes.files).join("\n\n---\n\n");
+    return scenes;
   }
 
   private async loadMemories(
@@ -630,11 +696,12 @@ export class CharacterService {
       config: FullCharacterConfig;
       profile: CharacterProfile;
       knowledge: CharacterKnowledge;
+      scenes: CharacterScenes;
       memories: CharacterMemories;
       persona: CharacterPersona;
     },
   ): string {
-    const { config, profile, knowledge, memories, persona } = context;
+    const { config, profile, knowledge, scenes, memories, persona } = context;
 
     // 使用统一模板引擎渲染
     const templateCtx: Partial<TemplateContext> = {
@@ -652,9 +719,21 @@ export class CharacterService {
 
     let result = renderTemplate(template, templateCtx);
 
+    // 如果有场景库内容，追加到末尾
+    if (scenes.combinedContent) {
+      result += `\n\n## 场景库\n\n${scenes.combinedContent}`;
+    }
+
     // 如果有知识库内容，追加到末尾
     if (knowledge.combinedContent) {
       result += `\n\n## 知识库\n\n${knowledge.combinedContent}`;
+    } else if (knowledge.fileNames.length > 0) {
+      // 延迟加载模式：告知 LLM 有哪些知识可供召回
+      result += `\n\n## 知识索引\n你拥有以下领域的专业知识，已导入记忆数据库。系统会根据对话关键词自动召回相关片段。你也可以使用 supermemory_recall 工具主动搜索这些主题：\n${knowledge.fileNames.map(f => `- ${f}`).join("\n")}`;
+    }
+
+    if (scenes.fileNames.length > 0 && !scenes.combinedContent) {
+      result += `\n\n## 场景索引\n你拥有以下预设场景和互动剧本，已导入记忆数据库：\n${scenes.fileNames.map(f => `- ${f}`).join("\n")}`;
     }
 
     return result;

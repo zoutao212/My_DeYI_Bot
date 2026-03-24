@@ -47,6 +47,9 @@ const CHATROOM_TOOL_ALLOWLIST: string[] = [
   "memory_delete",
   "memory_list",
   "memory_deep_search",
+  "supermemory_recall",
+  "supermemory_store", // 角色可主动存储记忆
+  "supermemory_forget", // 角色可主动遗忘记忆
 ];
 
 function resolveProviderModel(config?: ClawdbotConfig): { provider?: string; model?: string } {

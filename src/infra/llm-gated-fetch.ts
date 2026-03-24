@@ -423,7 +423,7 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
         if (decision === "allow-once" || decision === "allow-always") {
           // 审批通过，执行请求
           console.log(`[llm-gated-fetch] 🚀 审批通过，正在执行 LLM 请求...`);
-          const response = await executeRequestWithRetry(attemptKey, input, init);
+          const response = await executeRequestWithRetry(attemptKey, input, init, false);
           console.log(`[llm-gated-fetch] ✅ LLM 请求完成，状态码：${response.status}`);
           return response;
         }
@@ -433,7 +433,7 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
 
       // 无需审批，直接执行请求
       console.log(`[llm-gated-fetch] ℹ️ 无需审批，直接执行请求`);
-      return await executeRequestWithRetry(attemptKey, input, init);
+      return await executeRequestWithRetry(attemptKey, input, init, false);
     } catch (error) {
       // 捕获并记录各种错误类型
       if (error && typeof error === "object" && "name" in error) {
@@ -537,15 +537,39 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
   }
 
   // 执行请求并处理重试逻辑
+  // 🔧 P122: Grok 推理模型 stream + tool result 卡死的智能降级
+  let streamFallbackAttempt = 0;
+  const MAX_STREAM_FALLBACK_ATTEMPTS = 1; // 最多降级重试 1 次
+  
   async function executeRequestWithRetry(
     attemptKey: string,
     input: RequestInfo | URL,
     init?: RequestInit,
+    forceNonStream = false,
   ): Promise<Response> {
     console.log(`[llm-gated-fetch] 📤 开始执行请求：${typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url}`);
     
+    // 🔧 P122: 智能降级 - 当 forceNonStream=true 时，临时禁用 stream
+    let actualInit = init;
+    let parsedBodyJson: any = null;
+    if (init?.body && typeof init.body === "string") {
+      try {
+        parsedBodyJson = JSON.parse(init.body);
+        if (forceNonStream && parsedBodyJson.stream === true) {
+          parsedBodyJson.stream = false;
+          actualInit = { ...init, body: JSON.stringify(parsedBodyJson) };
+          console.warn(`[llm-gated-fetch] 🔄 P122: 检测到 stream 卡死，降级为非 stream 模式重试`);
+        }
+      } catch {
+        // 解析失败，保持原样
+      }
+    }
+    
     // 🔧 P19 修复：从 60s 提高到 180s，创作任务（3000+ 字）需要更长时间
-    const TIMEOUT_MS = 180_000; // 180 秒
+    // 🔧 P131: 推理模型需要更长时间处理复杂 tool 对话
+    const isReasoningModel = parsedBodyJson?.model?.includes("reasoning") || 
+                             parsedBodyJson?.model?.includes("grok-4-1");
+    const TIMEOUT_MS = isReasoningModel ? 300_000 : 180_000; // 推理模型 300s，其他 180s
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
       console.warn(`[llm-gated-fetch] ⚠️ LLM 请求超时（${TIMEOUT_MS}ms），正在中断请求...`);
@@ -558,6 +582,13 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       ? AbortSignal.any([originalSignal, controller.signal])
       : controller.signal;
     
+    // 🔧 P123: 诊断 AbortError 来源
+    if (originalSignal) {
+      originalSignal.addEventListener('abort', () => {
+        console.warn(`[llm-gated-fetch] 🚨 P123: 外部 signal 被 abort！reason: ${originalSignal.reason || 'unknown'}`);
+      });
+    }
+    
     // 修复 payload 中的格式问题（在发送前修复）
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     // 🔧 Fix: 区分 vectorengine 的不同 API 类型
@@ -569,9 +600,9 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
     // 🔧 DEBUG: 记录 URL 和判断结果
     console.warn(`[llm-gated-fetch] [DEBUG] URL: ${url.substring(0, 80)}..., isVectorengineOpenAI=${isVectorengineOpenAI}, isVectorengineGemini=${isVectorengineGemini}`);
     
-    if (init?.body && typeof init.body === "string") {
+    if (actualInit?.body && typeof actualInit.body === "string") {
       try {
-        const bodyJson = JSON.parse(init.body);
+        const bodyJson = JSON.parse(actualInit.body);
         if (bodyJson && typeof bodyJson === "object") {
           let fixed = false;
           
@@ -809,14 +840,73 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
           // 标准 OpenAI API 支持 developer，但很多第三方 API 不支持
           if (isVectorengineOpenAI && Array.isArray(bodyJson.messages)) {
             let convertedCount = 0;
+            let toolResultConvertedCount = 0;
+            
+            // 🔧 P130: 收集所有 assistant.tool_calls[].id 用于验证
+            const validToolCallIds = new Set<string>();
             for (const msg of bodyJson.messages) {
+              if (msg.role === "assistant" && Array.isArray(msg.tool_calls)) {
+                for (const tc of msg.tool_calls) {
+                  if (tc && typeof tc.id === "string") {
+                    validToolCallIds.add(tc.id);
+                  }
+                }
+              }
+            }
+            console.warn(`[llm-gated-fetch] 🔍 P130: 收集到 ${validToolCallIds.size} 个有效的 tool_call_id`);
+            
+            for (const msg of bodyJson.messages) {
+              // developer → system
               if (msg.role === "developer") {
                 msg.role = "system";
                 convertedCount++;
               }
+              // 🔧 P125: toolResult → tool (OpenAI 标准格式)
+              if (msg.role === "toolResult") {
+                msg.role = "tool";
+                toolResultConvertedCount++;
+              }
+              
+              // 🔧 P130: 验证 tool 消息的 tool_call_id 是否有效
+              if (msg.role === "tool") {
+                const msgAny = msg as any;
+                const toolCallId = msgAny.tool_call_id || msgAny.toolCallId;
+                
+                if (!toolCallId) {
+                  console.error(`[llm-gated-fetch] ❌ P130: tool 消息缺少 tool_call_id！content 预览: ${(msgAny.content || "").substring(0, 100)}...`);
+                } else if (!validToolCallIds.has(toolCallId)) {
+                  console.error(`[llm-gated-fetch] ❌ P130: tool_call_id="${toolCallId}" 不匹配任何 assistant.tool_calls[].id！`);
+                  console.error(`[llm-gated-fetch] ❌ P130: 有效的 IDs: [${Array.from(validToolCallIds).slice(0, 5).join(", ")}${validToolCallIds.size > 5 ? "..." : ""}]`);
+                  
+                  // 🔧 P130: 尝试修复 - 找到最近的一个未使用的 tool_call_id
+                  // 这是一个临时方案，正确的做法是在保存消息时就确保 ID 匹配
+                  const toolName = msgAny.name || msgAny.toolName || "unknown";
+                  console.warn(`[llm-gated-fetch] 🔧 P130: 尝试匹配工具名称="${toolName}"`);
+                  
+                  // 找到对应工具名称的 tool_call_id
+                  for (const prevMsg of bodyJson.messages) {
+                    if (prevMsg.role === "assistant" && Array.isArray(prevMsg.tool_calls)) {
+                      for (const tc of prevMsg.tool_calls) {
+                        if (tc && tc.function && tc.function.name === toolName && validToolCallIds.has(tc.id)) {
+                          msgAny.tool_call_id = tc.id;
+                          console.warn(`[llm-gated-fetch] ✅ P130: 修复 tool_call_id="${toolCallId}" → "${tc.id}"`);
+                          fixed = true;
+                          break;
+                        }
+                      }
+                    }
+                  }
+                } else {
+                  console.warn(`[llm-gated-fetch] ✅ P130: tool_call_id="${toolCallId}" 验证通过`);
+                }
+              }
             }
             if (convertedCount > 0) {
               console.warn(`[llm-gated-fetch] 🔄 Grok: 转换 developer → system role (${convertedCount} 条消息)`);
+              fixed = true;
+            }
+            if (toolResultConvertedCount > 0) {
+              console.warn(`[llm-gated-fetch] 🔄 P125: 转换 toolResult → tool role (${toolResultConvertedCount} 条消息)`);
               fixed = true;
             }
             
@@ -1030,8 +1120,19 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
             const msgCount = Array.isArray(bodyJson.messages) ? bodyJson.messages.length : 0;
             let totalContentChars = 0;
             let maxContentChars = 0;
+            let toolMsgCount = 0;
+            let assistantMsgCount = 0;
+            let totalToolCallIds = 0;
+            
             if (Array.isArray(bodyJson.messages)) {
               for (const msg of bodyJson.messages) {
+                if (msg.role === "tool") toolMsgCount++;
+                if (msg.role === "assistant") {
+                  assistantMsgCount++;
+                  if (Array.isArray(msg.tool_calls)) {
+                    totalToolCallIds += msg.tool_calls.length;
+                  }
+                }
                 if (typeof msg.content === "string") {
                   totalContentChars += msg.content.length;
                   maxContentChars = Math.max(maxContentChars, msg.content.length);
@@ -1048,7 +1149,13 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
             
             console.warn(`[llm-gated-fetch] [DEBUG-Grok] 模型: ${modelName}, 推理模型: ${isReasoningModel}`);
             console.warn(`[llm-gated-fetch] [DEBUG-Grok] tools数量: ${hasTools ? bodyJson.tools.length : 0}, stream: ${hasStream}`);
-            console.warn(`[llm-gated-fetch] [DEBUG-Grok] 消息统计: ${msgCount}条, 总字符: ${totalContentChars}, 最大单条: ${maxContentChars}`);
+            console.warn(`[llm-gated-fetch] [DEBUG-Grok] 消息统计: ${msgCount}条 (assistant=${assistantMsgCount}, tool=${toolMsgCount}), 总字符: ${totalContentChars}`);
+            console.warn(`[llm-gated-fetch] [DEBUG-Grok] tool_calls 总数: ${totalToolCallIds}, tool 消息数: ${toolMsgCount}`);
+            
+            // 🔧 P130: 检查 tool_calls 与 tool 消息数量是否匹配
+            if (toolMsgCount > 0 && toolMsgCount !== totalToolCallIds) {
+              console.error(`[llm-gated-fetch] ❌ P130: tool 消息数(${toolMsgCount}) 与 tool_calls 总数(${totalToolCallIds}) 不匹配！`);
+            }
             
             // 🔧 Fix: Grok reasoning 模型 + tools 的特殊参数配置
             if (isReasoningModel && hasTools) {
@@ -1069,13 +1176,12 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
               }
               
               // 🔧 Fix: 某些 API 在 tool calling 模式下 streaming 可能不工作
-              // 检测风险组合并记录详细警告
+              // 检测风险组合并记录警告，但不强制禁用 stream
+              // ⚠️ P131 已禁用：stream=false 会导致 Grok 直接卡死，保持 stream=true
               if (bodyJson.stream === true) {
-                console.warn(`[llm-gated-fetch] [DEBUG-Grok] ⚠️ stream=true + tools + reasoning 组合可能导致卡死或空响应`);
-                console.warn(`[llm-gated-fetch] [DEBUG-Grok] 建议：`);
-                console.warn(`[llm-gated-fetch] [DEBUG-Grok]   1. 在模型配置中设置 "disableStreaming": true`);
-                console.warn(`[llm-gated-fetch] [DEBUG-Grok]   2. 或在 clawdbot.json 中添加: "modelSettings": { "grok-4-1-fast-reasoning": { "stream": false } }`);
-                console.warn(`[llm-gated-fetch] [DEBUG-Grok]   3. 或减少历史消息数量（当前 ${bodyJson.messages?.length || 0} 条）`);
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok] ⚠️ stream=true + tools + reasoning 组合，可能导致问题但保持 stream=true`);
+                // bodyJson.stream = false; // ❌ 已禁用：会导致直接卡死
+                // fixed = true;
               }
             }
             
@@ -1173,7 +1279,7 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
             // 重新序列化修复后的 body
             try {
               const serialized = JSON.stringify(bodyJson);
-              init = { ...init, body: serialized };
+              actualInit = { ...actualInit, body: serialized };
               console.warn(`[llm-gated-fetch] ✅ Body 序列化成功，长度: ${serialized.length} 字节`);
             } catch (serializeError) {
               console.error(`[llm-gated-fetch] ❌ Body 序列化失败:`, serializeError);
@@ -1190,7 +1296,7 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
     
     try {
       console.log(`[llm-gated-fetch] 🌐 调用 original fetch...`);
-      const response = await original(input, { ...init, signal: combinedSignal });
+      const response = await original(input, { ...actualInit, signal: combinedSignal });
       
       console.log(`[llm-gated-fetch] ✅ Fetch 完成，状态码：${response.status}`);
       
@@ -1211,6 +1317,167 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
             firstAtMs: current.firstAtMs, 
             failureCount: current.failureCount + 1 
           });
+        }
+      }
+      
+      // 🔧 P127: 检测 Grok 推理模型空响应，触发 stream=false 降级重试
+      // 必须在返回 response 之前同步检测
+      const reqUrl = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+      const isGrokApi = reqUrl.includes("vectorengine") && reqUrl.includes("/v1/");
+      
+      if (response.ok && isGrokApi && streamFallbackAttempt < MAX_STREAM_FALLBACK_ATTEMPTS && actualInit?.body && typeof actualInit.body === "string") {
+        // 提取请求参数（在 try 外部，确保能看到诊断日志）
+        let bodyJson: any;
+        try {
+          bodyJson = JSON.parse(actualInit.body);
+        } catch (e) {
+          console.warn(`[llm-gated-fetch] P127: 请求 body 解析失败:`, e);
+          bodyJson = {};
+        }
+        
+        const isReasoningModel = typeof bodyJson.model === "string" && bodyJson.model.includes("reasoning");
+        const hasStream = bodyJson.stream === true;
+        const hasTools = Array.isArray(bodyJson.tools) && bodyJson.tools.length > 0;
+        
+        console.warn(`[llm-gated-fetch] 🔍 P127 条件检查: isReasoningModel=${isReasoningModel}, hasStream=${hasStream}, hasTools=${hasTools}`);
+        
+        // 只有推理模型 + stream + tools 组合才需要检测
+        if (isReasoningModel && hasStream && hasTools) {
+          try {
+            // 克隆 response 以读取内容（不消耗原始 body）
+            const clonedResponse = response.clone();
+            const bodyText = await clonedResponse.text();
+            
+            // 检测空响应（SSE 格式：data: {"choices":[]} 或 data: [DONE])
+            const isEmptyChoices = bodyText.includes('"choices":[]') || bodyText.includes('"choices": []');
+            const hasFunctionCall = bodyText.includes("functionCall");
+            const hasToolCalls = bodyText.includes("tool_calls");
+            const hasValidToolResponse = hasFunctionCall || hasToolCalls;
+            const hasContent = bodyText.includes('"content"') && !bodyText.includes('"content":null') && !bodyText.includes('"content":[]');
+            
+            console.warn(`[llm-gated-fetch] 🔍 P127 响应检测: isEmptyChoices=${isEmptyChoices}, hasValidToolResponse=${hasValidToolResponse}, hasContent=${hasContent}, bodyLength=${bodyText.length}`);
+            
+            // 检测空响应且需要降级
+            if (isEmptyChoices && !hasValidToolResponse && !hasContent) {
+              streamFallbackAttempt++;
+              console.warn(`[llm-gated-fetch] 🚨 P127: 检测到 Grok 推理模型空响应（stream=true + tools）`);
+              console.warn(`[llm-gated-fetch] 🔄 P127: 自动降级为非 stream 模式重试 (${streamFallbackAttempt}/${MAX_STREAM_FALLBACK_ATTEMPTS})`);
+              
+              // 清除失败计数，允许降级重试
+              attempts.delete(attemptKey);
+              
+              // 移除已 abort 的 signal
+              const { signal: _, ...initWithoutSignal } = actualInit;
+              return executeRequestWithRetry(attemptKey, input, initWithoutSignal, true);
+            }
+          } catch (parseError) {
+            // 解析失败，继续返回原始响应
+            console.warn(`[llm-gated-fetch] P127: 空响应检测解析失败:`, parseError);
+          }
+        }
+      }
+      
+      // 🔧 P131: 当 forceNonStream=true 时，需要将非流式响应转换为 SSE 格式
+      // OpenAI SDK 的 streamOpenAICompletions 期望 SSE 格式，不处理非流式 JSON
+      if (forceNonStream && response.ok) {
+        const reqUrl = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+        const isOpenAICompletions = reqUrl.includes("/v1/chat/completions");
+        
+        if (isOpenAICompletions) {
+          try {
+            const responseText = await response.text();
+            console.warn(`[llm-gated-fetch] 🔧 P131: 检测到非流式响应，转换为 SSE 格式`);
+            console.warn(`[llm-gated-fetch] 🔧 P131: 原始响应长度: ${responseText.length}`);
+            
+            // 解析非流式响应
+            const nonStreamResponse = JSON.parse(responseText);
+            
+            // 转换为 SSE 格式
+            // 非流式格式: {"id":"...", "choices":[{"message":{"content":"..."}}]}
+            // SSE 格式: data: {"id":"...", "choices":[{"delta":{"content":"..."}}]}
+            const sseChunks: string[] = [];
+            
+            if (nonStreamResponse.choices && Array.isArray(nonStreamResponse.choices)) {
+              for (const choice of nonStreamResponse.choices) {
+                if (choice.message) {
+                  // 🔧 P131: 转换 tool_calls 格式
+                  // 非流式: tool_calls: [{"id":"xxx", "type":"function", "function":{...}}]
+                  // 流式 delta: tool_calls: [{"index":0, "id":"xxx", "type":"function", "function":{...}}]
+                  let deltaToolCalls: unknown[] | undefined = undefined;
+                  if (Array.isArray(choice.message.tool_calls) && choice.message.tool_calls.length > 0) {
+                    deltaToolCalls = choice.message.tool_calls.map((tc: any, idx: number) => ({
+                      index: idx,
+                      id: tc.id || "",
+                      type: tc.type || "function",
+                      function: tc.function || { name: "", arguments: "" }
+                    }));
+                  }
+                  
+                  // 创建 delta 格式的 chunk
+                  const delta: Record<string, unknown> = {
+                    role: "assistant",
+                  };
+                  
+                  // 只有有内容时才添加 content
+                  if (choice.message.content) {
+                    delta.content = choice.message.content;
+                  }
+                  
+                  // 只有有 tool_calls 时才添加
+                  if (deltaToolCalls && deltaToolCalls.length > 0) {
+                    delta.tool_calls = deltaToolCalls;
+                  }
+                  
+                  const sseChunk = {
+                    id: nonStreamResponse.id || `chatcmpl-${Date.now()}`,
+                    object: "chat.completion.chunk",
+                    created: nonStreamResponse.created || Math.floor(Date.now() / 1000),
+                    model: nonStreamResponse.model || "unknown",
+                    choices: [{
+                      index: choice.index || 0,
+                      delta: delta,
+                      finish_reason: choice.finish_reason || "stop"
+                    }]
+                  };
+                  sseChunks.push(`data: ${JSON.stringify(sseChunk)}`);
+                }
+              }
+            }
+            
+            // 添加 usage chunk（如果有）
+            if (nonStreamResponse.usage) {
+              const usageChunk = {
+                id: nonStreamResponse.id || `chatcmpl-${Date.now()}`,
+                object: "chat.completion.chunk",
+                created: nonStreamResponse.created || Math.floor(Date.now() / 1000),
+                model: nonStreamResponse.model || "unknown",
+                choices: [],
+                usage: nonStreamResponse.usage
+              };
+              sseChunks.push(`data: ${JSON.stringify(usageChunk)}`);
+            }
+            
+            // 添加 [DONE]
+            sseChunks.push("data: [DONE]");
+            
+            const sseBody = sseChunks.join("\n\n") + "\n\n";
+            console.warn(`[llm-gated-fetch] 🔧 P131: 转换后 SSE 长度: ${sseBody.length}, chunks: ${sseChunks.length}`);
+            console.warn(`[llm-gated-fetch] 🔧 P131: SSE 预览: ${sseBody.substring(0, 500)}...`);
+            
+            // 返回转换后的 SSE 响应
+            return new Response(sseBody, {
+              status: response.status,
+              statusText: response.statusText,
+              headers: {
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+              }
+            });
+          } catch (parseError) {
+            console.error(`[llm-gated-fetch] ❌ P131: 非流式响应转换失败:`, parseError);
+            // 转换失败，返回原始响应
+          }
         }
       }
       
@@ -1248,6 +1515,23 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
                 console.error(`[llm-gated-fetch] ❌ [DEBUG-Grok] 建议：尝试移除 tools 或设置 stream=false`);
               } else if (isGrokApi && hasValidToolResponse) {
                 console.warn(`[llm-gated-fetch] ✅ [DEBUG-Grok] 检测到有效 tool 调用响应，非空响应`);
+              }
+              
+              // 🔧 P123: 检测极短响应（可能是 API 错误）
+              if (isGrokApi && hasContent && !hasValidToolResponse) {
+                try {
+                  // 提取 completion_tokens
+                  const tokensMatch = bodyText.match(/"completion_tokens"\s*:\s*(\d+)/);
+                  if (tokensMatch) {
+                    const completionTokens = parseInt(tokensMatch[1], 10);
+                    if (completionTokens > 0 && completionTokens < 10) {
+                      console.warn(`[llm-gated-fetch] ⚠️ P123: 检测到极短响应（${completionTokens} tokens），可能是 API 错误或内容过滤`);
+                      console.warn(`[llm-gated-fetch] ⚠️ P123: 响应内容: ${preview.substring(0, 200)}`);
+                    }
+                  }
+                } catch {
+                  // 解析失败，忽略
+                }
               }
               
               // 💾 存储 tool call 数据（用于下一次审批 UI 展示）
@@ -1336,6 +1620,41 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       if (error && typeof error === "object" && "name" in error) {
         const errorName = error.name;
         console.warn(`[llm-gated-fetch] ⚠️ 可重试的错误 (${errorName})，正在重试...`);
+        
+        // 🔧 P122: Grok 推理模型 stream 超时降级
+        if (errorName === "AbortError" && streamFallbackAttempt < MAX_STREAM_FALLBACK_ATTEMPTS) {
+          const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+          const isGrokApi = url.includes("vectorengine") && url.includes("/v1/");
+          
+          // 🔧 P124: 使用 actualInit 而不是 init，保留所有修复
+          if (isGrokApi && actualInit?.body && typeof actualInit.body === "string") {
+            try {
+              const bodyJson = JSON.parse(actualInit.body);
+              const isReasoningModel = typeof bodyJson.model === "string" && bodyJson.model.includes("reasoning");
+              const hasStream = bodyJson.stream === true;
+              const hasTools = Array.isArray(bodyJson.tools) && bodyJson.tools.length > 0;
+              const hasToolResults = Array.isArray(bodyJson.messages) && 
+                bodyJson.messages.some((m: any) => m.role === "tool" || m.role === "toolResult");
+              
+              if (isReasoningModel && hasStream && hasTools && hasToolResults) {
+                streamFallbackAttempt++;
+                console.warn(`[llm-gated-fetch] 🚨 P122: 检测到 Grok 推理模型 stream + tool result 超时`);
+                console.warn(`[llm-gated-fetch] 🔄 P122: 自动降级为非 stream 模式重试 (${streamFallbackAttempt}/${MAX_STREAM_FALLBACK_ATTEMPTS})`);
+                
+                // 清除失败计数，允许降级重试
+                attempts.delete(attemptKey);
+                
+                // 🔧 P124: 关键修复！使用 actualInit 保留所有修复，并移除已 abort 的 signal
+                // 因为原始 signal 已经 abort，重试时必须创建新的 signal
+                const { signal: _, ...initWithoutSignal } = actualInit;
+                console.warn(`[llm-gated-fetch] 🔧 P124: 重试时移除已 abort 的 signal，使用 actualInit（保留消息修复）`);
+                return executeRequestWithRetry(attemptKey, input, initWithoutSignal, true);
+              }
+            } catch {
+              // 解析失败，走正常重试流程
+            }
+          }
+        }
       } else {
         console.warn("[llm-gated-fetch] ⚠️ 可重试的错误，正在重试...");
       }
@@ -1345,12 +1664,24 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       console.warn(`[llm-gated-fetch] 🔄 正在重试 LLM 请求（第 ${currentAttempt?.failureCount || 1} 次失败后重试），等待 ${retryDelay}ms...`);
       
       // 🔧 DEBUG: 追踪重试时的参数状态
-      const bodyType = typeof init?.body;
-      const bodyLength = typeof init?.body === "string" ? init.body.length : 0;
-      console.warn(`[llm-gated-fetch] [DEBUG-Retry] input类型=${typeof input}, init.body类型=${bodyType}, init.body长度=${bodyLength}`);
+      const bodyType = typeof actualInit?.body;
+      const bodyLength = typeof actualInit?.body === "string" ? actualInit.body.length : 0;
+      console.warn(`[llm-gated-fetch] [DEBUG-Retry] input类型=${typeof input}, actualInit.body类型=${bodyType}, actualInit.body长度=${bodyLength}`);
+      
+      // 🔧 P124: 如果是 AbortError，移除已 aborted 的 signal
+      // 因为 AbortSignal.any() 会立即返回 aborted signal 如果任一输入已 aborted
+      const errorName = (error && typeof error === "object" && "name" in error) ? (error as Error).name : "";
+      const isAbortError = errorName === "AbortError";
+      
+      if (isAbortError && actualInit?.signal) {
+        console.warn(`[llm-gated-fetch] 🔧 P124: 普通重试路径 - 移除已 abort 的 signal`);
+        const { signal: _, ...initWithoutSignal } = actualInit;
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+        return executeRequestWithRetry(attemptKey, input, initWithoutSignal, forceNonStream);
+      }
       
       await new Promise(resolve => setTimeout(resolve, retryDelay));
-      return executeRequestWithRetry(attemptKey, input, init);
+      return executeRequestWithRetry(attemptKey, input, actualInit, forceNonStream);
     }
   };
 

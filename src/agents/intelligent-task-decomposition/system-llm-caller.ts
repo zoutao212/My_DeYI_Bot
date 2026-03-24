@@ -124,7 +124,8 @@ export function createSystemLLMCaller(params?: SystemLLMCallerConfig): LLMCaller
   const config = params?.config;
   const maxTokens = params?.maxTokens ?? 8192;
   const temperature = params?.temperature ?? 0.3;
-  const timeoutMs = params?.timeoutMs ?? 120_000;
+  // 🔧 P123: 推理模型需要更长超时（从 120s 提高到 180s）
+  const timeoutMs = params?.timeoutMs ?? 180_000;
 
   if (autoDetected.provider) {
     console.log(`[SystemLLMCaller] P79: 自动检测到 provider=${autoDetected.provider}, model=${autoDetected.modelId}`);
