@@ -8,15 +8,23 @@ import { DEFAULT_CONTEXT_TOKENS } from "../defaults.js";
 import { normalizeModelCompat } from "../model-compat.js";
 import { normalizeProviderId } from "../model-selection.js";
 
-type InlineModelEntry = ModelDefinitionConfig & { provider: string };
+type InlineModelEntry = ModelDefinitionConfig & { provider: string; baseUrl?: string };
+
+const DEFAULT_MODEL_API: Api = "openai-completions";
 
 export function buildInlineProviderModels(
-  providers: Record<string, { models?: ModelDefinitionConfig[] }>,
+  providers: Record<string, { baseUrl?: string; api?: string; models?: ModelDefinitionConfig[] }>,
 ): InlineModelEntry[] {
   return Object.entries(providers).flatMap(([providerId, entry]) => {
     const trimmed = providerId.trim();
     if (!trimmed) return [];
-    return (entry?.models ?? []).map((model) => ({ ...model, provider: trimmed }));
+    return (entry?.models ?? []).map((model) => ({
+      ...model,
+      provider: trimmed,
+      baseUrl: entry.baseUrl,
+      // api 从 provider 级别继承（如果模型没有指定），默认 openai-completions
+      api: (model.api ?? entry.api ?? DEFAULT_MODEL_API) as ModelDefinitionConfig["api"],
+    }));
   });
 }
 
@@ -58,7 +66,17 @@ export function resolveModel(
       (entry) => normalizeProviderId(entry.provider) === normalizedProvider && entry.id === modelId,
     );
     if (inlineMatch) {
-      const normalized = normalizeModelCompat(inlineMatch as Model<Api>);
+      // 🔧 确保 input 字段有默认值（pi-ai 要求此字段）
+      const modelWithDefaults: Model<Api> = {
+        ...inlineMatch,
+        input: inlineMatch.input ?? ["text"],
+        baseUrl: inlineMatch.baseUrl ?? "",
+        cost: inlineMatch.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: inlineMatch.contextWindow ?? DEFAULT_CONTEXT_TOKENS,
+        maxTokens: inlineMatch.maxTokens ?? DEFAULT_CONTEXT_TOKENS,
+        reasoning: inlineMatch.reasoning ?? false,
+      } as Model<Api>;
+      const normalized = normalizeModelCompat(modelWithDefaults);
       return {
         model: normalized,
         authStorage,

@@ -50,6 +50,55 @@ export function handleMessageUpdate(
       : undefined;
   const evtType = typeof assistantRecord?.type === "string" ? assistantRecord.type : "";
 
+  // Handle thinking events for reasoning models (e.g., LM Studio qwen with reasoning_content)
+  if (evtType === "thinking_delta" || evtType === "thinking_start" || evtType === "thinking_end") {
+    const delta = typeof assistantRecord?.delta === "string" ? assistantRecord.delta : "";
+    const content = typeof assistantRecord?.content === "string" ? assistantRecord.content : "";
+
+    appendRawStream({
+      ts: Date.now(),
+      event: "assistant_thinking_stream",
+      runId: ctx.params.runId,
+      sessionId: (ctx.params.session as { id?: string }).id,
+      evtType,
+      delta,
+      content,
+    });
+
+    // For reasoning-only models (like LM Studio qwen with reasoning_content),
+    // treat thinking content as text output to ensure visible output.
+    // This is critical for models that only emit reasoning_content without regular text.
+    if (delta) {
+      ctx.state.deltaBuffer += delta;
+      if (ctx.blockChunker) {
+        ctx.blockChunker.append(delta);
+      } else {
+        ctx.state.blockBuffer += delta;
+      }
+
+      // Always emit as assistant stream for web UI when model outputs reasoning_content
+      // This ensures models like LM Studio qwen produce visible output
+      const next = ctx.stripBlockTags(ctx.state.deltaBuffer, {
+        thinking: false,
+        final: false,
+        inlineCode: createInlineCodeState(),
+      }).trim();
+      if (next && next !== ctx.state.lastStreamedAssistant) {
+        ctx.state.lastStreamedAssistant = next;
+        emitAgentEvent({
+          runId: ctx.params.runId,
+          stream: "assistant",
+          data: { text: next, delta },
+        });
+        void ctx.params.onAgentEvent?.({ stream: "assistant", data: { text: next, delta } });
+        if (ctx.params.onPartialReply && ctx.state.shouldEmitPartialReplies) {
+          void ctx.params.onPartialReply({ text: next });
+        }
+      }
+    }
+    return;
+  }
+
   if (evtType !== "text_delta" && evtType !== "text_start" && evtType !== "text_end") {
     return;
   }
@@ -224,21 +273,33 @@ export function handleMessageEnd(
   promoteThinkingTagsToBlocks(assistantMessage);
 
   const rawText = extractAssistantText(assistantMessage);
+  const extractedThinking = extractAssistantThinking(assistantMessage);
   appendRawStream({
     ts: Date.now(),
     event: "assistant_message_end",
     runId: ctx.params.runId,
     sessionId: (ctx.params.session as { id?: string }).id,
     rawText,
-    rawThinking: extractAssistantThinking(assistantMessage),
+    rawThinking: extractedThinking,
   });
 
-  const text = ctx.stripBlockTags(rawText, { thinking: false, final: false });
+  let text = ctx.stripBlockTags(rawText, { thinking: false, final: false });
   const rawThinking =
     ctx.state.includeReasoning || ctx.state.streamReasoning
-      ? extractAssistantThinking(assistantMessage) || extractThinkingFromTaggedText(rawText)
+      ? extractedThinking || extractThinkingFromTaggedText(rawText)
       : "";
   const formattedReasoning = rawThinking ? formatReasoningMessage(rawThinking) : "";
+
+  // For reasoning-only models (like LM Studio qwen with reasoning_content),
+  // if text is empty but we have thinking content from streaming or the message,
+  // use the thinking content as the output
+  if (!text.trim() && ctx.state.deltaBuffer.trim()) {
+    text = ctx.stripBlockTags(ctx.state.deltaBuffer, { thinking: false, final: false });
+  }
+  // If still no text but have thinking from the message, use that
+  if (!text.trim() && extractedThinking.trim()) {
+    text = extractedThinking.trim();
+  }
 
   const streamedTextPreview = text.trim();
   if (streamedTextPreview) {
