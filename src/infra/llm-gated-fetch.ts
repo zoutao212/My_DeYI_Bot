@@ -1204,24 +1204,45 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
               }
             }
             
-            // 🆕 P121: Grok reasoning 模型长上下文优化
-            // 当消息数量过多时，保留系统消息 + 最后一次完整的 tool call 对 + 最近消息
+            // 🆕 P121: Grok reasoning 模型长上下文优化 V2
+            // 策略：基于"用户turn数"而非"消息条数"进行截断
+            // 保留：system(1条) + 最后tool call对 + 最近3个用户turn + 当前用户消息
             if (isReasoningModel && Array.isArray(bodyJson.messages)) {
-              const MAX_GROK_MESSAGES = 10; // 最多保留 10 条消息
+              const MAX_GROK_USER_TURNS = 3; // 最多保留 3 个用户 turn
+              const messages = bodyJson.messages;
               
-              if (bodyJson.messages.length > MAX_GROK_MESSAGES) {
-                console.warn(`[llm-gated-fetch] [DEBUG-Grok] ⚠️ 消息过多 (${bodyJson.messages.length}条)，智能截断至 ${MAX_GROK_MESSAGES} 条`);
-                
-                // 🔧 修复：保留完整的 tool call 对（assistant + tool result）
-                // 找到最后一对完整的 tool call（assistant + tool results）
+              // 统计用户 turn 数
+              const userTurnIndices: number[] = [];
+              
+              for (let i = 0; i < messages.length; i++) {
+                const msg = messages[i];
+                if (msg.role === "user") {
+                  userTurnIndices.push(i);
+                }
+              }
+              
+              // 如果用户 turn 数没超过限制，不需要截断
+              if (userTurnIndices.length <= MAX_GROK_USER_TURNS) {
+                // 但仍检查是否需要截断 system message 长度
+                if (fixed) {
+                  // 重新序列化
+                  try {
+                    const serialized = JSON.stringify(bodyJson);
+                    actualInit = { ...actualInit, body: serialized };
+                  } catch (serializeError) {
+                    console.error(`[llm-gated-fetch] ❌ Body 序列化失败:`, serializeError);
+                  }
+                }
+                // 跳过截断逻辑
+              } else {
+                // 需要截断：找到最后一个完整 tool call 对
                 let lastToolCallPair: { assistantIdx: number; toolIndices: number[] } | null = null;
-                for (let i = bodyJson.messages.length - 1; i >= 0; i--) {
-                  const msg = bodyJson.messages[i];
-                  if (msg.role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+                for (let i = messages.length - 1; i >= 0; i--) {
+                  const msg = messages[i];
+                  if (msg.role === "assistant" && Array.isArray((msg as any).tool_calls) && (msg as any).tool_calls.length > 0) {
                     const toolIndices: number[] = [];
-                    // 找到紧跟其后的所有 tool 消息
-                    for (let j = i + 1; j < bodyJson.messages.length; j++) {
-                      if (bodyJson.messages[j].role === "tool") {
+                    for (let j = i + 1; j < messages.length; j++) {
+                      if (messages[j].role === "tool") {
                         toolIndices.push(j);
                       } else {
                         break;
@@ -1234,42 +1255,63 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
                   }
                 }
                 
-                // 构建保留的消息列表
+                // 构建保留索引
                 const preservedIndices = new Set<number>();
                 
-                // 1. 保留系统消息
-                for (let i = 0; i < bodyJson.messages.length; i++) {
-                  if (bodyJson.messages[i].role === "system") {
-                    preservedIndices.add(i);
-                  }
+                // 1. 保留系统消息（第一条）
+                if (messages.length > 0 && messages[0].role === "system") {
+                  preservedIndices.add(0);
                 }
                 
-                // 2. 保留最后一次完整的 tool call 对
+                // 2. 保留最后一个完整的 tool call 对
                 if (lastToolCallPair) {
                   preservedIndices.add(lastToolCallPair.assistantIdx);
                   for (const idx of lastToolCallPair.toolIndices) {
                     preservedIndices.add(idx);
                   }
-                  console.warn(`[llm-gated-fetch] [DEBUG-Grok] 保留 tool call 对: assistant[${lastToolCallPair.assistantIdx}] + tools[${lastToolCallPair.toolIndices.join(",")}]`);
                 }
                 
-                // 3. 从最近的用户消息开始填充，直到达到限制
-                const remainingSlots = MAX_GROK_MESSAGES - preservedIndices.size;
-                if (remainingSlots > 0) {
-                  // 从后向前添加最近的消息
-                  for (let i = bodyJson.messages.length - 1; i >= 0 && preservedIndices.size < MAX_GROK_MESSAGES; i--) {
-                    if (!preservedIndices.has(i)) {
+                // 3. 保留最近 MAX_GROK_USER_TURNS 个用户 turn 及其对应的 assistant 回复
+                const recentUserTurns = userTurnIndices.slice(-MAX_GROK_USER_TURNS);
+                for (const userIdx of recentUserTurns) {
+                  preservedIndices.add(userIdx);
+                  // 保留该用户消息之后的 assistant 回复
+                  for (let i = userIdx + 1; i < messages.length; i++) {
+                    const role = messages[i].role;
+                    if (role === "assistant" || role === "tool") {
                       preservedIndices.add(i);
+                    } else {
+                      break; // 遇到其他角色停止
                     }
                   }
                 }
                 
                 // 按原始顺序重建消息数组
                 const sortedIndices = Array.from(preservedIndices).sort((a, b) => a - b);
-                bodyJson.messages = sortedIndices.map(i => bodyJson.messages[i]);
+                const oldLength = messages.length;
+                bodyJson.messages = sortedIndices.map(i => messages[i]);
                 fixed = true;
                 
-                console.warn(`[llm-gated-fetch] [DEBUG-Grok] 截断后: ${bodyJson.messages.length} 条消息（保留完整 tool call 对）`);
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok] V2截断: ${oldLength}→${bodyJson.messages.length}条 (保留${recentUserTurns.length}个userTurn + 1个toolCall对)`);
+              }
+              
+              // 🆕 P121b: 截断 system message 中过长的内容（SOUL.md 等）
+              // Grok 推理模型的 system prompt 很长，其中 SOUL.md 等内容可以压缩
+              for (const msg of bodyJson.messages) {
+                if (msg.role === "system" || msg.role === "developer") {
+                  const content = msg.content;
+                  if (typeof content === "string" && content.length > 8000) {
+                    // 截断过长内容，保留前 6000 字符 + 后 2000 字符
+                    const MAX_PREFIX = 6000;
+                    const MAX_SUFFIX = 2000;
+                    const truncated = content.substring(0, MAX_PREFIX) + 
+                      `\n\n[... 内容已截断，保留开头和结尾 ...]\n\n` +
+                      content.substring(content.length - MAX_SUFFIX);
+                    msg.content = truncated;
+                    fixed = true;
+                    console.warn(`[llm-gated-fetch] [DEBUG-Grok] 🔧 截断 system/developer message: ${content.length}→${truncated.length}字符`);
+                  }
+                }
               }
             }
           }
@@ -1323,8 +1365,13 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       // 必须在返回 response 之前同步检测
       const reqUrl = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
       const isGrokApi = reqUrl.includes("vectorengine") && reqUrl.includes("/v1/");
-      
-      if (response.ok && isGrokApi && streamFallbackAttempt < MAX_STREAM_FALLBACK_ATTEMPTS && actualInit?.body && typeof actualInit.body === "string") {
+
+      // 🆕 P127 FIX: 只有在非 forceNonStream 模式且还未降级过时才检测
+      // 原因：
+      // 1. streamFallbackAttempt 应该在每次成功的非流式响应后重置
+      // 2. 只有当 stream=true + tools + 推理模型时才可能需要降级
+      // 3. forceNonStream 已经表示降级过一次，不需要再次检测
+      if (!forceNonStream && isGrokApi && streamFallbackAttempt < MAX_STREAM_FALLBACK_ATTEMPTS && actualInit?.body && typeof actualInit.body === "string") {
         // 提取请求参数（在 try 外部，确保能看到诊断日志）
         let bodyJson: any;
         try {
@@ -1380,7 +1427,7 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       // OpenAI SDK 的 streamOpenAICompletions 期望 SSE 格式，不处理非流式 JSON
       // 另外：如果检测到 Grok 推理模型 + tools，也要强制转换（因为 stream=false 直接返回非流式响应）
       // 注意：reqUrl 和 isGrokApi 已在 P127 段声明，这里直接使用
-      
+
       // 检测是否需要强制转换：forceNonStream 或者 Grok推理模型+tools
       let p131BodyJson: any = {};
       try {
@@ -1391,8 +1438,13 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       const isReasoningModelWithTools = isGrokApi &&
         typeof p131BodyJson.model === "string" && p131BodyJson.model.includes("reasoning") &&
         Array.isArray(p131BodyJson.tools) && p131BodyJson.tools.length > 0;
-      
-      if ((forceNonStream || isReasoningModelWithTools) && response.ok) {
+
+      // 🆕 P131 FIX: forceNonStream=true 时跳过 P131，因为已经返回过了
+      // 原因：如果 forceNonStream=true，说明是在重试降级中，响应已经被处理过了
+      // 如果再次处理会导致 TypeError: cannot clone already consumed body
+      if (forceNonStream) {
+        console.warn(`[llm-gated-fetch] 🔧 P131: forceNonStream=true，跳过 P131 转换`);
+      } else if ((forceNonStream || isReasoningModelWithTools) && response.ok) {
         const isOpenAICompletions = reqUrl.includes("/v1/chat/completions");
         
         if (isOpenAICompletions) {
@@ -1497,6 +1549,11 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
             console.warn(`[llm-gated-fetch] 🔧 P131: 转换后 SSE 长度: ${sseBody.length}, chunks: ${sseChunks.length}`);
             console.warn(`[llm-gated-fetch] 🔧 P131: SSE 预览: ${sseBody.substring(0, 500)}...`);
             
+            // 🆕 P131 FIX: 成功转换后重置 streamFallbackAttempt
+            // 避免后续请求继续使用降级状态
+            streamFallbackAttempt = 0;
+            console.warn(`[llm-gated-fetch] 🔧 P131: 成功转换 SSE，重置 streamFallbackAttempt=0`);
+
             // 返回转换后的 SSE 响应
             return new Response(sseBody, {
               status: response.status,
