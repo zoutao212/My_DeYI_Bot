@@ -404,7 +404,11 @@ function sanitizeGrokToolCalls(messages: AgentMessage[]): AgentMessage[] {
             // 跳过这个 assistant 消息，因为它的内容全部是 toolCall
             continue;
           }
-          out.push({ ...assistant, content: nextContent });
+          // 🔧 关键修复：删除 tool_calls 数组，因为它们已经被转换为文本
+          // 否则截断逻辑会错误地保留孤立的 tool_call（没有对应的 tool_result）
+          // @ts-ignore: tool_calls 可能存在于 assistant 消息中
+          const { tool_calls, ...rest } = assistant as any;
+          out.push({ ...rest, content: nextContent });
         } else {
           out.push(msg);
         }
