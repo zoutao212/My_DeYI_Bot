@@ -40,6 +40,40 @@ export type ActiveRecallConfig = {
   maxContextMemories: number;
   /** Show search strategy in logs for debugging */
   debugStrategy: boolean;
+  /** Pass accessible_agent_ids for multi-agent retrieval */
+  enableMultiAgentRetrieval: boolean;
+  /** Pass session_ids for session-scoped retrieval */
+  enableSessionScoping: boolean;
+};
+
+/**
+ * Auto-capture configuration
+ * Controls how important information is extracted and stored
+ */
+export type AutoCaptureConfig = {
+  /** Enable enhanced capture API (with category classification) */
+  useEnhancedCapture: boolean;
+  /** Maximum items to capture per agent session */
+  maxCaptureItems: number;
+  /** Enable synapse activation after capture */
+  activateSynapsesOnCapture: boolean;
+  /** Custom capture categories */
+  captureCategories: Array<"preference" | "decision" | "fact" | "action" | "general">;
+  /** Importance threshold for auto-capture */
+  importanceThreshold: number;
+};
+
+/**
+ * Evolution configuration
+ * Controls periodic memory network evolution
+ */
+export type EvolutionConfig = {
+  /** Enable periodic evolution triggers */
+  enableAutoEvolution: boolean;
+  /** Minimum interval between evolution triggers (in agent sessions) */
+  evolutionIntervalSessions: number;
+  /** Run evolution in background (non-blocking) */
+  backgroundEvolution: boolean;
 };
 
 export type SuperMemoryConfig = {
@@ -48,6 +82,10 @@ export type SuperMemoryConfig = {
   autoRecall: boolean;
   /** Active recall strategy configuration (enhanced autoRecall) */
   activeRecall?: ActiveRecallConfig;
+  /** Auto-capture configuration */
+  autoCaptureConfig?: AutoCaptureConfig;
+  /** Evolution configuration */
+  evolution?: EvolutionConfig;
   defaults: SuperMemoryDefaultsConfig;
 };
 
@@ -71,6 +109,24 @@ const DEFAULT_ACTIVE_RECALL: ActiveRecallConfig = {
   injectContext: true,
   maxContextMemories: 5,
   debugStrategy: false,
+  enableMultiAgentRetrieval: false,
+  enableSessionScoping: false,
+};
+
+/** Default auto-capture configuration */
+const DEFAULT_AUTO_CAPTURE: AutoCaptureConfig = {
+  useEnhancedCapture: true,
+  maxCaptureItems: 10,
+  activateSynapsesOnCapture: true,
+  captureCategories: ["preference", "decision", "fact", "action", "general"],
+  importanceThreshold: 0.5,
+};
+
+/** Default evolution configuration */
+const DEFAULT_EVOLUTION: EvolutionConfig = {
+  enableAutoEvolution: false,
+  evolutionIntervalSessions: 10,
+  backgroundEvolution: true,
 };
 
 // ============================================================================
@@ -110,7 +166,7 @@ export const superMemoryConfigSchema = {
     const cfg = value as Record<string, unknown>;
     assertAllowedKeys(
       cfg,
-      ["server", "autoCapture", "autoRecall", "activeRecall", "defaults"],
+      ["server", "autoCapture", "autoRecall", "activeRecall", "autoCaptureConfig", "evolution", "defaults"],
       "memory-superagent config",
     );
 
@@ -186,6 +242,56 @@ export const superMemoryConfigSchema = {
         typeof activeRecallConfig?.debugStrategy === "boolean"
           ? activeRecallConfig.debugStrategy
           : DEFAULT_ACTIVE_RECALL.debugStrategy,
+      enableMultiAgentRetrieval:
+        typeof activeRecallConfig?.enableMultiAgentRetrieval === "boolean"
+          ? activeRecallConfig.enableMultiAgentRetrieval
+          : DEFAULT_ACTIVE_RECALL.enableMultiAgentRetrieval,
+      enableSessionScoping:
+        typeof activeRecallConfig?.enableSessionScoping === "boolean"
+          ? activeRecallConfig.enableSessionScoping
+          : DEFAULT_ACTIVE_RECALL.enableSessionScoping,
+    };
+
+    // Parse autoCaptureConfig
+    const autoCaptureConfig = cfg.autoCaptureConfig as Record<string, unknown> | undefined;
+    const parsedAutoCapture: AutoCaptureConfig = {
+      useEnhancedCapture:
+        typeof autoCaptureConfig?.useEnhancedCapture === "boolean"
+          ? autoCaptureConfig.useEnhancedCapture
+          : DEFAULT_AUTO_CAPTURE.useEnhancedCapture,
+      maxCaptureItems:
+        typeof autoCaptureConfig?.maxCaptureItems === "number"
+          ? Math.max(1, Math.min(50, autoCaptureConfig.maxCaptureItems))
+          : DEFAULT_AUTO_CAPTURE.maxCaptureItems,
+      activateSynapsesOnCapture:
+        typeof autoCaptureConfig?.activateSynapsesOnCapture === "boolean"
+          ? autoCaptureConfig.activateSynapsesOnCapture
+          : DEFAULT_AUTO_CAPTURE.activateSynapsesOnCapture,
+      captureCategories:
+        Array.isArray(autoCaptureConfig?.captureCategories)
+          ? autoCaptureConfig.captureCategories as Array<"preference" | "decision" | "fact" | "action" | "general">
+          : DEFAULT_AUTO_CAPTURE.captureCategories,
+      importanceThreshold:
+        typeof autoCaptureConfig?.importanceThreshold === "number"
+          ? Math.max(0, Math.min(1, autoCaptureConfig.importanceThreshold))
+          : DEFAULT_AUTO_CAPTURE.importanceThreshold,
+    };
+
+    // Parse evolution config
+    const evolutionConfig = cfg.evolution as Record<string, unknown> | undefined;
+    const parsedEvolution: EvolutionConfig = {
+      enableAutoEvolution:
+        typeof evolutionConfig?.enableAutoEvolution === "boolean"
+          ? evolutionConfig.enableAutoEvolution
+          : DEFAULT_EVOLUTION.enableAutoEvolution,
+      evolutionIntervalSessions:
+        typeof evolutionConfig?.evolutionIntervalSessions === "number"
+          ? Math.max(1, Math.min(100, evolutionConfig.evolutionIntervalSessions))
+          : DEFAULT_EVOLUTION.evolutionIntervalSessions,
+      backgroundEvolution:
+        typeof evolutionConfig?.backgroundEvolution === "boolean"
+          ? evolutionConfig.backgroundEvolution
+          : DEFAULT_EVOLUTION.backgroundEvolution,
     };
 
     return {
@@ -196,6 +302,8 @@ export const superMemoryConfigSchema = {
       autoCapture: cfg.autoCapture !== false,
       autoRecall: cfg.autoRecall !== false,
       activeRecall: parsedActiveRecall,
+      autoCaptureConfig: parsedAutoCapture,
+      evolution: parsedEvolution,
       defaults: parsedDefaults,
     };
   },
@@ -244,6 +352,41 @@ export const superMemoryConfigSchema = {
       label: "Max Context Memories",
       advanced: true,
       help: "Maximum memories to inject into context",
+    },
+    "activeRecall.enableMultiAgentRetrieval": {
+      label: "Multi-Agent Retrieval",
+      advanced: true,
+      help: "Enable passing accessible_agent_ids for cross-agent retrieval",
+    },
+    "activeRecall.enableSessionScoping": {
+      label: "Session Scoping",
+      advanced: true,
+      help: "Enable passing session_ids for session-scoped retrieval",
+    },
+    "autoCaptureConfig.useEnhancedCapture": {
+      label: "Use Enhanced Capture",
+      advanced: true,
+      help: "Use enhanced_capture API with category classification",
+    },
+    "autoCaptureConfig.maxCaptureItems": {
+      label: "Max Capture Items",
+      advanced: true,
+      help: "Maximum items to capture per agent session",
+    },
+    "autoCaptureConfig.activateSynapsesOnCapture": {
+      label: "Activate Synapses on Capture",
+      advanced: true,
+      help: "Activate synapses after capturing memories",
+    },
+    "evolution.enableAutoEvolution": {
+      label: "Auto Evolution",
+      advanced: true,
+      help: "Periodically trigger memory network evolution",
+    },
+    "evolution.evolutionIntervalSessions": {
+      label: "Evolution Interval",
+      advanced: true,
+      help: "Minimum sessions between evolution triggers",
     },
     "defaults.maxResults": {
       label: "Max Results",

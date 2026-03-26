@@ -77,6 +77,27 @@ const ForgetParams = Type.Object({
   ),
 });
 
+// Stats params (no input needed)
+const StatsParams = Type.Object({});
+
+// Evolve params
+const EvolveParams = Type.Object({
+  phases: Type.Optional(
+    Type.Array(
+      Type.String({ description: "Evolution phase" }),
+      { description: "Phases: grow, prune, reinforce, cluster (default: all)" },
+    ),
+  ),
+  background: Type.Optional(
+    Type.Boolean({
+      description: "Run evolution in background (default: false)",
+    }),
+  ),
+});
+
+// Health params (no input needed)
+const HealthParams = Type.Object({});
+
 // ============================================================================
 // Result formatting
 // ============================================================================
@@ -147,12 +168,15 @@ export type ToolDependencies = {
 };
 
 /**
- * Creates the three Agent tools for SuperAgentMemory.
+ * Creates all Agent tools for SuperAgentMemory.
  */
 export function createTools(deps: ToolDependencies): {
   storeTool: AnyAgentTool;
   recallTool: AnyAgentTool;
   forgetTool: AnyAgentTool;
+  statsTool: AnyAgentTool;
+  evolveTool: AnyAgentTool;
+  healthTool: AnyAgentTool;
 } {
   const { client, config, getSessionKey } = deps;
 
@@ -338,5 +362,151 @@ export function createTools(deps: ToolDependencies): {
     },
   };
 
-  return { storeTool, recallTool, forgetTool };
+  // --------------------------------------------------------------------------
+  // supermemory_stats
+  // --------------------------------------------------------------------------
+
+  const statsTool = {
+    name: "supermemory_stats",
+    label: "SuperMemory Stats",
+    description:
+      "Get memory system statistics and dashboard information. " +
+      "Shows total memories, synapses, keywords, and system health. " +
+      "Use this to understand the current state of the memory system.",
+    parameters: StatsParams,
+    async execute(_toolCallId: string, _params: Static<typeof StatsParams>) {
+      try {
+        const stats = await client.getDashboardStats();
+
+        const text = [
+          `Memory System Dashboard`,
+          ``,
+          `🧠 Memory:`,
+          `  Total atoms: ${stats.memory.total_atoms}`,
+          `  Active: ${stats.memory.active_atoms}`,
+          `  Archived: ${stats.memory.archived_atoms}`,
+          `  Avg importance: ${(stats.memory.avg_importance * 100).toFixed(1)}%`,
+          ``,
+          `🔗 Synapses:`,
+          `  Total: ${stats.synapses.total_synapses}`,
+          `  Active: ${stats.synapses.active_synapses}`,
+          `  Avg strength: ${(stats.synapses.avg_strength * 100).toFixed(1)}%`,
+          ``,
+          `🏷️  Keywords:`,
+          `  Total: ${stats.keywords.total_keywords}`,
+        ].join("\n");
+
+        return {
+          content: [{ type: "text" as const, text }],
+          details: {
+            memory: stats.memory,
+            synapses: stats.synapses,
+            keywords: stats.keywords,
+          },
+        };
+      } catch (err) {
+        const msg = err instanceof SuperMemoryError ? err.message : `Stats failed: ${String(err)}`;
+        return {
+          content: [{ type: "text" as const, text: `Error: ${msg}` }],
+          details: { error: msg },
+        };
+      }
+    },
+  };
+
+  // --------------------------------------------------------------------------
+  // supermemory_evolve
+  // --------------------------------------------------------------------------
+
+  const evolveTool = {
+    name: "supermemory_evolve",
+    label: "SuperMemory Evolve",
+    description:
+      "Trigger memory network evolution. Evolution performs network optimization including: " +
+      "growing new synapses between related memories, pruning weak connections, " +
+      "reinforcing important memories, and forming semantic clusters. " +
+      "This helps keep the memory network healthy and efficient.",
+    parameters: EvolveParams,
+    async execute(_toolCallId: string, params: Static<typeof EvolveParams>) {
+      try {
+        const result = await client.triggerEvolution({
+          phases: params.phases,
+          background: params.background ?? false,
+        });
+
+        if (result.background) {
+          return {
+            content: [{ type: "text" as const, text: `Evolution started in background. ${result.message}` }],
+            details: { status: result.status, background: true },
+          };
+        }
+
+        const text = [
+          `Evolution completed. ${result.message}`,
+          ``,
+          `Metrics:`,
+          `  Synapses created: ${result.metrics?.synapses_created ?? 0}`,
+          `  Synapses pruned: ${result.metrics?.synapses_pruned ?? 0}`,
+          `  Synapses strengthened: ${result.metrics?.synapses_strengthened ?? 0}`,
+          `  Clusters formed: ${result.metrics?.clusters_formed ?? 0}`,
+        ].join("\n");
+
+        return {
+          content: [{ type: "text" as const, text }],
+          details: { status: result.status, metrics: result.metrics },
+        };
+      } catch (err) {
+        const msg = err instanceof SuperMemoryError ? err.message : `Evolve failed: ${String(err)}`;
+        return {
+          content: [{ type: "text" as const, text: `Error: ${msg}` }],
+          details: { error: msg },
+        };
+      }
+    },
+  };
+
+  // --------------------------------------------------------------------------
+  // supermemory_health
+  // --------------------------------------------------------------------------
+
+  const healthTool = {
+    name: "supermemory_health",
+    label: "SuperMemory Health",
+    description:
+      "Check memory system health and component status. " +
+      "Verifies connectivity to all critical components: atom repository, " +
+      "synapse repository, keyword repository, embedder, and debouncer.",
+    parameters: HealthParams,
+    async execute(_toolCallId: string, _params: Static<typeof HealthParams>) {
+      try {
+        const health = await client.memoryHealthCheck();
+
+        const statusIcon = health.status === "healthy" ? "✓" : health.status === "degraded" ? "⚠" : "✗";
+
+        const components = Object.entries(health.checks)
+          .map(([name, ok]) => `  ${ok ? "✓" : "✗"} ${name}: ${ok ? "ok" : "failed"}`)
+          .join("\n");
+
+        const text = [
+          `Memory System Health: ${statusIcon} ${health.status}`,
+          ``,
+          `Components:`,
+          components,
+        ].join("\n");
+
+        return {
+          content: [{ type: "text" as const, text }],
+          details: { status: health.status, checks: health.checks, version: health.version },
+        };
+      } catch (err) {
+        const msg = err instanceof SuperMemoryError ? err.message : `Health check failed: ${String(err)}`;
+        return {
+          content: [{ type: "text" as const, text: `Error: ${msg}` }],
+          details: { error: msg },
+        };
+      }
+    },
+  };
+
+  return { storeTool, recallTool, forgetTool, statsTool, evolveTool, healthTool };
 }

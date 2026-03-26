@@ -144,6 +144,242 @@ export type HealthResponse = {
   database?: string;
 };
 
+// ============================================================================
+// Enhanced Retrieval Types
+// ============================================================================
+
+export type EnhancedRetrieveRequest = {
+  query: string;
+  agent_id?: string;
+  max_results?: number;
+  max_depth?: number;
+  accessible_agent_ids?: string[];
+  session_ids?: string[];
+  // 检索配置选项
+  use_fast_path?: boolean;
+  use_intelligent_ranking?: boolean;
+  use_quality_scoring?: boolean;
+  use_summarization?: boolean;
+  max_context_tokens?: number;
+};
+
+export type EnhancedRetrieveStats = {
+  path_taken: string;
+  query_complexity: string;
+  total_time_ms: number;
+  complexity_analysis_ms: number;
+  retrieval_ms: number;
+  ranking_ms: number;
+  quality_scoring_ms: number;
+  summarization_ms: number;
+  synapse_update_ms: number;
+  initial_results: number;
+  final_results: number;
+  summarization_triggered: boolean;
+  ripple_layers?: number;
+  ripple_atoms_visited?: number;
+  ripple_synapses_activated?: number;
+  token_stats?: {
+    original_tokens: number;
+    final_tokens: number;
+    compression_ratio: number;
+  };
+};
+
+export type EnhancedRetrieveResponse = {
+  object: string;
+  query: string;
+  results: EnhancedRetrieveResultItem[];
+  total_results: number;
+  stats: EnhancedRetrieveStats;
+};
+
+export type EnhancedRetrieveResultItem = {
+  id: string;
+  content: string;
+  score: number;
+  depth: number;
+  path: string[];
+  keywords?: string[];
+  metadata?: Record<string, unknown>;
+  agent_id?: string;
+  session_id?: string;
+  context_before?: string;
+  context_after?: string;
+  // 质量评分因子
+  quality_factors?: {
+    freshness: number;
+    importance: number;
+    activation: number;
+    connectivity: number;
+    confidence: number;
+    overall: number;
+  };
+  // 匹配类型（用于快速路径）
+  match_type?: string;
+};
+
+export type CapabilitiesResponse = {
+  object: string;
+  version: string;
+  capabilities: {
+    retrieval_modes: string[];
+    features: Record<string, boolean>;
+    retrieval_config_options: Record<string, { type: string; default: unknown }>;
+  };
+};
+
+// ============================================================================
+// Batch Operations Types
+// ============================================================================
+
+export type BatchStoreItem = {
+  content: string;
+  tags?: string[];
+  importance?: number;
+  metadata?: Record<string, unknown>;
+};
+
+export type BatchStoreRequest = {
+  items: BatchStoreItem[];
+  agent_id?: string;
+  session_id?: string;
+  deduplicate?: boolean;
+  auto_link?: boolean;
+};
+
+export type BatchStoreResponse = {
+  object: string;
+  stored: number;
+  duplicates: number;
+  failed: number;
+  total: number;
+  results: Array<{
+    atom_id?: number;
+    created?: boolean;
+    error?: string;
+    content_preview?: string;
+  }>;
+};
+
+// ============================================================================
+// Enhanced Capture Types
+// ============================================================================
+
+export type CaptureItem = {
+  content: string;
+  category: "preference" | "decision" | "fact" | "action" | "general";
+  importance?: number;
+  tags?: string[];
+};
+
+export type EnhancedCaptureRequest = {
+  items: CaptureItem[];
+  agent_id?: string;
+  session_id?: string;
+  source?: string;
+  deduplicate?: boolean;
+  activate_synapses?: boolean;
+};
+
+export type EnhancedCaptureResponse = {
+  object: string;
+  captured: number;
+  duplicates: number;
+  total: number;
+  synapses_activated: number;
+  results: Array<{
+    atom_id?: number;
+    created?: boolean;
+    category?: string;
+    importance?: number;
+    error?: string;
+  }>;
+};
+
+// ============================================================================
+// Synapse Activation Types
+// ============================================================================
+
+export type SynapseActivationRequest = {
+  atom_ids: number[];
+  activation_type?: "manual" | "retrieval" | "capture";
+};
+
+export type SynapseActivationResponse = {
+  object: string;
+  activated_count: number;
+  atoms_processed: number;
+  activation_type: string;
+};
+
+// ============================================================================
+// Dashboard Stats Types
+// ============================================================================
+
+export type DashboardStatsResponse = {
+  object: string;
+  timestamp: string;
+  memory: {
+    total_atoms: number;
+    active_atoms: number;
+    archived_atoms: number;
+    avg_importance: number;
+  };
+  synapses: {
+    total_synapses: number;
+    avg_strength: number;
+    active_synapses: number;
+  };
+  keywords: {
+    total_keywords: number;
+  };
+  sessions: Record<string, unknown>;
+};
+
+// ============================================================================
+// Evolution Types
+// ============================================================================
+
+export type EvolutionTriggerRequest = {
+  phases?: string[];
+  background?: boolean;
+};
+
+export type EvolutionTriggerResponse = {
+  object: string;
+  status: "started" | "completed";
+  message: string;
+  background: boolean;
+  metrics?: {
+    synapses_created?: number;
+    synapses_pruned?: number;
+    synapses_strengthened?: number;
+    clusters_formed?: number;
+    resonance_chains?: number;
+    processing_time_seconds?: number;
+  };
+};
+
+// ============================================================================
+// Health Check Types
+// ============================================================================
+
+export type MemoryHealthCheckResponse = {
+  object: string;
+  status: "healthy" | "degraded" | "unhealthy";
+  checks: {
+    atom_repo?: boolean;
+    synapse_repo?: boolean;
+    keyword_repo?: boolean;
+    embedder?: boolean;
+    debouncer?: boolean;
+    synapse_dynamics?: boolean;
+  };
+  version: string;
+  error?: string;
+};
+
 type ClientError = {
   code: string;
   message: string;
@@ -230,6 +466,149 @@ export class SuperMemoryClient {
   /** Health check */
   async healthCheck(): Promise<HealthResponse> {
     return this.request<HealthResponse>("GET", "/health");
+  }
+
+  /**
+   * Enhanced retrieval using UnifiedRetrievalPipeline
+   * Leverages all advanced features: fast path, intelligent ranking,
+   * quality scoring, summarization, and synapse dynamics
+   */
+  async enhancedRetrieve(req: EnhancedRetrieveRequest): Promise<EnhancedRetrieveResponse> {
+    const params = new URLSearchParams();
+    params.append("query", req.query);
+    if (req.agent_id) params.append("agent_id", req.agent_id);
+    if (req.max_results) params.append("max_results", String(req.max_results));
+    if (req.max_depth) params.append("max_depth", String(req.max_depth));
+    if (req.use_fast_path !== undefined) params.append("use_fast_path", String(req.use_fast_path));
+    if (req.use_intelligent_ranking !== undefined) params.append("use_intelligent_ranking", String(req.use_intelligent_ranking));
+    if (req.use_quality_scoring !== undefined) params.append("use_quality_scoring", String(req.use_quality_scoring));
+    if (req.use_summarization !== undefined) params.append("use_summarization", String(req.use_summarization));
+    if (req.max_context_tokens) params.append("max_context_tokens", String(req.max_context_tokens));
+    if (req.accessible_agent_ids?.length) {
+      params.append("accessible_agent_ids", req.accessible_agent_ids.join(","));
+    }
+    if (req.session_ids?.length) {
+      params.append("session_ids", req.session_ids.join(","));
+    }
+
+    return this.request<EnhancedRetrieveResponse>(
+      "POST",
+      `/v1/memory/enhanced_retrieve?${params.toString()}`
+    );
+  }
+
+  /**
+   * Get memory system capabilities
+   * Returns information about supported features
+   */
+  async getCapabilities(): Promise<CapabilitiesResponse> {
+    return this.request<CapabilitiesResponse>("GET", "/v1/memory/capabilities");
+  }
+
+  /**
+   * Check if enhanced retrieval is available
+   * Falls back to standard retrieval if not available
+   */
+  async isEnhancedRetrievalAvailable(): Promise<boolean> {
+    try {
+      const caps = await this.getCapabilities();
+      return caps.capabilities.retrieval_modes.includes("enhanced");
+    } catch {
+      return false;
+    }
+  }
+
+  // ============================================================================
+  // Batch Operations
+  // ============================================================================
+
+  /**
+   * Batch store multiple memories
+   * Uses debouncing for efficient bulk inserts
+   */
+  async batchStore(req: BatchStoreRequest): Promise<BatchStoreResponse> {
+    return this.request<BatchStoreResponse>("POST", "/v1/memory/batch_store", req);
+  }
+
+  // ============================================================================
+  // Enhanced Capture
+  // ============================================================================
+
+  /**
+   * Enhanced capture for auto-capture scenarios
+   * Supports intelligent category classification and synapse activation
+   */
+  async enhancedCapture(req: EnhancedCaptureRequest): Promise<EnhancedCaptureResponse> {
+    return this.request<EnhancedCaptureResponse>("POST", "/v1/memory/enhanced_capture", req);
+  }
+
+  // ============================================================================
+  // Synapse Operations
+  // ============================================================================
+
+  /**
+   * Manually activate synapses for specific atoms
+   * Useful after bulk operations or manual interventions
+   */
+  async activateSynapses(req: SynapseActivationRequest): Promise<SynapseActivationResponse> {
+    return this.request<SynapseActivationResponse>("POST", "/v1/synapses/activate", req);
+  }
+
+  // ============================================================================
+  // Stats & Dashboard
+  // ============================================================================
+
+  /**
+   * Get dashboard statistics
+   * Returns comprehensive system status information
+   */
+  async getDashboardStats(): Promise<DashboardStatsResponse> {
+    return this.request<DashboardStatsResponse>("GET", "/v1/stats/dashboard");
+  }
+
+  /**
+   * Memory system health check
+   * Checks all critical components
+   */
+  async memoryHealthCheck(): Promise<MemoryHealthCheckResponse> {
+    return this.request<MemoryHealthCheckResponse>("GET", "/v1/memory/health_check");
+  }
+
+  // ============================================================================
+  // Evolution
+  // ============================================================================
+
+  /**
+   * Trigger memory network evolution
+   * Can run in background or synchronously
+   */
+  async triggerEvolution(req?: EvolutionTriggerRequest): Promise<EvolutionTriggerResponse> {
+    return this.request<EvolutionTriggerResponse>(
+      "POST",
+      "/v1/evolution/trigger",
+      req || { background: false }
+    );
+  }
+
+  /**
+   * Get evolution status
+   */
+  async getEvolutionStatus(): Promise<{
+    object: string;
+    scheduler_running: boolean;
+    tasks: Record<string, unknown>;
+  }> {
+    return this.request("GET", "/v1/evolution/status");
+  }
+
+  /**
+   * Get evolution configuration
+   */
+  async getEvolutionConfig(): Promise<{
+    object: string;
+    config: Record<string, unknown>;
+  }> {
+    return this.request("GET", "/v1/evolution/config");
   }
 
   /**
