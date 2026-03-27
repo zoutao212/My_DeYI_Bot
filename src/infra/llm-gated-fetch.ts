@@ -1297,19 +1297,38 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
               
               // 🆕 P121b: 截断 system message 中过长的内容（SOUL.md 等）
               // Grok 推理模型的 system prompt 很长，其中 SOUL.md 等内容可以压缩
+              // 🔧 P132 FIX: 改进截断逻辑，避免破坏 JSON 结构
               for (const msg of bodyJson.messages) {
                 if (msg.role === "system" || msg.role === "developer") {
                   const content = msg.content;
                   if (typeof content === "string" && content.length > 8000) {
-                    // 截断过长内容，保留前 6000 字符 + 后 2000 字符
                     const MAX_PREFIX = 6000;
                     const MAX_SUFFIX = 2000;
-                    const truncated = content.substring(0, MAX_PREFIX) + 
+
+                    // 🔧 P132: 智能截断 - 找到合理断点
+                    // 避免在 JSON 结构中间截断（如 {"key": "value |"} 这样的情况）
+                    let truncationPoint = MAX_PREFIX;
+
+                    // 查找前 6000 字符内最近的换行符（安全断点）
+                    const lastNewlineBefore = content.lastIndexOf('\n', MAX_PREFIX);
+                    if (lastNewlineBefore > MAX_PREFIX * 0.7) {
+                      truncationPoint = lastNewlineBefore;
+                    }
+
+                    // 查找后 2000 字符内最近的换行符
+                    const suffixStart = content.length - MAX_SUFFIX;
+                    let suffixTruncationPoint = suffixStart;
+                    const firstNewlineInSuffix = content.indexOf('\n', suffixStart);
+                    if (firstNewlineInSuffix !== -1 && firstNewlineInSuffix < suffixStart + MAX_SUFFIX * 0.3) {
+                      suffixTruncationPoint = firstNewlineInSuffix + 1;
+                    }
+
+                    const truncated = content.substring(0, truncationPoint) +
                       `\n\n[... 内容已截断，保留开头和结尾 ...]\n\n` +
-                      content.substring(content.length - MAX_SUFFIX);
+                      content.substring(suffixTruncationPoint);
                     msg.content = truncated;
                     fixed = true;
-                    console.warn(`[llm-gated-fetch] [DEBUG-Grok] 🔧 截断 system/developer message: ${content.length}→${truncated.length}字符`);
+                    console.warn(`[llm-gated-fetch] [DEBUG-Grok] 🔧 P132 截断 system/developer message: ${content.length}→${truncated.length}字符 (断点优化)`);
                   }
                 }
               }
@@ -1335,11 +1354,42 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       }
     }
     
+    // 🆕 P133: 添加详细诊断日志
+    // 记录请求详情（帮助诊断第二轮对话失败问题）
+    const reqUrl = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+    const isGrokApi = reqUrl.includes("vectorengine") && reqUrl.includes("/v1/");
+    if (isGrokApi) {
+      let bodyJson: any;
+      let msgCount = 0;
+      let assistantCount = 0;
+      let toolCount = 0;
+      let systemContentLen = 0;
+      try {
+        if (typeof actualInit?.body === "string") {
+          bodyJson = JSON.parse(actualInit.body);
+          if (Array.isArray(bodyJson.messages)) {
+            msgCount = bodyJson.messages.length;
+            for (const msg of bodyJson.messages) {
+              if (msg.role === "assistant") assistantCount++;
+              else if (msg.role === "tool") toolCount++;
+              else if ((msg.role === "system" || msg.role === "developer") && typeof msg.content === "string") {
+                systemContentLen = msg.content.length;
+              }
+            }
+          }
+        }
+      } catch {}
+      console.warn(`[llm-gated-fetch] 🆕 P133 请求详情: URL=${reqUrl.replace(/api_key=[^&]*/g, 'api_key=***')}, model=${bodyJson?.model || 'unknown'}, messages=${msgCount}(A:${assistantCount} T:${toolCount}), systemContentLen=${systemContentLen}, stream=${bodyJson?.stream}, tools=${bodyJson?.tools?.length || 0}, forceNonStream=${forceNonStream}, attempt=${attempts.size}`);
+    }
+    
     try {
       console.log(`[llm-gated-fetch] 🌐 调用 original fetch...`);
+      const startFetch = Date.now();
       const response = await original(input, { ...actualInit, signal: combinedSignal });
-      
-      console.log(`[llm-gated-fetch] ✅ Fetch 完成，状态码：${response.status}`);
+      const fetchDuration = Date.now() - startFetch;
+
+      // 🆕 P133: Fetch 完成时立即记录响应状态
+      console.warn(`[llm-gated-fetch] 🆕 P133 Fetch完成: 状态码=${response.status}, 耗时=${fetchDuration}ms, forceNonStream=${forceNonStream}, streamFallbackAttempt=${streamFallbackAttempt}`);
       
       // 清除超时定时器
       clearTimeout(timeoutId);
@@ -1363,8 +1413,7 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       
       // 🔧 P127: 检测 Grok 推理模型空响应，触发 stream=false 降级重试
       // 必须在返回 response 之前同步检测
-      const reqUrl = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
-      const isGrokApi = reqUrl.includes("vectorengine") && reqUrl.includes("/v1/");
+      // 注意: reqUrl 和 isGrokApi 已在 P133 定义，直接使用
 
       // 🆕 P127 FIX: 只有在非 forceNonStream 模式且还未降级过时才检测
       // 原因：
@@ -1705,17 +1754,21 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
         console.error(`[llm-gated-fetch] ❌ 已超过最大重试次数（${MAX_ATTEMPTS_PER_KEY}），放弃重试`);
         throw error;
       }
-      
+
+      // 🆕 P133: 增强重试诊断日志
+      const retryCount = currentAttempt?.failureCount || 0;
+
       // 记录错误类型
       if (error && typeof error === "object" && "name" in error) {
-        const errorName = error.name;
-        console.warn(`[llm-gated-fetch] ⚠️ 可重试的错误 (${errorName})，正在重试...`);
-        
+        const errorName = (error as any).name || "unknown";
+        const errorMessage = (error as any).message || String(error);
+        console.warn(`[llm-gated-fetch] 🆕 P133 重试日志: errorName=${errorName}, errorMsg=${errorMessage.substring(0, 100)}, retryCount=${retryCount}, forceNonStream=${forceNonStream}, streamFallbackAttempt=${streamFallbackAttempt}`);
+
         // 🔧 P122: Grok 推理模型 stream 超时降级
         if (errorName === "AbortError" && streamFallbackAttempt < MAX_STREAM_FALLBACK_ATTEMPTS) {
           const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
           const isGrokApi = url.includes("vectorengine") && url.includes("/v1/");
-          
+
           // 🔧 P124: 使用 actualInit 而不是 init，保留所有修复
           if (isGrokApi && actualInit?.body && typeof actualInit.body === "string") {
             try {
@@ -1723,17 +1776,20 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
               const isReasoningModel = typeof bodyJson.model === "string" && bodyJson.model.includes("reasoning");
               const hasStream = bodyJson.stream === true;
               const hasTools = Array.isArray(bodyJson.tools) && bodyJson.tools.length > 0;
-              const hasToolResults = Array.isArray(bodyJson.messages) && 
+              const hasToolResults = Array.isArray(bodyJson.messages) &&
                 bodyJson.messages.some((m: any) => m.role === "tool" || m.role === "toolResult");
-              
+              const msgCount = bodyJson.messages?.length || 0;
+
+              console.warn(`[llm-gated-fetch] 🆕 P133 P122分析: isReasoningModel=${isReasoningModel}, hasStream=${hasStream}, hasTools=${hasTools}, hasToolResults=${hasToolResults}, msgCount=${msgCount}`);
+
               if (isReasoningModel && hasStream && hasTools && hasToolResults) {
                 streamFallbackAttempt++;
                 console.warn(`[llm-gated-fetch] 🚨 P122: 检测到 Grok 推理模型 stream + tool result 超时`);
                 console.warn(`[llm-gated-fetch] 🔄 P122: 自动降级为非 stream 模式重试 (${streamFallbackAttempt}/${MAX_STREAM_FALLBACK_ATTEMPTS})`);
-                
+
                 // 清除失败计数，允许降级重试
                 attempts.delete(attemptKey);
-                
+
                 // 🔧 P124: 关键修复！使用 actualInit 保留所有修复，并移除已 abort 的 signal
                 // 因为原始 signal 已经 abort，重试时必须创建新的 signal
                 const { signal: _, ...initWithoutSignal } = actualInit;
@@ -1746,7 +1802,7 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
           }
         }
       } else {
-        console.warn("[llm-gated-fetch] ⚠️ 可重试的错误，正在重试...");
+        console.warn(`[llm-gated-fetch] ⚠️ 可重试的错误，正在重试... retryCount=${retryCount}`);
       }
       
       // 重试（使用指数退避）
