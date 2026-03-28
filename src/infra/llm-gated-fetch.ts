@@ -1176,11 +1176,14 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
               }
               
               // 🔧 Fix: 推理模型 + tools 默认使用非流式，避免空响应问题
-              // 直接设置 stream=false，因为 stream=true 会先返回空响应再降级，浪费时间
-              if (bodyJson.stream !== false) {
+              // 可通过环境变量 CLAWDBOT_REASONING_FORCE_STREAM=true 强制使用流式
+              const forceStreamForReasoning = process.env.CLAWDBOT_REASONING_FORCE_STREAM === "true";
+              if (!forceStreamForReasoning && bodyJson.stream !== false) {
                 bodyJson.stream = false;
                 fixed = true;
                 console.warn(`[llm-gated-fetch] [DEBUG-Grok] 🔧 默认设置 stream=false（推理模型+tools）`);
+              } else if (forceStreamForReasoning) {
+                console.warn(`[llm-gated-fetch] [DEBUG-Grok] ⚡ 环境变量强制 stream=true（推理模型+tools）`);
               }
             }
             
@@ -1499,8 +1502,24 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
         if (isOpenAICompletions) {
           try {
             const responseText = await response.text();
+            console.warn(`[llm-gated-fetch] 🔧 P131: 检测响应格式，长度: ${responseText.length}`);
+            
+            // 🔧 P131 FIX: 检测响应是否已经是 SSE 格式
+            // SSE 格式特征：以 "data:" 开头，或包含多行 "data:" 前缀
+            const isSSEFormat = responseText.trim().startsWith('data:') || 
+                                responseText.includes('\ndata:');
+            
+            if (isSSEFormat) {
+              console.warn(`[llm-gated-fetch] 🔧 P131: 响应已是 SSE 格式，无需转换，直接返回`);
+              // 重新构造 Response 对象返回
+              return new Response(responseText, {
+                status: response.status,
+                statusText: response.statusText,
+                headers: response.headers
+              });
+            }
+            
             console.warn(`[llm-gated-fetch] 🔧 P131: 检测到非流式响应，转换为 SSE 格式`);
-            console.warn(`[llm-gated-fetch] 🔧 P131: 原始响应长度: ${responseText.length}`);
             
             // 解析非流式响应
             const nonStreamResponse = JSON.parse(responseText);
