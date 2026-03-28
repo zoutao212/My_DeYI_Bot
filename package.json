@@ -237,7 +237,7 @@
     "ollama": "^0.6.3",
     "oxfmt": "0.26.0",
     "oxlint": "^1.41.0",
-    "oxlint-tsgolint": "^0.11.1",
+    "oxlint-tsgolint": "^0.18.1",
     "quicktype-core": "^23.2.6",
     "rolldown": "1.0.0-rc.1",
     "signal-utils": "^0.21.1",

@@ -1,6 +1,6 @@
 # Clawdbot Quick Start Script - Version 2
 $ErrorActionPreference = "Stop"
-$RepoDir = "D:\Git_GitHub\clawdbot"
+$RepoDir = "D:\My_GitHub_001\clawdbot"
 $env:CLAWDBOT_CLAUDE_SKIP_PERMISSIONS = "1"
 
 $env:CLAWDBOT_PROACTIVE_RETRIEVAL_ENABLED = "1"

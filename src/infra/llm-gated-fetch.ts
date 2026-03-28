@@ -356,7 +356,7 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
     }
   }
 
-  const wrapped: typeof fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+  const wrapped = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     try {
       const ctx = getLlmRequestContext();
       
@@ -1831,7 +1831,7 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
     }
   };
 
-  globalThis.fetch = wrapped;
+  globalThis.fetch = wrapped as typeof fetch;
 }
 
 // 注册 unhandledRejection handler 来处理网络错误
