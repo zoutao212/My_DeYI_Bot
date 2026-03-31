@@ -232,8 +232,9 @@ export function createTools(deps: ToolDependencies): {
     name: "supermemory_recall",
     label: "SuperMemory Recall",
     description:
-      "Search through SuperAgentMemory using ripple retrieval — a neural-network-inspired search that follows synapse connections " +
-      "to discover related memories across multiple hops. Better than simple keyword search for finding contextually related information. " +
+      "Search through SuperAgentMemory using HyperNMCv4 multi-layer semantic retrieval — the most powerful search mode. " +
+      "Leverages HierarchicalQKV index, 8-layer semantic analysis, and Hot/Warm/Cold tiered retrieval. " +
+      "Automatically expands query with keywords and semantic variations for best results. " +
       "Use when you need context about user preferences, past decisions, or previously discussed topics.",
     parameters: RecallParams,
     async execute(_toolCallId: string, params: Static<typeof RecallParams>) {

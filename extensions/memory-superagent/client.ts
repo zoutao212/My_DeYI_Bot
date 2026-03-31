@@ -422,6 +422,7 @@ export class SuperMemoryClient {
     // Build query params (FastAPI expects Query parameters, not JSON body)
     const params = new URLSearchParams();
     params.append("query", req.query);
+    params.append("use_new_system", "true");  // 👈 启用 HyperNMCv4 最强检索
     if (req.agent_id) params.append("agent_id", req.agent_id);
     if (req.session_id) params.append("session_id", req.session_id);
     if (req.max_results) params.append("max_results", String(req.max_results));
