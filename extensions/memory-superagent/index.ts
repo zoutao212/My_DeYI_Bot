@@ -44,7 +44,7 @@ const memoryPlugin = {
     const client = new SuperMemoryClient({
       baseUrl: cfg.server.baseUrl,
       apiKey: cfg.server.apiKey,
-      timeout: 10_000,
+      timeout: 60_000,  // 🔧 增加到 60 秒，给复杂的检索查询足够时间
       maxRetries: 1,
     });
 
@@ -79,6 +79,19 @@ const memoryPlugin = {
     }).catch(() => {
       api.logger.info(
         `memory-superagent: using legacy mode (server: ${cfg.server.baseUrl})`
+      );
+    });
+
+    // 🔥 启动时预热系统：调用 health check 触发 AgentMemorySystem 初始化
+    client.healthCheck().then((health) => {
+      api.logger.info(
+        `memory-superagent: 🔥 system pre-warmed ` +
+          `(server: ${cfg.server.baseUrl}, status: ${health.status})`
+      );
+    }).catch((err) => {
+      api.logger.warn(
+        `memory-superagent: ⚠️ pre-warm failed, will retry on first query ` +
+          `(server: ${cfg.server.baseUrl})`
       );
     });
 
@@ -126,6 +139,22 @@ const memoryPlugin = {
       const tags = r.keywords?.length ? `[${r.keywords.join(", ")}]` :
                    r.tags?.length ? `[${r.tags.join(", ")}]` : "";
       return `- [ID:${r.id}] (${score}%) ${tags}\n  ${r.content.slice(0, 150)}${r.content.length > 150 ? "..." : ""}`;
+    }
+
+    /**
+     * Format detailed memory log for debugging
+     */
+    function formatMemoryLog(r: {
+      id: string;
+      content: string;
+      score: number;
+      depth: string | number;
+      keywords?: string[];
+    }): string {
+      const score = (r.score * 100).toFixed(0);
+      const preview = r.content.slice(0, 80).replace(/\n/g, " ");
+      const keywords = r.keywords?.length ? ` [${r.keywords.slice(0, 3).join(", ")}]` : "";
+      return `[${r.id}](${score}%, ${r.depth})${keywords}: ${preview}${r.content.length > 80 ? "..." : ""}`;
     }
 
     /**
@@ -262,6 +291,16 @@ ${entityHint}${focusHint}
               .map((r) => formatMemoryLineEnhanced(r))
               .join("\n");
 
+            // 🔥 增强日志：输出每个 memory 的详细内容
+            const memoryDetails = enhancedResult.results
+              .slice(0, 5)
+              .map((r) => formatMemoryLog(r))
+              .join("\n  ");
+            
+            api.logger.info?.(
+              `memory-superagent: injecting ${enhancedResult.results.length} memories (enhanced mode)\n  ${memoryDetails}`
+            );
+
             if (activeRecallCfg?.debugStrategy) {
               const stats = enhancedResult.stats;
               api.logger.info?.(
@@ -324,8 +363,14 @@ ${entityHint}${focusHint}
                 .map((r) => formatMemoryLine(r))
                 .join("\n");
 
+              // 🔥 增强日志：输出每个 memory 的详细内容
+              const memoryDetails = simpleResult.results
+                .slice(0, 5)
+                .map((r) => formatMemoryLog(r))
+                .join("\n  ");
+              
               api.logger.info?.(
-                `memory-superagent: injecting ${simpleResult.results.length} memories (simple mode)`
+                `memory-superagent: injecting ${simpleResult.results.length} memories (simple mode)\n  ${memoryDetails}`
               );
 
               return {
@@ -340,10 +385,14 @@ ${entityHint}${focusHint}
 
             const memoryContext = topResults.map((r) => formatMemoryLine(r)).join("\n");
 
+            // 🔥 增强日志：输出每个 memory 的详细内容
+            const memoryDetails = topResults
+              .map((r) => formatMemoryLog(r))
+              .join("\n  ");
+            
             api.logger.info?.(
               `memory-superagent: injecting ${topResults.length} memories ` +
-                `(from ${multiResult.queryCount} queries, fusion=${multiResult.fusionMethod}) ` +
-                `depths: [${topResults.map((r) => r.depth).join(", ")}]`
+                `(from ${multiResult.queryCount} queries, fusion=${multiResult.fusionMethod})\n  ${memoryDetails}`
             );
 
             return {
