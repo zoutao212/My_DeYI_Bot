@@ -379,12 +379,11 @@ export function buildComplexityGuidance(result: IntentComplexityResult): string 
     lines.push(`系统预判：这是一个**${result.complexity === "very_complex" ? "超高" : "高"}复杂度**任务。`);
     lines.push(`理由：${result.reason}`);
     lines.push("");
-    lines.push("⚠️ **强烈建议**：你**必须**使用 `enqueue_task` 工具将此任务分解为多个子任务。");
-    lines.push("单轮处理几乎不可能完成这个请求的所有要求。不要试图一次性回答，而是：");
-    lines.push("1. 分析任务的各个维度和步骤");
-    lines.push("2. 使用 `enqueue_task(isNewRootTask=true)` 创建任务树");
-    lines.push("3. 将每个步骤作为独立子任务入队");
-    lines.push("4. 系统会自动执行、质检、合并产出");
+    lines.push("⚠️ **强制要求**：你**必须**立刻调用 `enqueue_task` 工具！");
+    lines.push("禁止只输出文字计划，禁止'进入自动执行序列'等虚假描述。");
+    lines.push("第一步：调用 enqueue_task(isNewRootTask=true, prompt='...', summary='...')");
+    lines.push("第二步：等待系统返回任务创建结果");
+    lines.push("第三步：继续添加子任务或回复确认");
   } else {
     // suggest_decompose
     lines.push("[🧠 任务复杂度预判：中高复杂度任务]");

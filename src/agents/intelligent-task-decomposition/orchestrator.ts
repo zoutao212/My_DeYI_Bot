@@ -2215,9 +2215,9 @@ export class Orchestrator {
     }
 
     // 4. 检查是否所有轮次都已取消/完成，如果是则修改任务树状态
-    const allRoundsDone = taskTree.rounds.every(
+    const allRoundsDone = taskTree.rounds?.every(
       (r) => r.status === "completed" || r.status === "failed" || r.status === "cancelled"
-    );
+    ) ?? true;
     if (allRoundsDone) {
       taskTree.status = "cancelled";
       console.log(`[Orchestrator] 🛑 P136: 任务树已取消 (所有轮次已完成/取消)`);
@@ -2228,16 +2228,6 @@ export class Orchestrator {
 
     console.log(`[Orchestrator] ✅ P136: Round ${roundId} 已成功取消`);
     return true;
-  }
-
-  /**
-   * 🔧 P136: 加载任务树（公共方法，供外部调用）
-   * 
-   * @param sessionId 会话 ID
-   * @returns 任务树，如果不存在则返回 null
-   */
-  async loadTaskTree(sessionId: string): Promise<TaskTree | null> {
-    return this.taskTreeManager.load(sessionId);
   }
 
   /**

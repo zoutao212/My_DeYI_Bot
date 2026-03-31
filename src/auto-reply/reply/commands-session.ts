@@ -285,9 +285,9 @@ export const handleStopCommand: CommandHandler = async (params, allowTextCommand
       
       if (taskTree) {
         // 找到当前活动的轮次（最新创建的）
-        const activeRounds = taskTree.rounds.filter(
+        const activeRounds = taskTree.rounds?.filter(
           (r) => r.status === "active"
-        );
+        ) ?? [];
         
         if (activeRounds.length > 0) {
           // 取消最新的活动轮次

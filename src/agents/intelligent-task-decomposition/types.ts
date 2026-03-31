@@ -22,7 +22,7 @@ export interface TaskTree {
   subTasks: SubTask[];
   
   /** 任务树状态 */
-  status: "pending" | "active" | "completed" | "failed";
+  status: "pending" | "active" | "completed" | "failed" | "cancelled";
   
   /** 创建时间戳 */
   createdAt: number;
