@@ -2143,6 +2143,104 @@ export class Orchestrator {
   }
 
   /**
+   * 🔧 P136: 取消指定轮次（用户主动停止）
+   * 
+   * 当用户输入 /stop 时，触发熔断器并取消所有 pending 任务
+   * 
+   * @param taskTree 任务树
+   * @param roundId 轮次 ID
+   * @param reason 取消原因（默认："用户主动停止"）
+   * @returns 是否成功取消
+   */
+  async cancelRound(
+    taskTree: TaskTree,
+    roundId: string,
+    reason: string = "用户主动停止"
+  ): Promise<boolean> {
+    const round = this.findRound(taskTree, roundId);
+    if (!round) {
+      console.warn(`[Orchestrator] ⚠️ cancelRound: Round ${roundId} 不存在`);
+      return false;
+    }
+
+    // 如果轮次已经完成，不再取消
+    if (round.status === "completed" || round.status === "failed" || round.status === "cancelled") {
+      console.warn(`[Orchestrator] ⚠️ cancelRound: Round ${roundId} 已 ${round.status}，无法取消`);
+      return false;
+    }
+
+    console.log(`[Orchestrator] 🛑 P136: 开始取消 Round ${roundId} — ${reason}`);
+
+    // 1. 触发熔断器
+    if (!round.circuitBreaker) {
+      round.circuitBreaker = {
+        totalFailures: 0,
+        totalTokensUsed: 0,
+        llmCallCount: 0,
+        llmCallBudget: 0,
+        tripped: true,
+        tripReason: reason,
+      };
+    } else {
+      round.circuitBreaker.tripped = true;
+      round.circuitBreaker.tripReason = reason;
+    }
+
+    // 2. 修改轮次状态
+    round.status = "cancelled";
+    round.completedAt = Date.now();
+
+    // 3. 取消所有 pending 任务
+    const pendingTasks = taskTree.subTasks.filter(
+      (t) => t.rootTaskId === roundId && t.status === "pending"
+    );
+
+    if (pendingTasks.length > 0) {
+      await this.patchSubTasks(
+        taskTree,
+        pendingTasks.map((t) => ({
+          subTaskId: t.id,
+          patch: {
+            status: "skipped",
+            error: `用户取消：${reason}`,
+            completedAt: Date.now(),
+            metadata: t.metadata,
+            executionRole: t.executionRole,
+          },
+        }))
+      );
+      console.log(
+        `[Orchestrator] 🛑 P136: 已取消 ${pendingTasks.length} 个 pending 任务 (Round ${roundId})`
+      );
+    }
+
+    // 4. 检查是否所有轮次都已取消/完成，如果是则修改任务树状态
+    const allRoundsDone = taskTree.rounds.every(
+      (r) => r.status === "completed" || r.status === "failed" || r.status === "cancelled"
+    );
+    if (allRoundsDone) {
+      taskTree.status = "cancelled";
+      console.log(`[Orchestrator] 🛑 P136: 任务树已取消 (所有轮次已完成/取消)`);
+    }
+
+    // 5. 保存任务树
+    await this.taskTreeManager.save(taskTree);
+
+    console.log(`[Orchestrator] ✅ P136: Round ${roundId} 已成功取消`);
+    return true;
+  }
+
+  /**
+   * 🔧 P136: 加载任务树（公共方法，供外部调用）
+   * 
+   * @param sessionId 会话 ID
+   * @returns 任务树，如果不存在则返回 null
+   */
+  async loadTaskTree(sessionId: string): Promise<TaskTree | null> {
+    return this.taskTreeManager.load(sessionId);
+  }
+
+  /**
    * 🆕 A2: 更新配置引用（当 config 在运行时变化时调用）
    */
   updateConfig(config: ClawdbotConfig): void {

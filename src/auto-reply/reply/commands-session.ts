@@ -1,4 +1,5 @@
 import { abortEmbeddedPiRun } from "../../agents/pi-embedded.js";
+import { getGlobalOrchestrator } from "../../agents/tools/enqueue-task-tool.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import { updateSessionStore } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
@@ -276,6 +277,45 @@ export const handleStopCommand: CommandHandler = async (params, allowTextCommand
   });
   if (abortTarget.sessionId) {
     abortEmbeddedPiRun(abortTarget.sessionId);
+    
+    // 🔧 P136: 取消任务树中的当前轮次
+    try {
+      const orchestrator = getGlobalOrchestrator();
+      const taskTree = await orchestrator.loadTaskTree(abortTarget.sessionId);
+      
+      if (taskTree) {
+        // 找到当前活动的轮次（最新创建的）
+        const activeRounds = taskTree.rounds.filter(
+          (r) => r.status === "active"
+        );
+        
+        if (activeRounds.length > 0) {
+          // 取消最新的活动轮次
+          const latestRound = activeRounds[activeRounds.length - 1];
+          const cancelled = await orchestrator.cancelRound(
+            taskTree,
+            latestRound.id,
+            "用户主动停止 (/stop 命令)"
+          );
+          
+          if (cancelled) {
+            logVerbose(
+              `[commands-session] ✅ P136: 已取消任务树轮次 ${latestRound.id} (sessionId: ${abortTarget.sessionId})`
+            );
+          }
+        } else {
+          logVerbose(
+            `[commands-session] ℹ️ P136: 没有活动轮次需要取消 (sessionId: ${abortTarget.sessionId})`
+          );
+        }
+      }
+    } catch (err) {
+      // 任务树取消失败不应该阻塞其他清理操作
+      console.warn(
+        `[commands-session] ⚠️ P136: 取消任务树失败 (sessionId: ${abortTarget.sessionId}):`,
+        err
+      );
+    }
   }
   const cleared = clearSessionQueues([abortTarget.key, abortTarget.sessionId]);
   const clearedByPrefix = clearSessionQueuesByPrefix([abortTarget.key]);
