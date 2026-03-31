@@ -1,11 +1,10 @@
 /**
  * Enhanced Query Expander V2 - Multi-Entity Query Support
- *
- * 优化多实体查询的处理：
- * 1. 识别空格分隔的多实体
- * 2. 智能过滤噪声实体
- * 3. 生成更好的查询组合
- * 4. 支持并列查询（如"高丽琴的故事 阿居 水彧姑娘"）
+ * 
+ * 正确处理多实体并列查询：
+ * - "高丽琴的故事 阿居 水彧姑娘" → [高丽琴的故事, 高丽琴, 阿居, 水彧姑娘, 水彧]
+ * - 保留完整短语 + 提取核心实体
+ * - 扩展检索范围，提高召回率
  */
 
 import { QueryType, type QueryAnalysis, type ExpandedQuery } from "./query-expander.js";
@@ -17,7 +16,9 @@ import { QueryType, type QueryAnalysis, type ExpandedQuery } from "./query-expan
 export interface MultiEntityQuery {
   /** 完整的原始查询 */
   fullQuery: string;
-  /** 拆分出的实体列表 */
+  /** 完整短语列表 */
+  phrases: string[];
+  /** 扩展后的所有实体（包含核心实体） */
   entities: string[];
   /** 是否为多实体查询 */
   isMultiEntity: boolean;
@@ -39,82 +40,89 @@ export interface QueryDecomposition {
 }
 
 // ============================================================================
-// Entity Noise Filter
+// Entity Phrase Expander
 // ============================================================================
 
 /**
- * 实体噪声过滤器
+ * 实体短语扩展器
  * 
- * 过滤掉不应该是实体的词：
- * - 无意义后缀："的故事"、"的传说"
- * - 助词："的"、"了"、"着"
- * - 常见词："故事"、"传说"、"历史"
+ * 核心逻辑：
+ * - 保留完整短语（如"高丽琴的故事"、"水彧姑娘"）
+ * - 提取核心实体（如"高丽琴"、"水彧"）
+ * - 两者都用，扩展检索范围
  */
-class EntityNoiseFilter {
-  // 无意义后缀模式
-  private static readonly NOISE_SUFFIXES = [
-    "的故事", "的传说", "的历史", "的经历",
-    "的回忆", "的往事", "的人生",
+class EntityPhraseExpander {
+  // 常见后缀模式（需要提取核心实体）
+  private static readonly SUFFIX_PATTERNS: Array<[string, string]> = [
+    ["的故事", "故事"],
+    ["的传说", "传说"],
+    ["的历史", "历史"],
+    ["的经历", "经历"],
+    ["的回忆", "回忆"],
+    ["的往事", "往事"],
+    ["姑娘", "姑娘"],
+    ["小姐", "小姐"],
+    ["先生", "先生"],
   ];
 
-  // 噪声词列表（单独出现时不是实体）
+  // 最小实体长度
+  private static readonly MIN_ENTITY_LENGTH = 2;
+
+  // 噪声词（单独出现时不应该作为实体）
   private static readonly NOISE_WORDS = new Set([
     "故事", "传说", "历史", "经历",
     "回忆", "往事", "人生",
     "的", "了", "着", "过",
   ]);
 
-  // 最小实体长度（过滤过短的噪声）
-  private static readonly MIN_ENTITY_LENGTH = 2;
-
   /**
-   * 过滤噪声实体
+   * 扩展实体短语
+   * 
+   * Args:
+   *   phrase: 原始短语
+   * 
+   * Returns:
+   *   扩展后的实体列表（包含完整短语 + 核心实体）
    */
-  static filter(entities: string[]): string[] {
-    return entities.filter(entity => {
-      // 1. 长度过滤
-      if (entity.length < this.MIN_ENTITY_LENGTH) {
-        return false;
-      }
+  static expand(phrase: string): string[] {
+    const result = [phrase]; // 总是保留完整短语
 
-      // 2. 噪声词过滤
-      if (this.NOISE_WORDS.has(entity)) {
-        return false;
-      }
+    // 尝试提取核心实体
+    const coreEntity = this.extractCoreEntity(phrase);
+    if (coreEntity && coreEntity !== phrase) {
+      result.push(coreEntity);
+    }
 
-      // 3. 无意义后缀过滤
-      for (const suffix of this.NOISE_SUFFIXES) {
-        if (entity.endsWith(suffix) && entity.length === suffix.length) {
-          return false;
-        }
-      }
-
-      // 4. 检查是否包含"的"，但保留"阿居的爸爸"这类嵌套实体
-      if (entity.includes("的")) {
-        // 如果"的"在中间，且前后都有实质内容，保留
-        const parts = entity.split("的");
-        const hasValidParts = parts.every(part => 
-          part.length >= 2 && !this.NOISE_WORDS.has(part)
-        );
-        if (!hasValidParts) {
-          return false;
-        }
-      }
-
-      return true;
-    });
+    return result;
   }
 
   /**
-   * 清理实体名称（移除噪声后缀）
+   * 提取核心实体
+   * 
+   * Args:
+   *   phrase: 原始短语
+   * 
+   * Returns:
+   *   核心实体（如果存在）
    */
-  static cleanEntityName(entity: string): string {
-    for (const suffix of this.NOISE_SUFFIXES) {
-      if (entity.endsWith(suffix)) {
-        return entity.slice(0, -suffix.length);
+  private static extractCoreEntity(phrase: string): string | null {
+    // 1. 尝试移除后缀
+    for (const [suffix, _] of this.SUFFIX_PATTERNS) {
+      if (phrase.endsWith(suffix)) {
+        const core = phrase.slice(0, -suffix.length);
+        if (core.length >= this.MIN_ENTITY_LENGTH && !this.NOISE_WORDS.has(core)) {
+          return core;
+        }
       }
     }
-    return entity;
+
+    // 2. 尝试从嵌套实体中提取（如"阿居的爸爸"）
+    if (phrase.includes("的")) {
+      // 保留嵌套结构，不拆分
+      // "阿居的爸爸" 是一个有意义的完整实体
+    }
+
+    return null;
   }
 }
 
@@ -132,43 +140,37 @@ export class MultiEntityQueryDetector {
   static detect(query: string): MultiEntityQuery {
     // 1. 空格分隔检测
     const spaceSplit = query.split(/\s+/).filter(p => p.trim().length > 0);
-    
+
     if (spaceSplit.length > 1) {
       // 多实体查询
-      const rawEntities = spaceSplit.map(part => part.trim());
-      const cleanedEntities = EntityNoiseFilter.filter(rawEntities);
-      
+      // 扩展每个短语（保留完整短语 + 提取核心实体）
+      const allEntities: string[] = [];
+      for (const phrase of spaceSplit) {
+        const expanded = EntityPhraseExpander.expand(phrase);
+        allEntities.push(...expanded);
+      }
+
       return {
         fullQuery: query,
-        entities: cleanedEntities,
-        isMultiEntity: cleanedEntities.length > 1,
+        phrases: spaceSplit, // 完整短语
+        entities: allEntities, // 扩展后的所有实体
+        isMultiEntity: spaceSplit.length > 1,
         queryType: QueryType.FACTUAL,
         confidence: 0.9,
       };
     }
 
     // 2. 单实体查询
-    // 尝试识别"XX的YY"模式
-    const possessiveMatch = query.match(/([^\s]+(?:的[^\s]+)+)/);
-    if (possessiveMatch) {
-      // 嵌套实体（如"阿居的爸爸"）
-      const entity = possessiveMatch[1];
-      return {
-        fullQuery: query,
-        entities: [entity],
-        isMultiEntity: false,
-        queryType: QueryType.RELATIONAL,
-        confidence: 0.8,
-      };
-    }
+    // 扩展实体
+    const expanded = EntityPhraseExpander.expand(query);
 
-    // 3. 简单单实体
     return {
       fullQuery: query,
-      entities: [query],
+      phrases: [query],
+      entities: expanded,
       isMultiEntity: false,
       queryType: QueryType.UNKNOWN,
-      confidence: 0.6,
+      confidence: 0.8,
     };
   }
 }
@@ -180,7 +182,10 @@ export class MultiEntityQueryDetector {
 /**
  * 增强版查询扩展器 V2
  * 
- * 专为多实体查询优化
+ * 正确处理多实体查询：
+ * - 保留完整短语
+ * - 提取核心实体
+ * - 生成组合查询
  */
 export class QueryExpanderV2 {
   /**
@@ -191,10 +196,10 @@ export class QueryExpanderV2 {
 
     if (detection.isMultiEntity) {
       // 多实体查询：拆分成独立的子查询
-      return this.decomposeMultiEntity(query, detection.entities);
-    } else if (detection.entities.length === 1) {
+      return this.decomposeMultiEntity(query, detection.phrases, detection.entities);
+    } else if (detection.entities.length >= 1) {
       // 单实体查询：生成变体
-      return this.decomposeSingleEntity(query, detection.entities[0]);
+      return this.decomposeSingleEntity(query, detection.entities);
     } else {
       // 未知类型：保持原样
       return {
@@ -216,10 +221,12 @@ export class QueryExpanderV2 {
    * 分解多实体查询
    */
   private static decomposeMultiEntity(
-    query: string, 
+    query: string,
+    phrases: string[],
     entities: string[]
   ): QueryDecomposition {
     const subQueries: ExpandedQuery[] = [];
+    const seenTexts = new Set<string>();
 
     // 1. 原始查询（最高权重）
     subQueries.push({
@@ -229,30 +236,52 @@ export class QueryExpanderV2 {
       queryType: QueryType.FACTUAL,
       entities: entities,
     });
+    seenTexts.add(query);
 
-    // 2. 每个实体作为独立查询（高权重）
-    for (const entity of entities) {
-      subQueries.push({
-        text: entity,
-        source: "entity",
-        weight: 0.9,
-        queryType: QueryType.FACTUAL,
-        entities: [entity],
-      });
+    // 2. 完整短语查询（高权重）
+    for (const phrase of phrases) {
+      if (!seenTexts.has(phrase)) {
+        subQueries.push({
+          text: phrase,
+          source: "entity",
+          weight: 0.9,
+          queryType: QueryType.FACTUAL,
+          entities: [phrase],
+        });
+        seenTexts.add(phrase);
+      }
     }
 
-    // 3. 实体组合（中等权重）
-    if (entities.length >= 2) {
-      // 两两组合
-      for (let i = 0; i < Math.min(2, entities.length); i++) {
-        for (let j = i + 1; j < Math.min(3, entities.length); j++) {
-          subQueries.push({
-            text: `${entities[i]} ${entities[j]}`,
-            source: "composed",
-            weight: 0.7,
-            queryType: QueryType.RELATIONAL,
-            entities: [entities[i], entities[j]],
-          });
+    // 3. 核心实体查询（中高权重）
+    for (const entity of entities) {
+      if (!seenTexts.has(entity) && !phrases.includes(entity)) {
+        subQueries.push({
+          text: entity,
+          source: "core_entity",
+          weight: 0.85,
+          queryType: QueryType.FACTUAL,
+          entities: [entity],
+        });
+        seenTexts.add(entity);
+      }
+    }
+
+    // 4. 实体组合（中等权重）
+    if (phrases.length >= 2) {
+      // 两两组合（只组合完整短语）
+      for (let i = 0; i < Math.min(2, phrases.length); i++) {
+        for (let j = i + 1; j < Math.min(3, phrases.length); j++) {
+          const comboText = `${phrases[i]} ${phrases[j]}`;
+          if (!seenTexts.has(comboText)) {
+            subQueries.push({
+              text: comboText,
+              source: "composed",
+              weight: 0.7,
+              queryType: QueryType.RELATIONAL,
+              entities: [phrases[i], phrases[j]],
+            });
+            seenTexts.add(comboText);
+          }
         }
       }
     }
@@ -270,9 +299,10 @@ export class QueryExpanderV2 {
    */
   private static decomposeSingleEntity(
     query: string,
-    entity: string
+    entities: string[]
   ): QueryDecomposition {
     const subQueries: ExpandedQuery[] = [];
+    const seenTexts = new Set<string>();
 
     // 1. 原始查询
     subQueries.push({
@@ -280,28 +310,26 @@ export class QueryExpanderV2 {
       source: "original",
       weight: 1.0,
       queryType: QueryType.FACTUAL,
-      entities: [entity],
+      entities: entities,
     });
+    seenTexts.add(query);
 
-    // 2. 实体本身
-    subQueries.push({
-      text: entity,
-      source: "entity",
-      weight: 0.9,
-      queryType: QueryType.FACTUAL,
-      entities: [entity],
-    });
+    // 2. 所有实体变体
+    for (const entity of entities) {
+      if (!seenTexts.has(entity)) {
+        // 判断是否为核心实体
+        const source = entity !== query ? "core_entity" : "entity";
+        const weight = entity !== query ? 0.85 : 0.9;
 
-    // 3. 清理后的实体名（移除"的故事"等后缀）
-    const cleanedEntity = EntityNoiseFilter.cleanEntityName(entity);
-    if (cleanedEntity !== entity && cleanedEntity.length >= 2) {
-      subQueries.push({
-        text: cleanedEntity,
-        source: "expanded",
-        weight: 0.75,
-        queryType: QueryType.FACTUAL,
-        entities: [cleanedEntity],
-      });
+        subQueries.push({
+          text: entity,
+          source,
+          weight,
+          queryType: QueryType.FACTUAL,
+          entities: [entity],
+        });
+        seenTexts.add(entity);
+      }
     }
 
     return {
