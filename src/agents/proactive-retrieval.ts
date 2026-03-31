@@ -310,7 +310,7 @@ export async function proactiveRetrieval(
   const allSnippets: RetrievalSnippet[] = [];
   const stats = { memory: 0, novel: 0, agentDef: 0, toolDef: 0 };
   
-  // 2.1 记忆系统检索
+  // 2.1 记忆系统检索（双轨并行：本地系统 + memory-superagent）
   if (enableMemory) {
     try {
       const agentId = resolveSessionAgentId({
@@ -323,6 +323,7 @@ export async function proactiveRetrieval(
         const workspaceDir = resolveAgentWorkspaceDir(config, agentId);
         const dirs = getDefaultMemoryDirs(workspaceDir);
         
+        // 🔥 双轨并行通道 1：本地记忆系统（localGrep + manager）
         // 使用多关键词检索
         for (const keyword of allKeywords.slice(0, 5)) { // 限制最多 5 个关键词，避免过多查询
           const results = await localGrepSearch(keyword, {
@@ -369,6 +370,54 @@ export async function proactiveRetrieval(
             stats.memory++;
           }
         }
+      }
+      
+      // 🔥 双轨并行通道 2：memory-superagent（HyperNMCv4 多层语义检索）
+      // 使用 HTTP API 避免违反 rootDir 限制
+      try {
+        const pluginConfig = (config as any).plugins?.["memory-superagent"] as any;
+        if (pluginConfig?.server?.baseUrl) {
+          const baseUrl = pluginConfig.server.baseUrl.replace(/\/+$/, "");
+          const params = new URLSearchParams({
+            query: options.userMessage,
+            max_results: String(Math.ceil(effectiveMaxSnippets / 2)),
+            max_depth: "3",
+          });
+          if (agentId) params.append("agent_id", agentId);
+          if (options.sessionId) params.append("session_id", options.sessionId);
+          
+          const response = await fetch(`${baseUrl}/v1/memory/retrieve?${params.toString()}`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(pluginConfig.server.apiKey ? { "X-API-Key": pluginConfig.server.apiKey } : {}),
+            },
+          });
+          
+          if (response.ok) {
+            const superagentResult = await response.json() as any;
+            
+            if (superagentResult.results) {
+              for (const r of superagentResult.results) {
+                if (r.score >= effectiveMinScore) {
+                  allSnippets.push({
+                    source: "memory",
+                    path: `SuperAgentMemory:${r.id}`,
+                    text: r.content,
+                    score: r.score,
+                    matchedTerms: r.keywords || [],
+                  });
+                  stats.memory++;
+                }
+              }
+              log.debug(`memory-superagent retrieved ${superagentResult.results.length} memories (HyperNMCv4)`);
+            }
+          } else {
+            log.debug(`memory-superagent HTTP ${response.status}`);
+          }
+        }
+      } catch (err) {
+        log.debug(`memory-superagent retrieval failed: ${err}`);
       }
     } catch (err) {
       log.debug(`Memory retrieval failed: ${err}`);

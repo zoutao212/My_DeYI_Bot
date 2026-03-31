@@ -48,7 +48,11 @@ export async function retrieveMemoryContext(
   if (!service) return "";
 
   try {
-    const result: MemoryRetrievalResult = await Promise.race([
+    // 🔥 双轨并行：同时使用本地系统和 memory-superagent
+    const results: string[] = [];
+    
+    // 通道 1：本地记忆系统
+    const localResult: MemoryRetrievalResult = await Promise.race([
       service.retrieve({
         query,
         context: { userId: "default", sessionId, agentId },
@@ -57,10 +61,56 @@ export async function retrieveMemoryContext(
         setTimeout(() => reject(new Error("memory retrieval timeout")), timeoutMs),
       ),
     ]);
-    if (result.formattedContext) {
-      log.debug(`Memory context retrieved: ${result.memories.length} items, ${result.durationMs}ms`);
+    if (localResult.formattedContext) {
+      results.push(localResult.formattedContext);
+      log.debug(`Local memory retrieved: ${localResult.memories.length} items, ${localResult.durationMs}ms`);
     }
-    return result.formattedContext ?? "";
+    
+    // 通道 2：memory-superagent（HyperNMCv4）- 使用 HTTP API 避免违反 rootDir
+    try {
+      const pluginConfig = (config as any).plugins?.["memory-superagent"] as any;
+      if (pluginConfig?.server?.baseUrl) {
+        const baseUrl = pluginConfig.server.baseUrl.replace(/\/+$/, "");
+        const params = new URLSearchParams({
+          query,
+          max_results: "5",
+          max_depth: "3",
+        });
+        if (agentId) params.append("agent_id", agentId);
+        if (sessionId) params.append("session_id", sessionId);
+        
+        const response = await Promise.race([
+          fetch(`${baseUrl}/v1/memory/retrieve?${params.toString()}`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(pluginConfig.server.apiKey ? { "X-API-Key": pluginConfig.server.apiKey } : {}),
+            },
+          }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("superagent timeout")), timeoutMs),
+          ),
+        ]);
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        
+        const superagentResult = await response.json() as any;
+        
+        if (superagentResult.results && superagentResult.results.length > 0) {
+          const formatted = superagentResult.results
+            .map((r: any) => `- [SuperAgentMemory] ${r.content.slice(0, 200)}${r.content.length > 200 ? "..." : ""}`)
+            .join("\n");
+          results.push(`## Memory-SuperAgent 检索结果\n${formatted}`);
+          log.debug(`memory-superagent retrieved: ${superagentResult.results.length} items`);
+        }
+      }
+    } catch (err) {
+      log.debug(`memory-superagent retrieval skipped: ${err}`);
+    }
+    
+    return results.join("\n\n");
   } catch (err) {
     log.debug(`Memory retrieval skipped: ${err}`);
     return "";
