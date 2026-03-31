@@ -25,6 +25,7 @@ import {
 import { createTools } from "./tools.js";
 import { findCapturableTexts } from "./capture.js";
 import { QueryExpander, type ExpandedQuery } from "./query-expander.js";
+import { QueryExpanderV2, decomposeQuery } from "./query-expander-v2.js";
 
 // ============================================================================
 // Plugin Definition
@@ -205,20 +206,25 @@ ${entityHint}${focusHint}
 
         try {
           // ========================================
-          // Step 1: Query Analysis & Expansion
+          // Step 1: Query Analysis & Expansion (V2)
           // ========================================
+          
+          // 使用 V2 版本进行智能查询拆分
+          const decomposition = decomposeQuery(event.prompt);
+          const searchQueries = decomposition.subQueries;
+          
+          // 也使用旧版本进行分析（用于获取查询焦点等信息）
           const analysis = queryExpander.analyze(event.prompt);
-          const searchQueries = queryExpander.getSearchQueries(event.prompt);
 
           if (activeRecallCfg?.debugStrategy) {
             api.logger.info?.(
-              `memory-superagent: query analysis - type=${analysis.queryType}, ` +
-                `entities=[${analysis.entities.join(", ")}], focus="${analysis.focus}", ` +
-                `strategy=${analysis.searchStrategy}`
+              `memory-superagent: query decomposition - strategy=${decomposition.strategy}, ` +
+                `confidence=${decomposition.confidence}, ` +
+                `subQueries=${searchQueries.length}`
             );
             api.logger.info?.(
-              `memory-superagent: expanded to ${searchQueries.length} queries: ` +
-                `[${searchQueries.slice(0, 5).map((q) => `"${q.text}"`).join(", ")}]`
+              `memory-superagent: expanded queries: ` +
+                `[${searchQueries.slice(0, 5).map((q) => `"${q.text}"(${q.weight})`).join(", ")}]`
             );
           }
 
