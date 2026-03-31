@@ -36,6 +36,14 @@ export function detectChatRoomIntent(
   characters: CharacterRecognitionConfig[],
   activeSession: boolean = false,
 ): ChatRoomDetectionResult {
+  // 🚫 聊天室功能已停用
+  // 直接返回不触发聊天室模式，所有消息都会走单角色路径
+  return {
+    isChatRoomMode: false,
+    participants: [],
+    triggerType: "single",
+  };
+
   const msg = userMessage.toLowerCase();
   const l10n = getDetectorL10n();
 

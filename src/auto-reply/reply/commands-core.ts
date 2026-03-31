@@ -34,6 +34,7 @@ import type {
   HandleCommandsParams,
 } from "./commands-types.js";
 import { clearSessionQueues, clearSessionQueuesByPrefix } from "./queue.js";
+import { setCurrentFollowupRunContext } from "../../agents/tools/enqueue-task-tool.js";
 
 const HANDLERS: CommandHandler[] = [
   // Plugin commands are processed first, before built-in commands
@@ -88,6 +89,12 @@ export async function handleCommands(params: HandleCommandsParams): Promise<Comm
     }
     clearSessionQueues([params.sessionKey, sessionId]);
     clearSessionQueuesByPrefix([params.sessionKey]);
+
+    // 🔧 P135: 清理全局 FollowupRun 上下文，防止新会话被上一轮对话污染
+    // 根因：currentFollowupRunContext 是全局变量，/new 后仍保留上一轮的 prompt
+    // 导致新会话的 followupContext?.prompt 包含上一轮的 message_id
+    setCurrentFollowupRunContext(null, "reset-command");
+    logVerbose(`[commands-core] P135: 已清理全局 FollowupRun 上下文 (${commandAction} command)`);
 
     // Send hook messages immediately if present
     if (hookEvent.messages.length > 0) {

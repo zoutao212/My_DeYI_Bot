@@ -529,7 +529,10 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
     // 默认：网络相关错误可重试
     if ("name" in error) {
       const errorName = String(error.name).toLowerCase();
-      if (errorName === "aborterror") return true;  // 超时导致的 abort
+      // 🔧 P134: AbortError 不应该自动重试
+      // 用户主动停止（/stop）不应该触发重试
+      // 只有内部超时（TIMEOUT_MS）才可能需要重试
+      // if (errorName === "aborterror") return true;  // ❌ 移除这行
       if (errorName === "typeerror") return true;   // 网络错误
     }
     
@@ -1783,42 +1786,57 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
         const errorMessage = (error as any).message || String(error);
         console.warn(`[llm-gated-fetch] 🆕 P133 重试日志: errorName=${errorName}, errorMsg=${errorMessage.substring(0, 100)}, retryCount=${retryCount}, forceNonStream=${forceNonStream}, streamFallbackAttempt=${streamFallbackAttempt}`);
 
-        // 🔧 P122: Grok 推理模型 stream 超时降级
-        if (errorName === "AbortError" && streamFallbackAttempt < MAX_STREAM_FALLBACK_ATTEMPTS) {
-          const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
-          const isGrokApi = url.includes("vectorengine") && url.includes("/v1/");
+        // 🔧 P134: 区分"用户主动停止"和"内部超时"
+        const isUserAbort = originalSignal?.aborted === true;
+        
+        if (errorName === "AbortError") {
+          if (isUserAbort) {
+            // 用户主动停止（/stop），不重试，直接抛出
+            console.warn(`[llm-gated-fetch] 🛑 P134: 用户主动停止请求，不重试`);
+            throw error;
+          }
+          
+          // 内部超时，检查是否需要降级重试
+          if (streamFallbackAttempt < MAX_STREAM_FALLBACK_ATTEMPTS) {
+            const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+            const isGrokApi = url.includes("vectorengine") && url.includes("/v1/");
 
-          // 🔧 P124: 使用 actualInit 而不是 init，保留所有修复
-          if (isGrokApi && actualInit?.body && typeof actualInit.body === "string") {
-            try {
-              const bodyJson = JSON.parse(actualInit.body);
-              const isReasoningModel = typeof bodyJson.model === "string" && bodyJson.model.includes("reasoning");
-              const hasStream = bodyJson.stream === true;
-              const hasTools = Array.isArray(bodyJson.tools) && bodyJson.tools.length > 0;
-              const hasToolResults = Array.isArray(bodyJson.messages) &&
-                bodyJson.messages.some((m: any) => m.role === "tool" || m.role === "toolResult");
-              const msgCount = bodyJson.messages?.length || 0;
+            // 🔧 P124: 使用 actualInit 而不是 init，保留所有修复
+            if (isGrokApi && actualInit?.body && typeof actualInit.body === "string") {
+              try {
+                const bodyJson = JSON.parse(actualInit.body);
+                const isReasoningModel = typeof bodyJson.model === "string" && bodyJson.model.includes("reasoning");
+                const hasStream = bodyJson.stream === true;
+                const hasTools = Array.isArray(bodyJson.tools) && bodyJson.tools.length > 0;
+                const hasToolResults = Array.isArray(bodyJson.messages) &&
+                  bodyJson.messages.some((m: any) => m.role === "tool" || m.role === "toolResult");
+                const msgCount = bodyJson.messages?.length || 0;
 
-              console.warn(`[llm-gated-fetch] 🆕 P133 P122分析: isReasoningModel=${isReasoningModel}, hasStream=${hasStream}, hasTools=${hasTools}, hasToolResults=${hasToolResults}, msgCount=${msgCount}`);
+                console.warn(`[llm-gated-fetch] 🆕 P133 P122分析: isReasoningModel=${isReasoningModel}, hasStream=${hasStream}, hasTools=${hasTools}, hasToolResults=${hasToolResults}, msgCount=${msgCount}`);
 
-              if (isReasoningModel && hasStream && hasTools && hasToolResults) {
-                streamFallbackAttempt++;
-                console.warn(`[llm-gated-fetch] 🚨 P122: 检测到 Grok 推理模型 stream + tool result 超时`);
-                console.warn(`[llm-gated-fetch] 🔄 P122: 自动降级为非 stream 模式重试 (${streamFallbackAttempt}/${MAX_STREAM_FALLBACK_ATTEMPTS})`);
+                if (isReasoningModel && hasStream && hasTools && hasToolResults) {
+                  streamFallbackAttempt++;
+                  console.warn(`[llm-gated-fetch] 🚨 P122: 检测到 Grok 推理模型 stream + tool result 超时`);
+                  console.warn(`[llm-gated-fetch] 🔄 P122: 自动降级为非 stream 模式重试 (${streamFallbackAttempt}/${MAX_STREAM_FALLBACK_ATTEMPTS})`);
 
-                // 清除失败计数，允许降级重试
-                attempts.delete(attemptKey);
+                  // 清除失败计数，允许降级重试
+                  attempts.delete(attemptKey);
 
-                // 🔧 P124: 关键修复！使用 actualInit 保留所有修复，并移除已 abort 的 signal
-                // 因为原始 signal 已经 abort，重试时必须创建新的 signal
-                const { signal: _, ...initWithoutSignal } = actualInit;
-                console.warn(`[llm-gated-fetch] 🔧 P124: 重试时移除已 abort 的 signal，使用 actualInit（保留消息修复）`);
-                return executeRequestWithRetry(attemptKey, input, initWithoutSignal, true);
+                  // 🔧 P124: 关键修复！使用 actualInit 保留所有修复，并移除已 abort 的 signal
+                  // 因为原始 signal 已经 abort，重试时必须创建新的 signal
+                  const { signal: _, ...initWithoutSignal } = actualInit;
+                  console.warn(`[llm-gated-fetch] 🔧 P124: 重试时移除已 abort 的 signal，使用 actualInit（保留消息修复）`);
+                  return executeRequestWithRetry(attemptKey, input, initWithoutSignal, true);
+                }
+              } catch {
+                // 解析失败，走正常重试流程
               }
-            } catch {
-              // 解析失败，走正常重试流程
             }
           }
+          
+          // 内部超时但没有触发降级条件，也不重试（因为 P134 已移除 AbortError 的自动重试）
+          console.warn(`[llm-gated-fetch] 🛑 P134: 内部超时，但不满足降级条件，不重试`);
+          throw error;
         }
       } else {
         console.warn(`[llm-gated-fetch] ⚠️ 可重试的错误，正在重试... retryCount=${retryCount}`);
@@ -1837,12 +1855,18 @@ export function installLlmFetchGate(params: { requestApproval: RequestLlmApprova
       // 因为 AbortSignal.any() 会立即返回 aborted signal 如果任一输入已 aborted
       const errorName = (error && typeof error === "object" && "name" in error) ? (error as Error).name : "";
       const isAbortError = errorName === "AbortError";
+      const isUserAbort = originalSignal?.aborted === true;  // 🔧 P134: 检查是否是用户主动停止
       
-      if (isAbortError && actualInit?.signal) {
-        console.warn(`[llm-gated-fetch] 🔧 P124: 普通重试路径 - 移除已 abort 的 signal`);
-        const { signal: _, ...initWithoutSignal } = actualInit;
-        await new Promise(resolve => setTimeout(resolve, retryDelay));
-        return executeRequestWithRetry(attemptKey, input, initWithoutSignal, forceNonStream);
+      // 🔧 P134: 用户主动停止不重试
+      if (isAbortError && isUserAbort) {
+        console.warn(`[llm-gated-fetch] 🛑 P134: 普通重试路径检测到用户主动停止，不重试`);
+        throw error;
+      }
+      
+      // 🔧 P134: 内部超时也不再重试（除非上面已经处理了降级重试）
+      if (isAbortError) {
+        console.warn(`[llm-gated-fetch] 🛑 P134: 普通重试路径检测到 AbortError，不重试`);
+        throw error;
       }
       
       await new Promise(resolve => setTimeout(resolve, retryDelay));
