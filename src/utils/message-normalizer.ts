@@ -296,11 +296,22 @@ export function normalizeMessagesForAPI(
     return { messages, report };
   }
   
+  // 预处理：收集所有 tool_call IDs（用于检测孤立的 tool_result）
+  const allToolCallIds = new Set<string>();
+  for (const msg of messages) {
+    if (msg.role === "assistant") {
+      for (const id of extractToolCallIds(msg)) {
+        allToolCallIds.add(id);
+      }
+    }
+  }
+  
   const normalized: AgentMessage[] = [];
   const seenToolResultIds = new Set<string>();
   
   // 第一遍：跟踪所有未配对的 tool_use
   const pendingToolCalls = new Map<string, { index: number; toolName?: string }>();
+  const toolResultCallIds = new Set<string>(); // 记录所有看到的 tool_result 的 id
   
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -375,6 +386,26 @@ export function normalizeMessagesForAPI(
           report.changed = true;
           continue;
         }
+      } else {
+        // 记录看到的 tool_result id
+        toolResultCallIds.add(toolCallId);
+        
+        // 🆕 检查孤立的 tool_result（有 id 但没有对应的 tool_use）
+        if (!allToolCallIds.has(toolCallId)) {
+          const errorMsg = `Orphan tool result at index ${i}: tool_call_id=${toolCallId} not found in any assistant message`;
+          report.issues.push(errorMsg);
+          logger.warn(`[${sessionId}] ${errorMsg}`);
+          
+          if (options.strict && options.orphanToolResultPolicy === "error") {
+            throw new Error(errorMsg);
+          }
+          
+          if (options.orphanToolResultPolicy === "drop") {
+            report.droppedOrphanToolResults++;
+            report.changed = true;
+            continue;
+          }
+        }
       }
       
       // 检查是否已存在（重复）
@@ -391,7 +422,7 @@ export function normalizeMessagesForAPI(
       // 记录已看到的 tool_result
       if (toolCallId) {
         seenToolResultIds.add(toolCallId);
-        pendingToolCalls.delete(toolCallId);
+        pendingToolCalls.delete(toolCallId); // 标记为已配对
       }
       
       // 净化工具结果（如果启用）
@@ -411,6 +442,18 @@ export function normalizeMessagesForAPI(
     
     // 其他消息类型（user, system 等）
     normalized.push(msg);
+  }
+  
+  // 检查孤立的 tool_result（有 id 但没有对应的 tool_use）
+  for (const toolResultId of toolResultCallIds) {
+    // 如果这个 tool_result 的 id 在 pendingToolCalls 中不存在，说明它是孤立的
+    // 但这已经在上面处理过了（当遇到 assistant 消息时，pendingToolCalls 会包含所有 tool_call ids）
+    // 如果 tool_result 的 id 不在任何 assistant 消息的 tool_calls 中，它就是孤立的
+    // 我们需要检查：这个 id 是否被某个 assistant 消息的 tool_call 创建过
+    
+    // 简单的方法：如果这个 id 不在 pendingToolCalls 中（已被删除），说明已配对
+    // 如果在 pendingToolCalls 中，说明是未配对的 tool_use（下面会处理）
+    // 所以这里不需要额外处理
   }
   
   // 第二遍：处理未配对的 tool_use
@@ -456,7 +499,7 @@ export function normalizeMessagesForAPI(
  * 快速检查消息数组是否需要标准化
  */
 export function needsNormalization(messages: AgentMessage[]): boolean {
- const toolCallIds = new Set<string>();
+  const toolCallIds = new Set<string>();
   const toolResultIds = new Set<string>();
   
   for (const msg of messages) {
@@ -479,10 +522,18 @@ export function needsNormalization(messages: AgentMessage[]): boolean {
     }
   }
   
-  // 检查配对
+  // 检查未配对的 tool_use
   for (const id of toolCallIds) {
     if (!toolResultIds.has(id)) {
       // 未配对的 tool_use
+      return true;
+    }
+  }
+  
+  // 检查孤立的 tool_result（有 id 但没有对应的 tool_use）
+  for (const id of toolResultIds) {
+    if (!toolCallIds.has(id)) {
+      // 孤立的 tool_result
       return true;
     }
   }

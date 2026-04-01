@@ -29,12 +29,15 @@ function createAssistantMessage(toolCalls: Array<{ id: string; name?: string }>)
 }
 
 function createToolResultMessage(toolCallId: string, content: string = "result"): AgentMessage {
+  // 使用 pi-ai 原生格式 (role: "toolResult")
   return {
-    role: "tool",
-    tool_call_id: toolCallId,
-    content,
+    role: "toolResult",
+    toolCallId: toolCallId,
+    toolName: "test_tool",
+    content: [{ type: "text", text: content }],
+    isError: false,
     timestamp: Date.now(),
-  } as any;
+  } as Extract<AgentMessage, { role: "toolResult" }>;
 }
 
 function createUserMessage(text: string): AgentMessage {
@@ -77,7 +80,7 @@ describe("normalizeMessagesForAPI", () => {
       });
 
       expect(result.messages.length).toBe(3); // user + assistant + fake_tool_result
-      expect(result.messages[2].role).toBe("tool");
+      expect(result.messages[2].role).toBe("toolResult"); // 使用 pi-ai 原生格式
       expect(result.report.addedFakeToolResults).toBe(1);
       expect(result.report.changed).toBe(true);
     });
