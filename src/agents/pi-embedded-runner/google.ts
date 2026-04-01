@@ -6,6 +6,7 @@ import type { TSchema } from "@sinclair/typebox";
 import type { SessionManager } from "@mariozechner/pi-coding-agent";
 
 import { registerUnhandledRejectionHandler } from "../../infra/unhandled-rejections.js";
+import { normalizeMessagesForAPI } from "../../utils/message-normalizer.js";
 import {
   downgradeOpenAIReasoningBlocks,
   isCompactionFailureError,
@@ -1058,5 +1059,36 @@ export async function sanitizeSessionHistory(params: {
   }, {} as Record<string, number>);
   log.info(`[sanitize] 🔍 Messages returned: ${finalMessages.length} (${Object.entries(finalRoleCounts).map(([r, c]) => `${r}:${c}`).join(", ")})`);
   
-  return finalMessages;
+  // 🛡️ 最终防线：Claude Code 风格的消息标准化
+  // 这是 API 调用前的最后一道防线，确保消息格式绝对正确
+  const normalizeResult = normalizeMessagesForAPI(finalMessages, {
+    strict: false, // 宽容模式：只记录问题，不抛出错误
+    sanitizeToolArgs: true, // 净化工具参数
+    sanitizeToolResults: true, // 净化工具结果
+    orphanToolResultPolicy: "drop", // 丢弃孤立的 tool_result
+    unpairedToolUsePolicy: "add_fake_result", // 为未配对的 tool_use 添加假结果
+    logger: log,
+    sessionId: params.sessionId,
+  });
+  
+  if (normalizeResult.report.changed) {
+    log.info(
+      `[sanitize] 🛡️ Final normalization applied: ` +
+      `dropped=${normalizeResult.report.droppedOrphanToolResults + normalizeResult.report.droppedDuplicateToolResults}, ` +
+      `added=${normalizeResult.report.addedFakeToolResults}, ` +
+      `sanitized=${normalizeResult.report.sanitizedToolArgs + normalizeResult.report.sanitizedToolResults}`
+    );
+    
+    if (normalizeResult.report.issues.length > 0) {
+      log.warn(`[sanitize] 🛡️ Normalization issues: ${normalizeResult.report.issues.length}`);
+      for (const issue of normalizeResult.report.issues.slice(0, 5)) { // 只显示前 5 个问题
+        log.warn(`[sanitize]   - ${issue}`);
+      }
+      if (normalizeResult.report.issues.length > 5) {
+        log.warn(`[sanitize]   ... and ${normalizeResult.report.issues.length - 5} more issues`);
+      }
+    }
+  }
+  
+  return normalizeResult.messages;
 }
