@@ -39,8 +39,10 @@ const L10N_MAP: Record<SupportedLanguage, typeof FUSION_ENGINE_ZH> = {
  * 融合请求参数
  */
 export interface FusionRequest {
-  /** SOUL ID */
-  soulId: string;
+  /** 角色 ID */
+  characterId: string;
+  /** SOUL ID（可选，默认与角色 ID 相同） */
+  soulId?: string;
   /** 用户消息 */
   userMessage: string;
   /** 对话历史 */
@@ -97,6 +99,7 @@ export class FusionEngine {
    */
   async fuse(request: FusionRequest): Promise<FusionResult> {
     const {
+      characterId,
       soulId,
       userMessage,
       conversationHistory = [],
@@ -109,43 +112,49 @@ export class FusionEngine {
     const originalLanguage = this.language;
     this.language = language;
 
-    // 1. 加载 SOUL 定义
-    const soul = await this.soulProvider.load(soulId) || DEFAULT_SOUL;
+    // 1. 加载 SOUL 定义（从角色专用目录）
+    const soul = await this.soulProvider.load(characterId, soulId) || DEFAULT_SOUL;
 
-    // 2. 检测 CONTEXT
-    let context: ContextDefinition | null = null;
+    // 2. 检测 CONTEXT（通用 + 角色特有）
+    let context: FusionComponent<ContextDefinition> | null = null;
     if (enableContextDetection) {
-      const contextResult = await this.contextDetector.detect(userMessage, conversationHistory);
+      const contextResult = await this.contextDetector.detect(characterId, userMessage, conversationHistory);
       context = contextResult.context;
 
       // 如果没有找到自定义 CONTEXT，尝试使用内置的
       if (!context) {
-        context = this.findBuiltinContext(userMessage);
+        const builtinContext = this.findBuiltinContext(userMessage);
+        if (builtinContext) {
+          context = { generic: builtinContext, character: null };
+        }
       }
     }
 
-    // 3. 识别 PHASE
-    let phase: PhaseDefinition | null = null;
+    // 3. 识别 PHASE（通用 + 角色特有）
+    let phase: FusionComponent<PhaseDefinition> | null = null;
     if (enablePhaseDetection) {
-      const phaseResult = await this.phaseDetector.detect(userMessage, conversationHistory);
+      const phaseResult = await this.phaseDetector.detect(characterId, userMessage, conversationHistory);
       phase = phaseResult.phase;
 
       // 如果没有找到自定义 PHASE，尝试使用内置的
       if (!phase) {
-        phase = this.findBuiltinPhase(userMessage, conversationHistory);
+        const builtinPhase = this.findBuiltinPhase(userMessage, conversationHistory);
+        if (builtinPhase) {
+          phase = { generic: builtinPhase, character: null };
+        }
       }
     }
 
     // 4. 生成融合 prompt
-    const { fusedPrompt, reasoning } = this.compose(soul, context, phase, userMessage);
+    const { fusedPrompt, reasoning } = this.compose(soul, context, phase);
 
     // 恢复原始语言
     this.language = originalLanguage;
 
     return {
       soul,
-      context,
-      phase,
+      context: context?.generic || context?.character || null,
+      phase: phase?.generic || phase?.character || null,
       fusedPrompt,
       reasoning,
     };
@@ -196,9 +205,8 @@ export class FusionEngine {
    */
   private compose(
     soul: SoulDefinition,
-    context: ContextDefinition | null,
-    phase: PhaseDefinition | null,
-    originalMessage?: string,
+    context: FusionComponent<ContextDefinition> | null,
+    phase: FusionComponent<PhaseDefinition> | null,
   ): { fusedPrompt: string; reasoning: string } {
     const l10n = this.getL10n();
     const parts: string[] = [];
@@ -211,13 +219,19 @@ export class FusionEngine {
     // === 第二部分：CONTEXT（工作环境）===
     if (context) {
       parts.push(this.composeContextSection(context, l10n));
-      reasoningParts.push(`检测到 CONTEXT: ${context.name}`);
+      const contextNames = [];
+      if (context.generic) contextNames.push(`${context.generic.name}(通用)`);
+      if (context.character) contextNames.push(`${context.character.name}(角色特有)`);
+      reasoningParts.push(`检测到 CONTEXT: ${contextNames.join(" + ")}`);
     }
 
     // === 第三部分：PHASE（任务阶段）===
     if (phase) {
       parts.push(this.composePhaseSection(phase, l10n));
-      reasoningParts.push(`识别到 PHASE: ${phase.name}`);
+      const phaseNames = [];
+      if (phase.generic) phaseNames.push(`${phase.generic.name}(通用)`);
+      if (phase.character) phaseNames.push(`${phase.character.name}(角色特有)`);
+      reasoningParts.push(`识别到 PHASE: ${phaseNames.join(" + ")}`);
     }
 
     // === 融合指令 ===
@@ -272,26 +286,37 @@ export class FusionEngine {
   }
 
   /**
-   * 组合 CONTEXT 部分（使用国际化模板）
+   * 组合 CONTEXT 部分（使用国际化模板，支持通用 + 角色特有融合）
    */
-  private composeContextSection(context: ContextDefinition, l10n: typeof FUSION_ENGINE_ZH): string {
+  private composeContextSection(context: FusionComponent<ContextDefinition>, l10n: typeof FUSION_ENGINE_ZH): string {
     const lines: string[] = [];
 
+    // 合并通用 + 角色特有定义
+    const mergedContext = this.mergeContext(context);
+
     // 工作模式标题
-    lines.push(fillTemplate(l10n.contextModeTitle, { name: context.name }));
+    lines.push(fillTemplate(l10n.contextModeTitle, { name: mergedContext.name }));
     lines.push("");
 
-    // 角色视角
+    // 角色视角（优先使用角色特有）
+    const rolePerspective = context.character?.role_perspective || context.generic?.role_perspective || "";
+    const description = mergedContext.description;
+
     lines.push(fillTemplateArray(l10n.contextRolePerspective, {
-      addressSelf: context.role_perspective ? "" : DEFAULT_SOUL.address_self || DEFAULT_SOUL.name,
-      description: context.role_perspective || context.description,
+      addressSelf: rolePerspective ? "" : DEFAULT_SOUL.address_self || DEFAULT_SOUL.name,
+      description: rolePerspective || description,
     }));
 
-    // 行为准则
-    if (context.behavior_patterns && context.behavior_patterns.length > 0) {
+    // 行为准则（合并通用 + 角色）
+    const allPatterns = [
+      ...(context.generic?.behavior_patterns || []),
+      ...(context.character?.behavior_patterns || []),
+    ];
+
+    if (allPatterns.length > 0) {
       lines.push("");
       lines.push(l10n.contextBehaviorLabel);
-      for (const pattern of context.behavior_patterns) {
+      for (const pattern of allPatterns) {
         lines.push(`- ${pattern}`);
       }
     }
@@ -300,37 +325,95 @@ export class FusionEngine {
   }
 
   /**
-   * 组合 PHASE 部分（使用国际化模板）
+   * 合并 CONTEXT 定义（通用 + 角色）
    */
-  private composePhaseSection(phase: PhaseDefinition, l10n: typeof FUSION_ENGINE_ZH): string {
+  private mergeContext(context: FusionComponent<ContextDefinition>): ContextDefinition {
+    const generic = context.generic;
+    const character = context.character;
+
+    return {
+      id: character?.id || generic?.id || "unknown",
+      name: character?.name || generic?.name || "未知工作",
+      trigger_keywords: [...new Set([
+        ...(generic?.trigger_keywords || []),
+        ...(character?.trigger_keywords || []),
+      ])],
+      description: character?.description || generic?.description || "",
+      role_perspective: character?.role_perspective || generic?.role_perspective || "",
+      behavior_patterns: [
+        ...(generic?.behavior_patterns || []),
+        ...(character?.behavior_patterns || []),
+      ],
+    };
+  }
+
+  /**
+   * 组合 PHASE 部分（使用国际化模板，支持通用 + 角色特有融合）
+   */
+  private composePhaseSection(phase: FusionComponent<PhaseDefinition>, l10n: typeof FUSION_ENGINE_ZH): string {
     const lines: string[] = [];
 
+    // 合并通用 + 角色特有定义
+    const mergedPhase = this.mergePhase(phase);
+
     // 阶段标题
-    lines.push(fillTemplate(l10n.phaseStageTitle, { name: phase.name }));
+    lines.push(fillTemplate(l10n.phaseStageTitle, { name: mergedPhase.name }));
     lines.push("");
 
-    // 情感基调
+    // 情感基调（优先使用角色特有）
+    const emotionalTone = phase.character?.emotional_tone || phase.generic?.emotional_tone || "";
+
     lines.push(fillTemplate(l10n.phaseEmotionalTone, {
       addressSelf: DEFAULT_SOUL.address_self || DEFAULT_SOUL.name,
-      emotionalTone: phase.emotional_tone || phase.description,
+      emotionalTone: emotionalTone || mergedPhase.description,
     }));
 
-    // 行动指引
-    if (phase.action_patterns && phase.action_patterns.length > 0) {
+    // 行动指引（合并通用 + 角色）
+    const allPatterns = [
+      ...(phase.generic?.action_patterns || []),
+      ...(phase.character?.action_patterns || []),
+    ];
+
+    if (allPatterns.length > 0) {
       lines.push("");
       lines.push(l10n.phaseActionIntro);
-      for (const pattern of phase.action_patterns) {
+      for (const pattern of allPatterns) {
         lines.push(`- ${pattern}`);
       }
     }
 
-    // 成功标准
-    if (phase.success_criteria) {
+    // 成功标准（优先使用角色特有）
+    const successCriteria = phase.character?.success_criteria || phase.generic?.success_criteria;
+    if (successCriteria) {
       lines.push("");
-      lines.push(`${l10n.phaseSuccessLabel}${phase.success_criteria}`);
+      lines.push(`${l10n.phaseSuccessLabel}${successCriteria}`);
     }
 
     return lines.join("\n");
+  }
+
+  /**
+   * 合并 PHASE 定义（通用 + 角色）
+   */
+  private mergePhase(phase: FusionComponent<PhaseDefinition>): PhaseDefinition {
+    const generic = phase.generic;
+    const character = phase.character;
+
+    return {
+      id: character?.id || generic?.id || "unknown",
+      name: character?.name || generic?.name || "未知阶段",
+      trigger_keywords: [...new Set([
+        ...(generic?.trigger_keywords || []),
+        ...(character?.trigger_keywords || []),
+      ])],
+      description: character?.description || generic?.description || "",
+      emotional_tone: character?.emotional_tone || generic?.emotional_tone || "",
+      action_patterns: [
+        ...(generic?.action_patterns || []),
+        ...(character?.action_patterns || []),
+      ],
+      success_criteria: character?.success_criteria || generic?.success_criteria,
+    };
   }
 
   /**

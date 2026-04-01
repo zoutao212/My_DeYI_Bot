@@ -76,6 +76,7 @@ export async function onBeforeAgentStart(
 
     // 执行三维融合
     const fusionResult = await fusionEngine.fuse({
+      characterId: pluginConfig.defaultCharacter,
       soulId: pluginConfig.defaultSoul,
       userMessage,
       conversationHistory: event.messages || [],
@@ -143,6 +144,7 @@ export async function onAfterPromptBuild(
 
     // 执行三维融合
     const fusionResult = await fusionEngine.fuse({
+      characterId: pluginConfig.defaultCharacter,
       soulId: pluginConfig.defaultSoul,
       userMessage,
       conversationHistory: event.messages || [],
