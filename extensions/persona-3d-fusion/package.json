@@ -1,0 +1,41 @@
+{
+  "name": "persona-3d-fusion",
+  "version": "1.0.0",
+  "description": "三维动态人格融合系统 - SOUL×CONTEXT×PHASE 动态 prompt 生成",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "clean": "rimraf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "persona",
+    "3d-persona",
+    "soul",
+    "context",
+    "phase",
+    "dynamic-prompt",
+    "clawdbot-plugin"
+  ],
+  "author": "德姨",
+  "license": "MIT",
+  "peerDependencies": {
+    "clawdbot": ">=1.0.0"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "rimraf": "^5.0.0",
+    "typescript": "^5.3.0"
+  }
+}
