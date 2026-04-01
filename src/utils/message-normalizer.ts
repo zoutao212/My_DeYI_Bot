@@ -113,20 +113,27 @@ function extractToolCallIds(msg: AgentMessage): Set<string> {
 
 /**
  * 从 tool_result 消息中提取 tool_call_id
+ * 支持 "toolResult" (pi-ai) 和 "tool" (OpenAI 格式) 两种 role
  */
 function extractToolResultId(msg: AgentMessage): string | null {
-  if (msg.role !== "toolResult" && msg.role !== "tool") return null;
+  // 原始 pi-ai 格式
+  if (msg.role === "toolResult") {
+    const toolResult = msg as Extract<AgentMessage, { role: "toolResult" }>;
+    return toolResult.toolCallId || null;
+  }
   
-  const msgAny = msg as any;
+  // 检查是否已被转换为 OpenAI 格式 (role: "tool")
+  const msgAny= msg as any;
+  if (msgAny.role === "tool") {
+    const id =
+      msgAny.tool_call_id ||
+      msgAny.toolCallId ||
+      msgAny.toolUseId ||
+      msgAny.tool_use_id;
+    return typeof id === "string" && id ? id : null;
+  }
   
-  // 尝试多种可能的字段名
-  const id =
-    msgAny.tool_call_id ||
-    msgAny.toolCallId ||
-    msgAny.toolUseId ||
-    msgAny.tool_use_id;
-  
-  return typeof id === "string" && id ? id : null;
+  return null;
 }
 
 /**
@@ -240,16 +247,25 @@ function sanitizeToolResultContent(content: unknown): { sanitized: unknown; chan
  * 创建假的 tool_result（用于未配对的 tool_use）
  */
 function createFakeToolResult(toolCallId: string, toolName?: string): AgentMessage {
+  // 使用 "toolResult" role (pi-ai 原生格式)
+  // google.ts 会负责将其转换为 OpenAI 格式的 "tool"
   const msg: AgentMessage = {
-    role: "tool",
-    tool_call_id: toolCallId,
-    content: JSON.stringify({
-      error: "Tool result missing from session history",
-      tool: toolName || "unknown",
-      note: "This is a synthetic result inserted by message normalizer"
-    }),
+    role: "toolResult",
+    toolCallId: toolCallId,
+    toolName: toolName || "unknown",
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({
+          error: "Tool result missing from session history",
+          tool: toolName || "unknown",
+          note: "This is a synthetic result inserted by message normalizer"
+        })
+      }
+    ],
+    isError: true,
     timestamp: Date.now(),
-  } as any;
+  } as Extract<AgentMessage, { role: "toolResult" }>;
   
   return msg;
 }
@@ -339,7 +355,8 @@ export function normalizeMessagesForAPI(
     }
     
     // 处理 tool_result 消息
-    if (msg.role === "toolResult" || msg.role === "tool") {
+    // 支持 "toolResult" (pi-ai) 和 "tool" (OpenAI 格式) 两种 role
+    if (msg.role === "toolResult" || (msg as any).role === "tool") {
       const toolCallId = extractToolResultId(msg);
       
       // 没有有效的 tool_call_id
@@ -447,7 +464,7 @@ export function needsNormalization(messages: AgentMessage[]): boolean {
       for (const id of extractToolCallIds(msg)) {
         toolCallIds.add(id);
       }
-    } else if (msg.role === "toolResult" || msg.role === "tool") {
+    } else if (msg.role === "toolResult" || (msg as any).role === "tool") {
       const id = extractToolResultId(msg);
       if (id) {
         if (toolResultIds.has(id)) {
