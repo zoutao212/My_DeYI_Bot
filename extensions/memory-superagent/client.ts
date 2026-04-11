@@ -417,12 +417,11 @@ export class SuperMemoryClient {
     return this.request<StoreResponse>("POST", "/v1/memory/store", req);
   }
 
-  /** Retrieve memories using ripple search */
+  /** Retrieve memories using ripple search (now uses enhanced_retrieve by default) */
   async retrieve(req: RetrieveRequest): Promise<RetrieveResponse> {
     // Build query params (FastAPI expects Query parameters, not JSON body)
     const params = new URLSearchParams();
     params.append("query", req.query);
-    params.append("use_new_system", "true");  // 👈 启用 HyperNMCv4 最强检索
     if (req.agent_id) params.append("agent_id", req.agent_id);
     if (req.session_id) params.append("session_id", req.session_id);
     if (req.max_results) params.append("max_results", String(req.max_results));
@@ -436,7 +435,13 @@ export class SuperMemoryClient {
       params.append("session_branch_path", req.session_branch_path.join(","));
     }
 
-    return this.request<RetrieveResponse>("POST", `/v1/memory/retrieve?${params.toString()}`);
+    // Default enhanced features
+    params.append("use_fast_path", "true");
+    params.append("use_intelligent_ranking", "true");
+    params.append("use_quality_scoring", "true");
+    params.append("use_summarization", "true");
+
+    return this.request<RetrieveResponse>("POST", `/v1/memory/enhanced_retrieve?${params.toString()}`);
   }
 
   /** Get a single memory atom by ID */
